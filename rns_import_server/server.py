@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -27,7 +28,38 @@ ASSETS = {
     "/help": ("help.html", "text/html; charset=utf-8"),
     "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/logo.png": ("logo.png", "image/png"),
+    "/favicon.png": ("logo.png", "image/png"),
 }
+PICKER_LOCK = threading.Lock()
+
+
+def select_path(kind: str) -> str | None:
+    """Open a native picker without running Tk on an HTTP worker thread."""
+    if kind not in {"directory", "xlsx"}:
+        raise ValueError("Неизвестный тип окна выбора")
+    if not PICKER_LOCK.acquire(blocking=False):
+        raise BusyError("Окно выбора уже открыто")
+    try:
+        try:
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name("picker.py")), kind],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Время выбора пути истекло") from error
+        if result.returncode:
+            detail = result.stderr.strip()
+            if "tkinter_unavailable" in detail:
+                raise RuntimeError("Системное окно недоступно: установите Tkinter")
+            raise RuntimeError(detail or "Не удалось открыть системное окно")
+        selected = result.stdout.strip()
+        return selected or None
+    finally:
+        PICKER_LOCK.release()
 
 
 def _tool_status() -> dict[str, object]:
@@ -233,6 +265,9 @@ def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
                 if path == "/api/jobs":
                     job = manager.start(str(payload.get("pdf_dir", "")), str(payload.get("xlsx", "")), int(payload.get("dpi", 180)))
                     self.send_json(202, job)
+                elif path == "/api/picker":
+                    selected = select_path(str(payload.get("kind", "")))
+                    self.send_json(200, {"path": selected, "cancelled": selected is None})
                 elif path == "/process":
                     for key in ("pdf_dir", "xlsx", "output"):
                         if key not in payload:

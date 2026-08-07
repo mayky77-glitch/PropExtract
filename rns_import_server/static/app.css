@@ -69,13 +69,16 @@ button, input, select { font: inherit; }
 
 .brand { display: inline-flex; align-items: center; gap: 12px; width: fit-content; text-decoration: none; font-weight: 700; letter-spacing: -.02em; }
 .brand small { display: block; margin-top: 2px; color: var(--muted); font: 500 11px/1.2 "Trebuchet MS", sans-serif; letter-spacing: .07em; text-transform: uppercase; }
-.brand-mark { width: 38px; height: 38px; display: grid; place-items: center; color: var(--paper); background: var(--lake-strong); border-radius: 9px 3px 9px 3px; font: 800 14px/1 "Trebuchet MS", sans-serif; letter-spacing: -.1em; }
-.brand-mark span { color: color-mix(in srgb, var(--signal) 65%, white); }
+.brand-mark { width: 48px; height: 48px; object-fit: contain; filter: drop-shadow(0 5px 12px rgba(14, 85, 92, .14)); }
 nav { display: flex; align-items: center; gap: 28px; }
 .nav-link { padding: 33px 0 28px; border-bottom: 3px solid transparent; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 650; }
 .nav-link:hover, .nav-link.active { color: var(--ink); border-bottom-color: var(--lake); }
-.theme-control { justify-self: end; }
-.theme-control select { padding: 9px 30px 9px 11px; color: var(--muted); background: var(--paper); border: 1px solid var(--line); border-radius: 9px; cursor: pointer; }
+.theme-control { justify-self: end; display: flex; padding: 3px; gap: 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 11px; }
+.theme-button { width: 38px; height: 34px; display: grid; place-items: center; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 8px; cursor: pointer; }
+.theme-button:hover { color: var(--ink); background: var(--soft); }
+.theme-button[aria-pressed="true"] { color: var(--lake-strong); background: var(--soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lake) 20%, transparent); }
+.theme-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.theme-button .spark { fill: currentColor; stroke-width: .7; }
 
 .shell { width: min(1160px, calc(100% - 48px)); margin: 0 auto; padding: 88px 0 54px; }
 .intro { display: grid; grid-template-columns: minmax(300px, 1.15fr) minmax(280px, .85fr); column-gap: 80px; align-items: end; margin-bottom: 56px; }
@@ -89,9 +92,15 @@ h1 { grid-row: span 2; margin: 0; font-family: "Aptos Display", "Segoe UI Variab
 .import-form { padding: 48px; }
 .field + .field { margin-top: 30px; }
 .field label { display: block; margin-bottom: 9px; font-weight: 700; font-size: 14px; }
-.field input { width: 100%; height: 52px; padding: 0 15px; color: var(--ink); background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; outline: none; transition: border-color .18s, box-shadow .18s; }
+.path-control { display: flex; align-items: stretch; }
+.field input { width: 100%; min-width: 0; height: 52px; padding: 0 15px; color: var(--ink); background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; outline: none; transition: border-color .18s, box-shadow .18s; }
+.path-control input { border-radius: 10px 0 0 10px; }
 .field input::placeholder { color: color-mix(in srgb, var(--muted) 72%, transparent); }
 .field input:focus { border-color: var(--lake); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lake) 18%, transparent); }
+.picker-button { flex: 0 0 auto; min-width: 114px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; color: var(--paper); background: var(--ink); border: 1px solid var(--ink); border-radius: 0 10px 10px 0; font-size: 12px; font-weight: 700; cursor: pointer; }
+.picker-button:hover { background: var(--lake-strong); border-color: var(--lake-strong); }
+.picker-button:disabled { opacity: .6; cursor: wait; }
+.picker-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .field small { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .system-state { display: flex; align-items: center; gap: 9px; margin: 32px 0 18px; color: var(--muted); font-size: 13px; }
 .status-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
@@ -155,6 +164,7 @@ h1 { grid-row: span 2; margin: 0; font-family: "Aptos Display", "Segoe UI Variab
 footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 27px 0 36px; display: flex; justify-content: space-between; gap: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 footer a { color: var(--lake); font-weight: 700; text-decoration: none; }
 code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size: .9em; }
+.toast { position: fixed; z-index: 20; right: 24px; bottom: 24px; max-width: min(390px, calc(100% - 32px)); padding: 13px 16px; color: var(--paper); background: var(--ink); border-radius: 10px; box-shadow: var(--shadow); font-size: 13px; line-height: 1.45; }
 
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
@@ -178,12 +188,13 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
 
 @media (max-width: 540px) {
   .brand small { display: none; }
-  .theme-control select { max-width: 128px; }
   .topbar nav { justify-content: space-between; }
   .shell { padding-top: 42px; }
   h1 { font-size: 46px; }
   .intro { margin-bottom: 38px; }
   .import-form, .progress-panel { padding: 30px 24px; }
+  .picker-button { min-width: 52px; padding: 0 14px; }
+  .picker-button span { display: none; }
   .guide-grid, .explain-grid { grid-template-columns: 1fr; }
   .guide-grid article { min-height: 0; border-right: 0; border-bottom: 1px solid var(--line) !important; }
   .guide-grid article:last-child { border-bottom: 0 !important; }

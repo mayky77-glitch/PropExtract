@@ -18,10 +18,13 @@ with sync_playwright() as playwright:
     page.wait_for_load_state("networkidle")
     assert page.locator("h1", has_text="Обновите реестр").is_visible()
     assert page.get_by_role("button", name="Перенести данные").is_visible()
+    assert page.get_by_role("button", name="Выбрать", exact=True).count() == 2
+    assert page.locator(".brand-mark").evaluate("image => image.complete && image.naturalWidth > 0")
     page.screenshot(path=SCREENSHOTS / "desktop-light.png", full_page=True)
 
-    page.locator("#theme-select").select_option("dark")
+    page.get_by_role("button", name="Тёмная тема").click()
     assert page.locator("html").get_attribute("data-theme") == "dark"
+    assert page.get_by_role("button", name="Тёмная тема").get_attribute("aria-pressed") == "true"
     page.screenshot(path=SCREENSHOTS / "desktop-dark.png", full_page=True)
 
     page.get_by_label("Папка с PDF").fill("/path/that/does/not/exist")

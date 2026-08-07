@@ -5,27 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Инструкция — PropExtract</title>
+  <link rel="icon" href="/favicon.png" type="image/png">
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/" aria-label="PropExtract, главная">
-      <span class="brand-mark" aria-hidden="true">P<span>E</span></span>
+      <img class="brand-mark" src="/assets/logo.png" alt="">
       <span>PropExtract<small>Локальный импорт РнС</small></span>
     </a>
     <nav aria-label="Основная навигация">
       <a class="nav-link" href="/">Перенос данных</a>
       <a class="nav-link active" href="/help">Инструкция</a>
     </nav>
-    <label class="theme-control">
-      <span class="sr-only">Тема оформления</span>
-      <select id="theme-select" aria-label="Тема оформления">
-        <option value="auto">Авто</option>
-        <option value="light">Светлая</option>
-        <option value="dark">Тёмная</option>
-      </select>
-    </label>
+    <div class="theme-control" role="group" aria-label="Тема оформления">
+      <button class="theme-button" type="button" data-theme-choice="light" aria-label="Светлая тема" title="Светлая тема">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>
+      </button>
+      <button class="theme-button" type="button" data-theme-choice="dark" aria-label="Тёмная тема" title="Тёмная тема">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.3A8.5 8.5 0 0 1 8.7 3.8 8.5 8.5 0 1 0 20.2 15.3Z"></path><path class="spark" d="m17.5 3 .45 1.05L19 4.5l-1.05.45L17.5 6l-.45-1.05L16 4.5l1.05-.45L17.5 3Z"></path></svg>
+      </button>
+    </div>
   </header>
 
   <main class="shell help-shell">
@@ -38,7 +39,7 @@
     <section class="guide-grid" aria-label="Порядок работы">
       <article><span>01</span><h2>Подготовьте PDF</h2><p>Сложите разрешения в одну папку. Вложенные папки допустимы. Исходные PDF не изменяются.</p></article>
       <article><span>02</span><h2>Закройте Excel</h2><p>Выберите рабочий <code>.xlsx</code>. Если он открыт в Excel, Windows может запретить замену файла.</p></article>
-      <article><span>03</span><h2>Укажите пути</h2><p>Скопируйте полный путь к папке PDF и полный путь к реестру в поля на главной странице.</p></article>
+      <article><span>03</span><h2>Выберите файлы</h2><p>Нажмите «Выбрать» рядом с каждым полем: откроется обычное системное окно для папки PDF и файла Excel.</p></article>
       <article><span>04</span><h2>Запустите перенос</h2><p>Не закрывайте окно сервера до отметки «Готово». Прогресс и имя текущего PDF видны на экране.</p></article>
     </section>
 

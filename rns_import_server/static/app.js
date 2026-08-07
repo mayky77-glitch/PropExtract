@@ -2,16 +2,25 @@
   "use strict";
 
   const root = document.documentElement;
-  const themeSelect = document.querySelector("#theme-select");
-  const savedTheme = localStorage.getItem("propextract-theme") || "auto";
+  const themeButtons = [...document.querySelectorAll("[data-theme-choice]")];
+  const preferredTheme = window.matchMedia("(prefers-color-scheme: dark)");
+  let savedTheme = localStorage.getItem("propextract-theme") || "auto";
+  if (!["auto", "light", "dark"].includes(savedTheme)) savedTheme = "auto";
   root.dataset.theme = savedTheme;
-  if (themeSelect) {
-    themeSelect.value = savedTheme;
-    themeSelect.addEventListener("change", () => {
-      root.dataset.theme = themeSelect.value;
-      localStorage.setItem("propextract-theme", themeSelect.value);
+  const syncThemeButtons = () => {
+    const visibleTheme = savedTheme === "auto" ? (preferredTheme.matches ? "dark" : "light") : savedTheme;
+    themeButtons.forEach(button => button.setAttribute("aria-pressed", String(button.dataset.themeChoice === visibleTheme)));
+  };
+  syncThemeButtons();
+  preferredTheme.addEventListener("change", syncThemeButtons);
+  themeButtons.forEach(button => {
+    button.addEventListener("click", () => {
+      savedTheme = button.dataset.themeChoice;
+      root.dataset.theme = savedTheme;
+      localStorage.setItem("propextract-theme", savedTheme);
+      syncThemeButtons();
     });
-  }
+  });
 
   const form = document.querySelector("#import-form");
   if (!form) return;
@@ -29,10 +38,43 @@
   const resultBadge = document.querySelector("#result-badge");
   const resultStats = document.querySelector("#result-stats");
   const resultPaths = document.querySelector("#result-paths");
+  const toast = document.querySelector("#toast");
   const rulerSteps = [...document.querySelectorAll(".process-ruler li")];
   let pollTimer = null;
+  let toastTimer = null;
 
   const escapeText = (value) => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[char]);
+
+  function showToast(message) {
+    window.clearTimeout(toastTimer);
+    toast.textContent = message;
+    toast.hidden = false;
+    toastTimer = window.setTimeout(() => { toast.hidden = true; }, 3500);
+  }
+
+  document.querySelectorAll("[data-picker-kind]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const target = document.querySelector(`#${button.dataset.pickerTarget}`);
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/picker", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({kind: button.dataset.pickerKind})
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Не удалось открыть окно выбора");
+        if (payload.path) {
+          target.value = payload.path;
+          target.focus();
+        }
+      } catch (error) {
+        showToast(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
 
   function setProgress(job) {
     const value = Number(job.progress || 0);

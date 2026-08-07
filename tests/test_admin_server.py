@@ -85,6 +85,17 @@ def _get(url: str) -> tuple[int, str, dict[str, str]]:
         return response.status, response.read().decode("utf-8"), dict(response.headers)
 
 
+def _post(url: str, payload: dict) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return response.status, json.loads(response.read().decode("utf-8"))
+
+
 def test_http_serves_admin_help_health_and_security_headers():
     port = _unused_port()
     server = create_server("127.0.0.1", port, _fake_runner)
@@ -124,6 +135,26 @@ def test_invalid_job_request_is_rejected():
         except urllib.error.HTTPError as error:
             assert error.code == 400
             assert "PDF" in error.read().decode("utf-8")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_native_picker_endpoint_returns_selected_path(monkeypatch, tmp_path: Path):
+    selected = tmp_path / "register.xlsx"
+    monkeypatch.setattr("rns_import_server.server.select_path", lambda kind: str(selected) if kind == "xlsx" else None)
+    port = _unused_port()
+    server = create_server("127.0.0.1", port, _fake_runner)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, payload = _post(f"http://127.0.0.1:{port}/api/picker", {"kind": "xlsx"})
+        assert status == 200
+        assert payload == {"path": str(selected), "cancelled": False}
+        status, payload = _post(f"http://127.0.0.1:{port}/api/picker", {"kind": "directory"})
+        assert status == 200
+        assert payload == {"path": None, "cancelled": True}
     finally:
         server.shutdown()
         server.server_close()

@@ -5,27 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>PropExtract — перенос данных из PDF</title>
+  <link rel="icon" href="/favicon.png" type="image/png">
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/" aria-label="PropExtract, главная">
-      <span class="brand-mark" aria-hidden="true">P<span>E</span></span>
+      <img class="brand-mark" src="/assets/logo.png" alt="">
       <span>PropExtract<small>Локальный импорт РнС</small></span>
     </a>
     <nav aria-label="Основная навигация">
       <a class="nav-link active" href="/">Перенос данных</a>
       <a class="nav-link" href="/help">Инструкция</a>
     </nav>
-    <label class="theme-control">
-      <span class="sr-only">Тема оформления</span>
-      <select id="theme-select" aria-label="Тема оформления">
-        <option value="auto">Авто</option>
-        <option value="light">Светлая</option>
-        <option value="dark">Тёмная</option>
-      </select>
-    </label>
+    <div class="theme-control" role="group" aria-label="Тема оформления">
+      <button class="theme-button" type="button" data-theme-choice="light" aria-label="Светлая тема" title="Светлая тема">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>
+      </button>
+      <button class="theme-button" type="button" data-theme-choice="dark" aria-label="Тёмная тема" title="Тёмная тема">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.3A8.5 8.5 0 0 1 8.7 3.8 8.5 8.5 0 1 0 20.2 15.3Z"></path><path class="spark" d="m17.5 3 .45 1.05L19 4.5l-1.05.45L17.5 6l-.45-1.05L16 4.5l1.05-.45L17.5 3Z"></path></svg>
+      </button>
+    </div>
   </header>
 
   <main class="shell">
@@ -40,13 +41,25 @@
       <form id="import-form" class="import-form">
         <div class="field">
           <label for="pdf-dir">Папка с PDF</label>
-          <input id="pdf-dir" name="pdf_dir" type="text" required autocomplete="off" placeholder="C:\Документы\РнС или /home/user/rns">
+          <div class="path-control">
+            <input id="pdf-dir" name="pdf_dir" type="text" required autocomplete="off" placeholder="Папка ещё не выбрана">
+            <button class="picker-button" type="button" data-picker-kind="directory" data-picker-target="pdf-dir">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v8.8a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.3V7.5Z"></path><path d="M3 7.5V5.7A1.7 1.7 0 0 1 4.7 4h4.6L11 5.7"></path></svg>
+              <span>Выбрать</span>
+            </button>
+          </div>
           <small>Обрабатываются все PDF, включая вложенные папки.</small>
         </div>
 
         <div class="field">
           <label for="xlsx-path">Целевой файл Excel</label>
-          <input id="xlsx-path" name="xlsx" type="text" required autocomplete="off" placeholder="C:\Реестры\Реестр РНС.xlsx или /home/user/register.xlsx">
+          <div class="path-control">
+            <input id="xlsx-path" name="xlsx" type="text" required autocomplete="off" placeholder="Файл ещё не выбран">
+            <button class="picker-button" type="button" data-picker-kind="xlsx" data-picker-target="xlsx-path">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2.8h8l4 4v14.4H6V2.8Z"></path><path d="M14 2.8v4h4M9 11h6M9 14.5h6M9 18h6"></path></svg>
+              <span>Выбрать</span>
+            </button>
+          </div>
           <small>Перед изменением рядом будет создана резервная копия.</small>
         </div>
 
@@ -94,6 +107,8 @@
       <div id="result-paths" class="result-paths"></div>
     </section>
   </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
 
   <footer>
     <span>PropExtract работает только на 127.0.0.1</span>

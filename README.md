@@ -7,6 +7,7 @@ PropExtract — локальная программа для пакетного 
 ## Возможности
 
 - загрузка большого набора PDF через путь к папке, включая вложенные папки;
+- системные окна выбора папки PDF и целевого Excel без ручного ввода пути;
 - OCR сканов на русском и английском языках;
 - выбор актуальной версии документа по номеру РнС и дате;
 - заполнение доступных полей реестра и обновление ссылки на исходный PDF;
@@ -53,7 +54,7 @@ start_windows.cmd
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-venv poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+sudo apt install python3 python3-venv python3-tk poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-rns-import.txt
 chmod +x start_linux.sh
@@ -65,8 +66,8 @@ chmod +x start_linux.sh
 ## Работа в интерфейсе
 
 1. Закройте целевой реестр в Excel или LibreOffice.
-2. Вставьте полный путь к папке с PDF.
-3. Вставьте полный путь к целевому `.xlsx`.
+2. Нажмите **Выбрать** и укажите папку с PDF в системном окне.
+3. Нажмите **Выбрать** у поля Excel и укажите целевой `.xlsx`.
 4. Нажмите **Перенести данные** и дождитесь статуса **Готово**.
 5. При необходимости откройте JSON-отчёт или резервную копию по путям, показанным на экране.
 
