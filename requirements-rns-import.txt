@@ -1,0 +1,5 @@
+openpyxl>=3.1,<4
+
+# System programs required on both Windows and Linux:
+# - Tesseract OCR with rus and eng language packs
+# - Poppler pdftoppm

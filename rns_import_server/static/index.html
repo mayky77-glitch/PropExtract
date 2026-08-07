@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>PropExtract — перенос данных из PDF</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="PropExtract, главная">
+      <span class="brand-mark" aria-hidden="true">P<span>E</span></span>
+      <span>PropExtract<small>Локальный импорт РнС</small></span>
+    </a>
+    <nav aria-label="Основная навигация">
+      <a class="nav-link active" href="/">Перенос данных</a>
+      <a class="nav-link" href="/help">Инструкция</a>
+    </nav>
+    <label class="theme-control">
+      <span class="sr-only">Тема оформления</span>
+      <select id="theme-select" aria-label="Тема оформления">
+        <option value="auto">Авто</option>
+        <option value="light">Светлая</option>
+        <option value="dark">Тёмная</option>
+      </select>
+    </label>
+  </header>
+
+  <main class="shell">
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">PDF → XLSX · полностью на этом компьютере</p>
+      <h1 id="page-title">Обновите реестр<br>одним запуском.</h1>
+      <p class="lead">Укажите папку со сканами и целевой файл. PropExtract распознает документы, перенесёт подтверждённые поля и сохранит исходное оформление Excel.</p>
+      <div class="privacy-note"><span aria-hidden="true">●</span> Файлы не отправляются в интернет</div>
+    </section>
+
+    <section class="workspace" aria-label="Параметры импорта">
+      <form id="import-form" class="import-form">
+        <div class="field">
+          <label for="pdf-dir">Папка с PDF</label>
+          <input id="pdf-dir" name="pdf_dir" type="text" required autocomplete="off" placeholder="C:\Документы\РнС или /home/user/rns">
+          <small>Обрабатываются все PDF, включая вложенные папки.</small>
+        </div>
+
+        <div class="field">
+          <label for="xlsx-path">Целевой файл Excel</label>
+          <input id="xlsx-path" name="xlsx" type="text" required autocomplete="off" placeholder="C:\Реестры\Реестр РНС.xlsx или /home/user/register.xlsx">
+          <small>Перед изменением рядом будет создана резервная копия.</small>
+        </div>
+
+        <div id="system-state" class="system-state checking" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Проверяем OCR-компоненты…</span>
+        </div>
+
+        <button id="start-button" class="primary-button" type="submit">
+          <span>Перенести данные</span>
+          <span aria-hidden="true">→</span>
+        </button>
+      </form>
+
+      <aside id="progress-panel" class="progress-panel" aria-live="polite" aria-labelledby="progress-title">
+        <div class="progress-head">
+          <div>
+            <p class="eyebrow">Состояние</p>
+            <h2 id="progress-title">Готово к запуску</h2>
+          </div>
+          <strong id="progress-value">0%</strong>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Ход обработки">
+          <span id="progress-fill"></span>
+        </div>
+        <p id="current-file" class="current-file">После запуска здесь появится текущий документ.</p>
+        <ol class="process-ruler" aria-label="Этапы работы">
+          <li data-step="scan"><span>01</span> Распознавание</li>
+          <li data-step="write"><span>02</span> Перенос</li>
+          <li data-step="verify"><span>03</span> Проверка</li>
+          <li data-step="backup"><span>04</span> Резервная копия</li>
+        </ol>
+      </aside>
+    </section>
+
+    <section id="result" class="result" hidden aria-labelledby="result-title">
+      <div class="result-heading">
+        <div>
+          <p class="eyebrow">Результат последнего запуска</p>
+          <h2 id="result-title">Реестр обновлён</h2>
+        </div>
+        <span id="result-badge" class="result-badge">Готово</span>
+      </div>
+      <div id="result-stats" class="result-stats"></div>
+      <div id="result-paths" class="result-paths"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>PropExtract работает только на 127.0.0.1</span>
+    <a href="/help">Как подготовить файлы</a>
+  </footer>
+</body>
+</html>

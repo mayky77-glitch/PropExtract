@@ -1,0 +1,31 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Runtime files and private document data
+*.pdf
+*.xlsx
+*.xlsm
+*.xlsb
+*.ods
+*.log
+*— отчет PropExtract.json
+Резервные копии PropExtract/
+
+# Local project evidence and supplied documents are intentionally not published
+/Автоматизация РнС и ГРО/
+/analysis/
+/knowledge/
+/tests/test_rns_import_contract.py
+/README_RNS_IMPORT.md

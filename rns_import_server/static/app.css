@@ -1,0 +1,195 @@
+:root {
+  color-scheme: light;
+  --canvas: #f3f7f7;
+  --paper: #ffffff;
+  --ink: #172126;
+  --muted: #627177;
+  --line: #d7e2e4;
+  --soft: #e8f0f1;
+  --lake: #176d75;
+  --lake-strong: #0e555c;
+  --signal: #b45936;
+  --ok: #1f7a5a;
+  --error: #a23e35;
+  --shadow: 0 20px 60px rgba(34, 64, 70, .09);
+  --radius: 18px;
+  font-family: "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #0e171a;
+  --paper: #142126;
+  --ink: #e8f1f1;
+  --muted: #9eb0b3;
+  --line: #2d4146;
+  --soft: #1c2c31;
+  --lake: #67bec3;
+  --lake-strong: #89d4d7;
+  --signal: #efa06f;
+  --ok: #70c89e;
+  --error: #ef9188;
+  --shadow: 0 22px 70px rgba(0, 0, 0, .28);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] {
+    color-scheme: dark;
+    --canvas: #0e171a;
+    --paper: #142126;
+    --ink: #e8f1f1;
+    --muted: #9eb0b3;
+    --line: #2d4146;
+    --soft: #1c2c31;
+    --lake: #67bec3;
+    --lake-strong: #89d4d7;
+    --signal: #efa06f;
+    --ok: #70c89e;
+    --error: #ef9188;
+    --shadow: 0 22px 70px rgba(0, 0, 0, .28);
+  }
+}
+
+* { box-sizing: border-box; }
+html { min-height: 100%; background: var(--canvas); }
+body { min-height: 100vh; margin: 0; color: var(--ink); background: var(--canvas); }
+a { color: inherit; }
+button, input, select { font: inherit; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+.topbar {
+  width: min(1240px, calc(100% - 48px));
+  min-height: 88px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { display: inline-flex; align-items: center; gap: 12px; width: fit-content; text-decoration: none; font-weight: 700; letter-spacing: -.02em; }
+.brand small { display: block; margin-top: 2px; color: var(--muted); font: 500 11px/1.2 "Trebuchet MS", sans-serif; letter-spacing: .07em; text-transform: uppercase; }
+.brand-mark { width: 38px; height: 38px; display: grid; place-items: center; color: var(--paper); background: var(--lake-strong); border-radius: 9px 3px 9px 3px; font: 800 14px/1 "Trebuchet MS", sans-serif; letter-spacing: -.1em; }
+.brand-mark span { color: color-mix(in srgb, var(--signal) 65%, white); }
+nav { display: flex; align-items: center; gap: 28px; }
+.nav-link { padding: 33px 0 28px; border-bottom: 3px solid transparent; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 650; }
+.nav-link:hover, .nav-link.active { color: var(--ink); border-bottom-color: var(--lake); }
+.theme-control { justify-self: end; }
+.theme-control select { padding: 9px 30px 9px 11px; color: var(--muted); background: var(--paper); border: 1px solid var(--line); border-radius: 9px; cursor: pointer; }
+
+.shell { width: min(1160px, calc(100% - 48px)); margin: 0 auto; padding: 88px 0 54px; }
+.intro { display: grid; grid-template-columns: minmax(300px, 1.15fr) minmax(280px, .85fr); column-gap: 80px; align-items: end; margin-bottom: 56px; }
+.eyebrow { margin: 0 0 14px; color: var(--lake); font: 700 11px/1.2 "Trebuchet MS", sans-serif; letter-spacing: .13em; text-transform: uppercase; }
+h1 { grid-row: span 2; margin: 0; font-family: "Aptos Display", "Segoe UI Variable Display", "Trebuchet MS", sans-serif; font-size: clamp(46px, 6.3vw, 84px); font-weight: 650; line-height: .96; letter-spacing: -.055em; }
+.lead { margin: 0; color: var(--muted); font-size: 17px; line-height: 1.7; }
+.privacy-note { align-self: end; margin-top: 26px; color: var(--muted); font: 600 12px/1.3 "Trebuchet MS", sans-serif; letter-spacing: .025em; }
+.privacy-note span { margin-right: 8px; color: var(--ok); font-size: 9px; }
+
+.workspace { display: grid; grid-template-columns: 1.05fr .95fr; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.import-form { padding: 48px; }
+.field + .field { margin-top: 30px; }
+.field label { display: block; margin-bottom: 9px; font-weight: 700; font-size: 14px; }
+.field input { width: 100%; height: 52px; padding: 0 15px; color: var(--ink); background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; outline: none; transition: border-color .18s, box-shadow .18s; }
+.field input::placeholder { color: color-mix(in srgb, var(--muted) 72%, transparent); }
+.field input:focus { border-color: var(--lake); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lake) 18%, transparent); }
+.field small { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.system-state { display: flex; align-items: center; gap: 9px; margin: 32px 0 18px; color: var(--muted); font-size: 13px; }
+.status-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.system-state.ready .status-dot { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 15%, transparent); }
+.system-state.error .status-dot { background: var(--error); }
+.system-state.checking .status-dot { animation: pulse 1.25s ease-in-out infinite; }
+.primary-button { width: 100%; min-height: 54px; padding: 0 18px; display: flex; align-items: center; justify-content: space-between; color: #fff; background: var(--lake-strong); border: 0; border-radius: 10px; font-weight: 700; cursor: pointer; transition: transform .18s, background .18s; }
+.primary-button:hover { background: var(--lake); transform: translateY(-1px); }
+.primary-button:disabled { opacity: .55; cursor: wait; transform: none; }
+
+.progress-panel { position: relative; padding: 48px; background: var(--soft); border-left: 1px solid var(--line); }
+.progress-head { display: flex; justify-content: space-between; gap: 24px; align-items: start; }
+.progress-head h2 { margin: 0; font: 650 25px/1.15 "Aptos Display", "Segoe UI Variable Display", sans-serif; letter-spacing: -.025em; }
+#progress-value { color: var(--lake); font: 700 28px/1 "Trebuchet MS", sans-serif; font-variant-numeric: tabular-nums; }
+.progress-track { height: 7px; margin: 27px 0 14px; overflow: hidden; background: color-mix(in srgb, var(--line) 78%, transparent); border-radius: 999px; }
+.progress-track span { display: block; width: 0; height: 100%; background: var(--lake); border-radius: inherit; transition: width .45s ease; }
+.progress-panel.error .progress-track span { background: var(--error); }
+.current-file { min-height: 39px; margin: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.process-ruler { list-style: none; padding: 0; margin: 35px 0 0; border-top: 1px solid var(--line); }
+.process-ruler li { position: relative; padding: 17px 0 17px 42px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; transition: color .2s; }
+.process-ruler li::before { content: ""; position: absolute; left: 18px; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.process-ruler li span { position: absolute; left: 0; color: var(--muted); font: 700 10px/1.6 "Trebuchet MS", sans-serif; }
+.process-ruler li.active { color: var(--ink); font-weight: 700; }
+.process-ruler li.active::after { content: ""; position: absolute; left: 15px; top: 22px; width: 7px; height: 7px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 4px color-mix(in srgb, var(--signal) 17%, transparent); }
+
+.result { margin-top: 24px; padding: 36px 40px; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); }
+.result.error { border-color: color-mix(in srgb, var(--error) 45%, var(--line)); }
+.result-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
+.result-heading h2 { margin: 0; font: 650 28px/1.1 "Aptos Display", "Segoe UI Variable Display", sans-serif; letter-spacing: -.03em; }
+.result-badge { padding: 7px 11px; color: var(--ok); background: color-mix(in srgb, var(--ok) 11%, transparent); border-radius: 99px; font-size: 12px; font-weight: 700; }
+.result.error .result-badge { color: var(--error); background: color-mix(in srgb, var(--error) 11%, transparent); }
+.result-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 28px; background: var(--line); border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+.stat { padding: 20px; background: var(--canvas); }
+.stat strong { display: block; font: 700 25px/1 "Trebuchet MS", sans-serif; }
+.stat span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
+.result-paths { margin-top: 22px; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.result-paths p { margin: 5px 0; overflow-wrap: anywhere; }
+
+.help-shell { padding-top: 78px; }
+.help-title { max-width: 840px; }
+.help-title h1 { margin-bottom: 28px; }
+.help-title .lead { max-width: 650px; }
+.guide-grid { display: grid; grid-template-columns: repeat(4, 1fr); margin: 64px 0 28px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--paper); box-shadow: var(--shadow); }
+.guide-grid article { min-height: 240px; padding: 30px; border-right: 1px solid var(--line); }
+.guide-grid article:last-child { border-right: 0; }
+.guide-grid article > span { color: var(--signal); font: 700 12px/1 "Trebuchet MS", sans-serif; }
+.guide-grid h2, .explain-card h2, .troubleshooting h2 { margin: 44px 0 12px; font: 650 21px/1.15 "Aptos Display", "Segoe UI Variable Display", sans-serif; letter-spacing: -.025em; }
+.guide-grid p, .explain-card p, .troubleshooting dd { color: var(--muted); font-size: 14px; line-height: 1.65; }
+.explain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; }
+.explain-card { padding: 34px; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); }
+.explain-card h2 { margin-top: 0; }
+.explain-card .eyebrow { margin-bottom: 12px; }
+.explain-card p:last-child { margin-bottom: 0; }
+.troubleshooting { display: grid; grid-template-columns: .7fr 1.3fr; gap: 60px; margin: 76px 0 42px; padding-top: 42px; border-top: 1px solid var(--line); }
+.troubleshooting h2 { margin: 0; font-size: 30px; }
+.troubleshooting dl { margin: 0; }
+.troubleshooting dt { margin: 0 0 6px; font-weight: 700; }
+.troubleshooting dd { margin: 0 0 24px; }
+.back-button { display: inline-block; padding: 13px 16px; color: var(--paper); background: var(--ink); border-radius: 10px; text-decoration: none; font-weight: 700; font-size: 13px; }
+
+footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 27px 0 36px; display: flex; justify-content: space-between; gap: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+footer a { color: var(--lake); font-weight: 700; text-decoration: none; }
+code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size: .9em; }
+
+@keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+@media (max-width: 850px) {
+  .topbar { width: min(100% - 32px, 720px); grid-template-columns: 1fr auto; padding: 14px 0; }
+  .topbar nav { grid-column: 1 / -1; grid-row: 2; margin-top: 10px; gap: 22px; }
+  .nav-link { padding: 12px 0 9px; }
+  .shell { width: min(100% - 32px, 720px); padding-top: 56px; }
+  .intro { display: block; }
+  .intro h1 { margin-bottom: 25px; }
+  .privacy-note { margin-top: 18px; }
+  .workspace { grid-template-columns: 1fr; }
+  .progress-panel { border-left: 0; border-top: 1px solid var(--line); }
+  .guide-grid { grid-template-columns: 1fr 1fr; }
+  .guide-grid article { border-bottom: 1px solid var(--line); }
+  .guide-grid article:nth-child(2) { border-right: 0; }
+  .guide-grid article:nth-child(3), .guide-grid article:nth-child(4) { border-bottom: 0; }
+  .result-stats { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 540px) {
+  .brand small { display: none; }
+  .theme-control select { max-width: 128px; }
+  .topbar nav { justify-content: space-between; }
+  .shell { padding-top: 42px; }
+  h1 { font-size: 46px; }
+  .intro { margin-bottom: 38px; }
+  .import-form, .progress-panel { padding: 30px 24px; }
+  .guide-grid, .explain-grid { grid-template-columns: 1fr; }
+  .guide-grid article { min-height: 0; border-right: 0; border-bottom: 1px solid var(--line) !important; }
+  .guide-grid article:last-child { border-bottom: 0 !important; }
+  .guide-grid h2 { margin-top: 24px; }
+  .troubleshooting { grid-template-columns: 1fr; gap: 30px; }
+  .result { padding: 28px 24px; }
+  .result-stats { grid-template-columns: 1fr 1fr; }
+  footer { width: calc(100% - 32px); flex-direction: column; }
+}

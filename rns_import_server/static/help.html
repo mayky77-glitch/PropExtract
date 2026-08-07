@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Инструкция — PropExtract</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="PropExtract, главная">
+      <span class="brand-mark" aria-hidden="true">P<span>E</span></span>
+      <span>PropExtract<small>Локальный импорт РнС</small></span>
+    </a>
+    <nav aria-label="Основная навигация">
+      <a class="nav-link" href="/">Перенос данных</a>
+      <a class="nav-link active" href="/help">Инструкция</a>
+    </nav>
+    <label class="theme-control">
+      <span class="sr-only">Тема оформления</span>
+      <select id="theme-select" aria-label="Тема оформления">
+        <option value="auto">Авто</option>
+        <option value="light">Светлая</option>
+        <option value="dark">Тёмная</option>
+      </select>
+    </label>
+  </header>
+
+  <main class="shell help-shell">
+    <section class="help-title">
+      <p class="eyebrow">Инструкция оператора</p>
+      <h1>От папки со сканами<br>до готового реестра.</h1>
+      <p class="lead">Обычный запуск состоит из четырёх шагов. Excel лучше закрыть перед началом обработки.</p>
+    </section>
+
+    <section class="guide-grid" aria-label="Порядок работы">
+      <article><span>01</span><h2>Подготовьте PDF</h2><p>Сложите разрешения в одну папку. Вложенные папки допустимы. Исходные PDF не изменяются.</p></article>
+      <article><span>02</span><h2>Закройте Excel</h2><p>Выберите рабочий <code>.xlsx</code>. Если он открыт в Excel, Windows может запретить замену файла.</p></article>
+      <article><span>03</span><h2>Укажите пути</h2><p>Скопируйте полный путь к папке PDF и полный путь к реестру в поля на главной странице.</p></article>
+      <article><span>04</span><h2>Запустите перенос</h2><p>Не закрывайте окно сервера до отметки «Готово». Прогресс и имя текущего PDF видны на экране.</p></article>
+    </section>
+
+    <section class="explain-grid">
+      <article class="explain-card">
+        <p class="eyebrow">Что меняется</p>
+        <h2>Только подтверждённые значения</h2>
+        <p>Программа группирует версии одного разрешения, выбирает актуальный документ и заполняет доступные поля. Существующий отличающийся срок не перезаписывается — он попадает в отчёт как конфликт. Ссылка на документ обновляется.</p>
+      </article>
+      <article class="explain-card">
+        <p class="eyebrow">Что сохраняется</p>
+        <h2>Формулы, стили и цветовые сроки</h2>
+        <p>Перед публикацией файл повторно открывается и проверяется. Встроенные правила цветовой индикации сроков переносятся без изменений.</p>
+      </article>
+      <article class="explain-card">
+        <p class="eyebrow">Как отменить</p>
+        <h2>Вернитесь к резервной копии</h2>
+        <p>До замены реестра создаётся папка «Резервные копии PropExtract». Скопируйте нужную версию обратно на место рабочего файла.</p>
+      </article>
+      <article class="explain-card">
+        <p class="eyebrow">Приватность</p>
+        <h2>Обработка остаётся локальной</h2>
+        <p>OCR и работа с Excel выполняются на вашем компьютере. Сервер слушает только локальный адрес и не отправляет документы во внешние сервисы.</p>
+      </article>
+    </section>
+
+    <section class="troubleshooting">
+      <div><p class="eyebrow">Если что-то не работает</p><h2>Быстрая проверка</h2></div>
+      <dl>
+        <dt>OCR-компоненты не готовы</dt><dd>Установите Tesseract с языками rus и eng, а также Poppler. Команды должны быть доступны в PATH.</dd>
+        <dt>Файл Excel не заменён</dt><dd>Закройте его в Excel и повторите запуск. До успешного завершения рабочий файл остаётся прежним.</dd>
+        <dt>PDF не найден</dt><dd>Проверьте полный путь и расширение файлов. Символические ссылки намеренно не принимаются.</dd>
+      </dl>
+    </section>
+
+    <a class="back-button" href="/">← Вернуться к переносу данных</a>
+  </main>
+
+  <footer><span>PropExtract работает только на 127.0.0.1</span><a href="/">Перенос данных</a></footer>
+</body>
+</html>
