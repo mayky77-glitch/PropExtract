@@ -21,7 +21,7 @@ def _fake_runner(pdf_dir: Path, xlsx: Path, output: Path, dpi: int, max_pages: i
         "input_hashes": {"xlsx": sha256(xlsx)},
         "documents": [{"file": str(pdf_dir / "sample.pdf")}],
         "logical_records": ["00-00-00-0000"],
-        "changes": [{"new": False}],
+        "changes": [{"new": False, "row": 42}],
         "conflicts": [],
     }
 
@@ -55,6 +55,8 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "changed_rows": 1,
         "new_rows": 0,
         "conflicts": 0,
+        "row_numbers": [42],
+        "new_row_numbers": [],
     }
 
 

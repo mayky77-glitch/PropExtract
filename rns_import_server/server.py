@@ -154,6 +154,8 @@ class JobManager:
                 "changed_rows": len(result.get("changes", [])),
                 "new_rows": sum(1 for item in result.get("changes", []) if item.get("new")),
                 "conflicts": len(result.get("conflicts", [])),
+                "row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("row")],
+                "new_row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("new") and item.get("row")],
             }
             self._update(
                 job_id,
