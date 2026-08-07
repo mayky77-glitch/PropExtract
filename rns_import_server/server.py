@@ -17,8 +17,10 @@ from urllib.parse import urlparse
 
 try:
     from rns_import_server.audit import atomic_json, sha256
+    from rns_import_server.runtime import runtime_status
 except ModuleNotFoundError:
     from audit import atomic_json, sha256
+    from runtime import runtime_status
 
 Runner = Callable[..., dict]
 MAX_BODY = 64 * 1024
@@ -63,22 +65,7 @@ def select_path(kind: str) -> str | None:
 
 
 def _tool_status() -> dict[str, object]:
-    commands = {name: shutil.which(name) for name in ("tesseract", "pdfinfo", "pdftoppm", "pdftotext")}
-    languages: list[str] = []
-    if commands["tesseract"]:
-        try:
-            result = subprocess.run(
-                [str(commands["tesseract"]), "--list-langs"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            languages = [line.strip() for line in result.stdout.splitlines()[1:] if line.strip()]
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    required = all(commands[name] for name in ("tesseract", "pdfinfo", "pdftoppm")) and {"rus", "eng"}.issubset(languages)
-    return {"ready": bool(required), "commands": {key: bool(value) for key, value in commands.items()}, "languages": languages}
+    return runtime_status()
 
 
 class BusyError(RuntimeError):

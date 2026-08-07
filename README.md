@@ -8,7 +8,7 @@ PropExtract — локальная программа для пакетного 
 
 - загрузка большого набора PDF через путь к папке, включая вложенные папки;
 - системные окна выбора папки PDF и целевого Excel без ручного ввода пути;
-- OCR сканов на русском и английском языках;
+- OCR сканов на русском и английском языках; одинаковые модели `rus/eng` хранятся в репозитории и проверяются по SHA-256;
 - выбор актуальной версии документа по номеру РнС и дате;
 - заполнение доступных полей реестра и обновление ссылки на исходный PDF;
 - сохранение существующего отличающегося срока с фиксацией конфликта в отчёте;
@@ -34,35 +34,27 @@ PropExtract — локальная программа для пакетного 
 
 ## Установка в Windows
 
-Потребуется Python 3.10 или новее, Tesseract OCR и Poppler.
-
-1. Установите [Python](https://www.python.org/downloads/windows/) и включите опцию **Add Python to PATH**.
-2. Установите Tesseract OCR для Windows. В установщике выберите языки `Russian` и `English`; добавьте папку Tesseract в `PATH`.
-3. Установите сборку Poppler для Windows и добавьте её папку `Library\bin` в `PATH`.
-4. Откройте PowerShell или командную строку в папке проекта и выполните:
+На Windows 10/11 нужен штатный `winget` (Microsoft App Installer). Откройте командную строку в папке проекта и выполните одну команду:
 
 ```bat
-py -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements-rns-import.txt
-start_windows.cmd
+install_windows.cmd
 ```
 
-После запуска откройте `http://127.0.0.1:8775`, если браузер не открылся автоматически.
+Можно также дважды нажать `install_windows.cmd` в Проводнике. Скрипт сам установит Python 3.12, Tesseract 5, Poppler, создаст `.venv`, проверит OCR и запустит PropExtract. При запросе Windows разрешите установку системных пакетов.
+
+Повторный запуск после установки: `start_windows.cmd`.
 
 ## Установка в Linux
 
-Для Ubuntu/Debian:
+Для Ubuntu/Debian и Fedora одна команда:
 
 ```bash
-sudo apt update
-sudo apt install python3 python3-venv python3-tk poppler-utils tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-rns-import.txt
-chmod +x start_linux.sh
-./start_linux.sh
+./install_linux.sh
 ```
 
-Для Fedora используйте пакеты `python3`, `poppler-utils`, `tesseract`, `tesseract-langpack-rus` и `tesseract-langpack-eng` через `dnf`.
+Если право запуска потерялось после распаковки: `chmod +x install_linux.sh && ./install_linux.sh`. Скрипт сам выберет `apt-get` или `dnf`, установит пакеты, создаст `.venv`, проверит OCR и запустит PropExtract.
+
+Повторный запуск: `./start_linux.sh`.
 
 ## Работа в интерфейсе
 
@@ -102,6 +94,12 @@ python -m rns_import_server.app serve --host 127.0.0.1 --port 8775
 - перед заменой проверяется хэш исходного Excel и резервной копии;
 - репозиторий исключает PDF, XLSX, отчёты и резервные копии через `.gitignore`;
 - проект не содержит ключей API, паролей или телеметрии.
+
+## Одинаковый OCR в Windows и Linux
+
+Файлы `rns_import_server/tessdata/rus.traineddata` и `eng.traineddata` входят в Git-репозиторий. PropExtract принудительно передаёт Tesseract путь к этим моделям, а не к языковым файлам операционной системы. Перед запуском сверяются хэши обеих моделей. Модели из [официального репозитория Tesseract](https://github.com/tesseract-ocr/tessdata), лицензия Apache-2.0.
+
+Движок Tesseract и Poppler остаются нативными пакетами системы. Установщик требует Tesseract 5 и проверяет все компоненты командой `.venv/bin/python -m rns_import_server.runtime` в Linux и её Windows-эквивалентом. Полное побайтовое равенство OCR между разными ОС не гарантируется, но главный источник расхождений — языковые модели — закреплён.
 
 ## Разработка и тесты
 

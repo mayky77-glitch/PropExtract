@@ -1,12 +1,42 @@
 """Bounded local OCR.  It never retains rendered pages or OCR text on disk."""
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
+
+TESSDATA = Path(__file__).with_name("tessdata")
+LANGUAGE_HASHES = {
+    "eng": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+    "rus": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225",
+}
+
+
+@lru_cache(maxsize=1)
+def bundled_language_status() -> dict[str, dict[str, object]]:
+    """Verify bundled OCR models once per process."""
+    status: dict[str, dict[str, object]] = {}
+    for language, expected in LANGUAGE_HASHES.items():
+        path = TESSDATA / f"{language}.traineddata"
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        status[language] = {
+            "available": path.is_file(),
+            "valid": actual == expected,
+            "sha256": actual,
+        }
+    return status
+
+
+def tesseract_environment() -> dict[str, str]:
+    invalid = [language for language, item in bundled_language_status().items() if not item["valid"]]
+    if invalid:
+        raise RuntimeError(f"ocr_models_invalid:{','.join(invalid)}")
+    return dict(os.environ, TESSDATA_PREFIX=str(TESSDATA))
 
 
 def _tool(name: str) -> str | None:
@@ -48,7 +78,11 @@ def _text_layer(pdf: Path, last_page: int) -> str | None:
 
 def _ocr_image(image: Path, tesseract: str) -> str:
     try:
-        result = _run([tesseract, str(image), "stdout", "-l", "rus+eng", "--psm", "6"], timeout=120)
+        result = _run(
+            [tesseract, str(image), "stdout", "-l", "rus+eng", "--oem", "1", "--psm", "6"],
+            timeout=120,
+            env=tesseract_environment(),
+        )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(f"tesseract_timeout:{image.name}") from error
     if result.returncode:

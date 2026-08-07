@@ -1,6 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+if exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" set "PATH=%PATH%;%ProgramFiles%\Tesseract-OCR"
 set "PROPEXTRACT_PYTHON=.venv\Scripts\python.exe"
 if not exist "%PROPEXTRACT_PYTHON%" (
   echo Virtual environment not found. Run: py -m venv .venv

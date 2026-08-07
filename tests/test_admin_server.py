@@ -12,6 +12,8 @@ from pathlib import Path
 from rns_import_server.audit import sha256
 from rns_import_server import picker
 from rns_import_server.normalization import normalize_text
+from rns_import_server.ocr import LANGUAGE_HASHES, bundled_language_status, tesseract_environment
+from rns_import_server.runtime import runtime_status
 from rns_import_server.server import JobManager, create_server
 from rns_import_server.workbook import transfer_issue
 
@@ -209,3 +211,27 @@ def test_transfer_issue_explains_missing_and_conflicting_values():
 def test_document_optimizer_text_normalization_contract_is_preserved():
     assert normalize_text("  Монтаж\u00a0  ТРУБ Ёлка ") == "монтаж труб елка"
     assert normalize_text("  ПАО «Газпром»  ", casefold=False) == "ПАО «Газпром»"
+
+
+def test_bundled_ocr_models_are_verified_and_forced():
+    status = bundled_language_status()
+    assert set(status) == set(LANGUAGE_HASHES)
+    assert all(item["valid"] for item in status.values())
+    assert Path(tesseract_environment()["TESSDATA_PREFIX"]).name == "tessdata"
+
+
+def test_runtime_reports_bundled_ocr_models():
+    status = runtime_status()
+    assert set(status["models"]) == {"rus", "eng"}
+
+
+def test_one_command_installers_cover_required_runtime():
+    root = Path(__file__).resolve().parents[1]
+    windows = (root / "install_windows.ps1").read_text(encoding="utf-8")
+    linux = (root / "install_linux.sh").read_text(encoding="utf-8")
+    for package in ("Python.Python.3.12", "tesseract-ocr.tesseract", "oschwartz10612.Poppler"):
+        assert package in windows
+    for package in ("python3-venv", "poppler-utils", "tesseract-ocr"):
+        assert package in linux
+    assert "-m rns_import_server.runtime" in windows
+    assert "-m rns_import_server.runtime" in linux
