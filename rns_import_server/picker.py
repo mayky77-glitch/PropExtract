@@ -2,12 +2,36 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
+
+
+def _choose_macos(kind: str) -> str:
+    if kind == "directory":
+        script = 'POSIX path of (choose folder with prompt "Выберите папку с PDF")'
+    else:
+        script = (
+            'POSIX path of (choose file with prompt "Выберите целевой файл Excel" '
+            'of type {"org.openxmlformats.spreadsheetml.sheet"})'
+        )
+    result = subprocess.run(
+        ["/usr/bin/osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        if "(-128)" in result.stderr:
+            return ""
+        raise RuntimeError("macos_picker_failed")
+    return str(Path(result.stdout.strip()).resolve()) if result.stdout.strip() else ""
 
 
 def choose(kind: str) -> str:
     if kind not in {"directory", "xlsx"}:
         raise ValueError("unknown picker kind")
+    if sys.platform == "darwin":
+        return _choose_macos(kind)
     try:
         import tkinter as tk
         from tkinter import filedialog

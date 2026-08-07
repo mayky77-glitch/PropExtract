@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -9,6 +10,7 @@ import urllib.request
 from pathlib import Path
 
 from rns_import_server.audit import sha256
+from rns_import_server import picker
 from rns_import_server.server import JobManager, create_server
 
 
@@ -159,3 +161,25 @@ def test_native_picker_endpoint_returns_selected_path(monkeypatch, tmp_path: Pat
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_macos_picker_uses_native_osascript_and_handles_cancel(monkeypatch, tmp_path: Path):
+    selected = tmp_path / "pdf"
+    selected.mkdir()
+    calls: list[list[str]] = []
+
+    def completed(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"{selected}\n", "")
+
+    monkeypatch.setattr(picker.sys, "platform", "darwin")
+    monkeypatch.setattr(picker.subprocess, "run", completed)
+    assert picker.choose("directory") == str(selected)
+    assert calls[0][0] == "/usr/bin/osascript"
+
+    monkeypatch.setattr(
+        picker.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "execution error: cancelled (-128)"),
+    )
+    assert picker.choose("xlsx") == ""
