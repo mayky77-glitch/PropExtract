@@ -8,6 +8,6 @@ if not exist "%PROPEXTRACT_PYTHON%" (
   pause
   exit /b 1
 )
-start "" "http://127.0.0.1:8765"
-"%PROPEXTRACT_PYTHON%" -m rns_import_server.app serve --host 127.0.0.1 --port 8765
+start "" "http://127.0.0.1:8775"
+"%PROPEXTRACT_PYTHON%" -m rns_import_server.app serve --host 127.0.0.1 --port 8775
 endlocal

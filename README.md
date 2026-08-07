@@ -44,7 +44,7 @@ py -m venv .venv
 start_windows.cmd
 ```
 
-После запуска откройте `http://127.0.0.1:8765`, если браузер не открылся автоматически.
+После запуска откройте `http://127.0.0.1:8775`, если браузер не открылся автоматически.
 
 ## Установка в Linux
 
@@ -85,7 +85,7 @@ python -m rns_import_server.app process \
 Запуск сервера вручную:
 
 ```bash
-python -m rns_import_server.app serve --host 127.0.0.1 --port 8765
+python -m rns_import_server.app serve --host 127.0.0.1 --port 8775
 ```
 
 ## Безопасность данных

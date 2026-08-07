@@ -7,5 +7,5 @@ if [ ! -x "$PROPEXTRACT_PYTHON" ]; then
   echo "Then run: .venv/bin/python -m pip install -r requirements-rns-import.txt"
   exit 1
 fi
-printf '%s\n' "Open http://127.0.0.1:8765 in a browser"
-exec "$PROPEXTRACT_PYTHON" -m rns_import_server.app serve --host 127.0.0.1 --port 8765
+printf '%s\n' "Open http://127.0.0.1:8775 in a browser"
+exec "$PROPEXTRACT_PYTHON" -m rns_import_server.app serve --host 127.0.0.1 --port 8775

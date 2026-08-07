@@ -96,7 +96,7 @@ def main() -> None:
     process.add_argument("--pdf-dir", required=True, type=Path); process.add_argument("--xlsx", required=True, type=Path)
     process.add_argument("--output", required=True, type=Path); process.add_argument("--report", type=Path)
     process.add_argument("--dpi", type=int, default=180); process.add_argument("--max-pages", type=int, default=0)
-    serve = commands.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8765)
+    serve = commands.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8775)
     options = parser.parse_args()
     if options.command == "serve":
         if options.host not in {"127.0.0.1", "localhost", "::1"}:
