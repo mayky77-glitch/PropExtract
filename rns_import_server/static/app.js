@@ -104,11 +104,12 @@
       [stats.pdf_count, "PDF обработано"],
       [stats.record_count, "Записей найдено"],
       [stats.new_rows, "Новых строк"],
-      [stats.conflicts, "Конфликтов сохранено"]
+      [stats.issue_count ?? stats.conflicts, "Замечаний в Excel"]
     ].map(([number, label]) => `<div class="stat"><strong>${escapeText(number ?? 0)}</strong><span>${label}</span></div>`).join("");
     const rows = (stats.row_numbers || []).join(", ") || "нет";
     const newRows = (stats.new_row_numbers || []).join(", ") || "нет";
-    resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Резервная копия:</strong> ${escapeText(job.backup)}</p>${job.report ? `<p><strong>Отчёт:</strong> ${escapeText(job.report)}</p>` : ""}${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
+    const issueRows = (stats.rows_with_issues || []).join(", ") || "нет";
+    resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p><p><strong>Резервная копия:</strong> ${escapeText(job.backup)}</p>${job.report ? `<p><strong>Отчёт:</strong> ${escapeText(job.report)}</p>` : ""}${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
   }
 
   async function poll(jobId) {

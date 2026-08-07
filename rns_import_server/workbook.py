@@ -16,15 +16,20 @@ from openpyxl.formula.translate import Translator
 
 try:
     from rns_import_server.audit import sha256
+    from rns_import_server.normalization import normalize_comparison_text
 except ModuleNotFoundError:  # Direct ``python rns_import_server/app.py`` invocation.
     from audit import sha256
+    from normalization import normalize_comparison_text
 
 SHEET = "Реестр РНС"
+STATUS_COLUMN = 27  # AA; Y:Z are occupied by the register's service formulas.
+STATUS_HEADER = "Статус переноса"
 HEADERS = {
     "Номер этапа": 2, "Наименование объекта": 4, "Номер РНС": 6,
     "Дата выдачи": 7, "Срок действия": 8, "Дата последн. измен.": 9,
     "Орган выдачи": 10, "Застройщик": 11, "Субъект РФ": 12,
     "Муниципальный р-н": 13, "Разработчик ПД": 14, "Ссылка на документ": 23,
+    "Примечание": 24,
 }
 DATE_FMT = "dd\\.mm\\.yyyy"
 _STANDARD_CF = re.compile(rb"<conditionalFormatting\b.*?</conditionalFormatting>", re.DOTALL)
@@ -32,6 +37,34 @@ _STANDARD_CF = re.compile(rb"<conditionalFormatting\b.*?</conditionalFormatting>
 
 def iso_date(value: object) -> datetime | None:
     return datetime.strptime(value, "%d.%m.%Y") if isinstance(value, str) and value else None
+
+
+def _value_text(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%d.%m.%Y")
+    return str(value).strip()
+
+
+def _comparable(value: object) -> str:
+    return normalize_comparison_text(_value_text(value))
+
+
+def transfer_issue(label: str, existing: object, proposed: object) -> str | None:
+    """Explain why a mapped field was not transferred, or return no issue."""
+    existing_empty = existing in (None, "")
+    if proposed is None:
+        if existing_empty:
+            return f"Не перенесено «{label}»: значение не найдено в PDF."
+        return (
+            f"Не подтверждено «{label}»: значение не найдено в PDF; "
+            f"значение Excel «{_value_text(existing)}» сохранено."
+        )
+    if existing_empty or _comparable(existing) == _comparable(proposed):
+        return None
+    return (
+        f"Не перенесено «{label}»: в Excel — «{_value_text(existing)}», "
+        f"в PDF — «{_value_text(proposed)}»; значение Excel сохранено."
+    )
 
 
 def _sheet_xml_path(book: Path, sheet_name: str) -> str:
@@ -130,7 +163,12 @@ def _put(cell, value: object, label: str, number: str, conflicts: list[dict[str,
     return False
 
 
-def _validate(source: Path, staged: Path, records: dict[str, dict[str, object]]) -> dict[str, Any]:
+def _validate(
+    source: Path,
+    staged: Path,
+    records: dict[str, dict[str, object]],
+    statuses: dict[str, str | None],
+) -> dict[str, Any]:
     source_book, output_book = load_workbook(source, data_only=False), load_workbook(staged, data_only=False)
     source_sheet, output_sheet = source_book[SHEET], output_book[SHEET]
     intended_link_cells = {
@@ -138,10 +176,16 @@ def _validate(source: Path, staged: Path, records: dict[str, dict[str, object]])
         for number in records
         if (row := _row_by_number(source_sheet, number)) is not None
     }
+    intended_status_cells = {
+        f"{output_sheet.cell(row, STATUS_COLUMN).coordinate}"
+        for number in records
+        if (row := _row_by_number(output_sheet, number)) is not None
+    }
+    intended_style_cells = intended_link_cells | intended_status_cells | {output_sheet.cell(3, STATUS_COLUMN).coordinate}
     for row in range(4, source_sheet.max_row + 1):
         for column in range(1, source_sheet.max_column + 1):
             before, after = source_sheet.cell(row, column), output_sheet.cell(row, column)
-            if before.coordinate not in intended_link_cells and before._style != after._style:
+            if before.coordinate not in intended_style_cells and before._style != after._style:
                 raise RuntimeError(f"style_changed:{before.coordinate}")
             if isinstance(before.value, str) and before.value.startswith("=") and before.value != after.value:
                 raise RuntimeError(f"formula_changed:{before.coordinate}")
@@ -152,6 +196,10 @@ def _validate(source: Path, staged: Path, records: dict[str, dict[str, object]])
         link = output_sheet.cell(row, HEADERS["Ссылка на документ"])
         if not link.hyperlink or link.hyperlink.target != Path(str(record["pdf"])).as_uri():
             raise RuntimeError(f"link_invalid:{number}")
+        if output_sheet.cell(row, STATUS_COLUMN).value != statuses[number]:
+            raise RuntimeError(f"status_invalid:{number}")
+    if output_sheet.cell(3, STATUS_COLUMN).value != STATUS_HEADER:
+        raise RuntimeError("status_header_invalid")
     sheet_path = _sheet_xml_path(source, SHEET)
     source_ext, output_ext = _extension_block(source, sheet_path), _extension_block(staged, sheet_path)
     if source_ext != output_ext:
@@ -183,7 +231,15 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
     try:
         workbook = load_workbook(source)
         sheet = workbook[SHEET]
+        existing_status_header = sheet.cell(3, STATUS_COLUMN).value
+        if existing_status_header not in (None, "", STATUS_HEADER):
+            raise RuntimeError(f"status_column_occupied:{sheet.cell(3, STATUS_COLUMN).coordinate}")
+        status_header = sheet.cell(3, STATUS_COLUMN)
+        status_header.value = STATUS_HEADER
+        status_header._style = copy(sheet.cell(3, HEADERS["Ссылка на документ"])._style)
+        sheet.column_dimensions[status_header.column_letter].width = 58
         conflicts, changes = [], []
+        statuses: dict[str, str | None] = {}
         for number, record in records.items():
             row = _row_by_number(sheet, number)
             new = row is None
@@ -193,15 +249,29 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 ids = [sheet.cell(item, 1).value for item in range(4, row) if isinstance(sheet.cell(item, 1).value, int)]
                 sheet.cell(row, 1).value = max(ids, default=0) + 1
             mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
-            written = [sheet.cell(row, HEADERS[label]).coordinate for label, value in mapping.items() if _put(sheet.cell(row, HEADERS[label]), value, label, number, conflicts)]
+            issues, written = [], []
+            for label, value in mapping.items():
+                target = sheet.cell(row, HEADERS[label])
+                if issue := transfer_issue(label, target.value, value):
+                    issues.append(issue)
+                if _put(target, value, label, number, conflicts):
+                    written.append(target.coordinate)
             link = sheet.cell(row, HEADERS["Ссылка на документ"])
             link.value, link.hyperlink, link.style = str(record["filename"]), Path(str(record["pdf"])).as_uri(), "Hyperlink"
-            changes.append({"number": number, "row": row, "new": new, "written": written, "document": record["filename"], "end": record.get("end")})
+            status = sheet.cell(row, STATUS_COLUMN)
+            status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
+            status_alignment = copy(status.alignment)
+            status_alignment.wrap_text = True
+            status_alignment.vertical = "top"
+            status.alignment = status_alignment
+            status.value = "\n".join(issues) or None
+            statuses[number] = status.value
+            changes.append({"number": number, "row": row, "new": new, "written": written, "document": record["filename"], "end": record.get("end"), "status": status.value, "issues": issues})
         workbook.save(staged)
         _reinject_extensions(source, staged)
         if sha256(source) != source_hash:
             raise RuntimeError("source_xlsx_changed")
-        verification = _validate(source, staged, records)
+        verification = _validate(source, staged, records, statuses)
         os.replace(staged, output)
         return {"changes": changes, "conflicts": conflicts, "verification": verification}
     finally:

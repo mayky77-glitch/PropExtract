@@ -11,7 +11,9 @@ from pathlib import Path
 
 from rns_import_server.audit import sha256
 from rns_import_server import picker
+from rns_import_server.normalization import normalize_text
 from rns_import_server.server import JobManager, create_server
+from rns_import_server.workbook import transfer_issue
 
 
 def _fake_runner(pdf_dir: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
@@ -23,7 +25,7 @@ def _fake_runner(pdf_dir: Path, xlsx: Path, output: Path, dpi: int, max_pages: i
         "input_hashes": {"xlsx": sha256(xlsx)},
         "documents": [{"file": str(pdf_dir / "sample.pdf")}],
         "logical_records": ["00-00-00-0000"],
-        "changes": [{"new": False, "row": 42}],
+        "changes": [{"new": False, "row": 42, "issues": []}],
         "conflicts": [],
     }
 
@@ -57,6 +59,8 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "changed_rows": 1,
         "new_rows": 0,
         "conflicts": 0,
+        "issue_count": 0,
+        "rows_with_issues": [],
         "row_numbers": [42],
         "new_row_numbers": [],
     }
@@ -183,3 +187,25 @@ def test_macos_picker_uses_native_osascript_and_handles_cancel(monkeypatch, tmp_
         lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "execution error: cancelled (-128)"),
     )
     assert picker.choose("xlsx") == ""
+
+
+def test_transfer_issue_explains_missing_and_conflicting_values():
+    assert transfer_issue("Орган выдачи", None, None) == (
+        "Не перенесено «Орган выдачи»: значение не найдено в PDF."
+    )
+    assert transfer_issue("Орган выдачи", "Администрация", None) == (
+        "Не подтверждено «Орган выдачи»: значение не найдено в PDF; "
+        "значение Excel «Администрация» сохранено."
+    )
+    assert transfer_issue("Срок действия", "28.11.2026", "28.11.2025") == (
+        "Не перенесено «Срок действия»: в Excel — «28.11.2026», "
+        "в PDF — «28.11.2025»; значение Excel сохранено."
+    )
+    assert transfer_issue("Срок действия", "28.11.2025", "28.11.2025") is None
+    assert transfer_issue("Застройщик", 'ПАО "Газпром"', "ПАО «Газпром»") is None
+    assert transfer_issue("Орган выдачи", "СЛУЖБА НАДЗОРА", "Служба надзора") is None
+
+
+def test_document_optimizer_text_normalization_contract_is_preserved():
+    assert normalize_text("  Монтаж\u00a0  ТРУБ Ёлка ") == "монтаж труб елка"
+    assert normalize_text("  ПАО «Газпром»  ", casefold=False) == "ПАО «Газпром»"

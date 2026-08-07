@@ -186,6 +186,8 @@ class JobManager:
                 "changed_rows": len(result.get("changes", [])),
                 "new_rows": sum(1 for item in result.get("changes", []) if item.get("new")),
                 "conflicts": len(result.get("conflicts", [])),
+                "issue_count": sum(len(item.get("issues", [])) for item in result.get("changes", [])),
+                "rows_with_issues": [item.get("row") for item in result.get("changes", []) if item.get("issues") and item.get("row")],
                 "row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("row")],
                 "new_row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("new") and item.get("row")],
             }

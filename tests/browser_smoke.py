@@ -17,6 +17,11 @@ with sync_playwright() as playwright:
     page.goto(BASE)
     page.wait_for_load_state("networkidle")
     assert page.locator("h1", has_text="Обновите реестр").is_visible()
+    heading_box = page.locator("h1").bounding_box()
+    shell_box = page.locator("main.shell").bounding_box()
+    assert heading_box and shell_box
+    assert abs(heading_box["x"] - shell_box["x"]) < 2
+    assert heading_box["width"] >= 700
     assert page.get_by_role("button", name="Перенести данные").is_visible()
     assert page.get_by_role("button", name="Выбрать", exact=True).count() == 2
     assert page.locator(".brand-mark").evaluate("image => image.complete && image.naturalWidth > 0")
