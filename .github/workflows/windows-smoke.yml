@@ -93,8 +93,19 @@ jobs:
             }
           }
       - name: Check the normal CMD launcher without opening a browser
-        shell: cmd
-        run: start_windows.cmd -NoBrowser -CheckOnly
+        shell: powershell
+        run: |
+          $oldErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $output = & "$env:ComSpec" /d /c "call start_windows.cmd -NoBrowser -CheckOnly" 2>&1 | Out-String
+          $exitCode = $LASTEXITCODE
+          $ErrorActionPreference = $oldErrorActionPreference
+          Write-Host $output
+          if ($exitCode -ne 0) {
+            $details = $output.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=PropExtract Windows launcher failed::$details"
+            exit $exitCode
+          }
       - name: Recheck server imports and OCR runtime
         shell: powershell
         run: |
