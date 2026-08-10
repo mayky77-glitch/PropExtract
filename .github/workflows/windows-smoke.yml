@@ -1,0 +1,88 @@
+name: Windows offline smoke
+
+on:
+  push:
+    branches:
+      - codex/admin-ui
+    paths:
+      - ".github/workflows/windows-smoke.yml"
+      - "install_windows.*"
+      - "start_windows.cmd"
+      - "start_windows.ps1"
+      - "windows_runtime_helpers.ps1"
+      - "windows-runtime.lock.json"
+      - "packages/**"
+      - "requirements-rns-import.txt"
+      - "rns_import_server/**"
+      - "scripts/build_windows_*"
+      - "tests/test_admin_server.py"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-smoke.yml"
+      - "install_windows.*"
+      - "start_windows.cmd"
+      - "start_windows.ps1"
+      - "windows_runtime_helpers.ps1"
+      - "windows-runtime.lock.json"
+      - "packages/**"
+      - "requirements-rns-import.txt"
+      - "rns_import_server/**"
+      - "scripts/build_windows_*"
+      - "tests/test_admin_server.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-install:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run the one-click installer without WinGet or network downloads
+        shell: cmd
+        run: install_windows.cmd -NoStart
+      - name: Re-run a healthy installation
+        shell: cmd
+        run: install_windows.cmd -NoStart
+      - name: Simulate antivirus loss and local corruption
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python312._pth"
+          $native = ".runtime\windows\native-$($lock.runtime)"
+          $pdfinfo = Join-Path $native (Join-Path $lock.nativeTree.popplerBinPath "pdfinfo.exe")
+          [IO.File]::AppendAllText($python, "tamper")
+          Remove-Item -LiteralPath $pdfinfo -Force
+      - name: Repair both tampered runtimes
+        shell: cmd
+        run: install_windows.cmd -NoStart
+      - name: Verify app-local runtime files and tree digests
+        shell: powershell
+        run: |
+          . .\windows_runtime_helpers.ps1
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = Join-Path $PWD (".runtime\windows\python-" + $lock.artifacts.python.version)
+          $native = Join-Path $PWD (".runtime\windows\native-" + $lock.runtime)
+          if (-not (Test-PropExtractPythonTree $python $lock)) { throw "python tree digest mismatch" }
+          if (-not (Test-PropExtractNativeTree $native $lock)) { throw "native tree digest mismatch" }
+          $poppler = Join-Path $native $lock.nativeTree.popplerBinPath
+          foreach ($name in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $poppler $name) -PathType Leaf)) {
+              throw "missing app-local VC runtime file: $name"
+            }
+          }
+      - name: Check the normal CMD launcher without opening a browser
+        shell: cmd
+        run: start_windows.cmd -NoBrowser -CheckOnly
+      - name: Recheck server imports and OCR runtime
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          & $python -B -S -c "import openpyxl, rns_import_server.server"
+          if ($LASTEXITCODE -ne 0) { throw "server import failed" }
+          & $python -B -S -m rns_import_server.runtime
+          if ($LASTEXITCODE -ne 0) { throw "runtime check failed" }

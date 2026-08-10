@@ -1,14 +1,12 @@
 @echo off
 setlocal
+chcp 65001 >nul
 cd /d "%~dp0"
-if exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" set "PATH=%PATH%;%ProgramFiles%\Tesseract-OCR"
-set "PROPEXTRACT_PYTHON=.venv\Scripts\python.exe"
-if not exist "%PROPEXTRACT_PYTHON%" (
-  echo Virtual environment not found. Run: py -m venv .venv
-  echo Then run: .venv\Scripts\python.exe -m pip install -r requirements-rns-import.txt
-  pause
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_windows.ps1" %*
+if errorlevel 1 (
+  echo.
+  echo PropExtract failed to start. Run install_windows.cmd again.
+  if not defined CI pause
   exit /b 1
 )
-start "" "http://127.0.0.1:8775"
-"%PROPEXTRACT_PYTHON%" -m rns_import_server.app serve --host 127.0.0.1 --port 8775
 endlocal

@@ -23,6 +23,12 @@ else
 fi
 
 python3 -m venv .venv
-.venv/bin/python -m pip install --disable-pip-version-check -r requirements-rns-import.txt
+.venv/bin/python -m pip --isolated install \
+  --disable-pip-version-check \
+  --no-index \
+  --find-links packages/python \
+  --require-hashes \
+  --only-binary=:all: \
+  -r requirements-rns-import.txt
 .venv/bin/python -m rns_import_server.runtime
 exec sh ./start_linux.sh

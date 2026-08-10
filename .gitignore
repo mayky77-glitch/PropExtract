@@ -1,11 +1,13 @@
 # Python
 .venv/
+.venv-windows/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
 htmlcov/
+.runtime/
 
 # Editors and operating systems
 .DS_Store

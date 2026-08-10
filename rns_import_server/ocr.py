@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 
 TESSDATA = Path(__file__).with_name("tessdata")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LANGUAGE_HASHES = {
     "eng": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
     "rus": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225",
@@ -39,7 +41,60 @@ def tesseract_environment() -> dict[str, str]:
     return dict(os.environ, TESSDATA_PREFIX=str(TESSDATA))
 
 
-def _tool(name: str) -> str | None:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=4)
+def _verified_project_windows_runtime(project_root_text: str) -> tuple[Path, dict[str, object]] | None:
+    project_root = Path(project_root_text)
+    try:
+        lock = json.loads((project_root / "windows-runtime.lock.json").read_text(encoding="utf-8"))
+        native = lock["nativeTree"]
+        runtime = project_root / ".runtime" / "windows" / f"native-{lock['runtime']}"
+        if not runtime.is_dir():
+            return None
+        files = [path for path in runtime.rglob("*") if path.is_file()]
+        if any(path.is_symlink() for path in files) or len(files) != int(native["files"]):
+            return None
+        entries = sorted((path.relative_to(runtime).as_posix(), _file_sha256(path)) for path in files)
+        canonical = "".join(f"{digest}  {relative}\n" for relative, digest in entries).encode()
+        if hashlib.sha256(canonical).hexdigest() != str(native["sha256"]).lower():
+            return None
+        return runtime, lock
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def project_windows_tool(name: str, project_root: Path = PROJECT_ROOT) -> str | None:
+    """Find a tool only inside the exact, integrity-checked Windows runtime."""
+    if name not in {"tesseract", "pdfinfo", "pdftoppm", "pdftotext"}:
+        return None
+    executable = f"{name}.exe"
+    verified = _verified_project_windows_runtime(str(project_root.resolve()))
+    if not verified:
+        return None
+    runtime, lock = verified
+    native = lock["nativeTree"]
+    candidate = (
+        runtime / str(native["tesseractPath"])
+        if name == "tesseract"
+        else runtime / str(native["popplerBinPath"]) / executable
+    )
+    if candidate.is_file() and not candidate.is_symlink():
+        return str(candidate)
+    return None
+
+
+@lru_cache(maxsize=None)
+def find_tool(name: str) -> str | None:
+    """Use the pinned runtime on Windows and system packages on Unix."""
+    if os.name == "nt":
+        return project_windows_tool(name)
     return shutil.which(name)
 
 
@@ -48,7 +103,7 @@ def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) ->
 
 
 def page_count(pdf: Path) -> int:
-    command = _tool("pdfinfo")
+    command = find_tool("pdfinfo")
     if not command:
         raise RuntimeError("pdfinfo_unavailable")
     try:
@@ -64,7 +119,7 @@ def page_count(pdf: Path) -> int:
 
 
 def _text_layer(pdf: Path, last_page: int) -> str | None:
-    command = _tool("pdftotext")
+    command = find_tool("pdftotext")
     if not command:
         return None
     try:
@@ -96,7 +151,7 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
     last_page = min(total, max_pages) if max_pages else total
     if text := _text_layer(pdf, last_page):
         return text, total
-    renderer, tesseract = _tool("pdftoppm"), _tool("tesseract")
+    renderer, tesseract = find_tool("pdftoppm"), find_tool("tesseract")
     if not renderer:
         raise RuntimeError("pdftoppm_unavailable")
     if not tesseract:

@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 
 try:
-    from rns_import_server.ocr import bundled_language_status, tesseract_environment
+    from rns_import_server.ocr import bundled_language_status, find_tool, tesseract_environment
 except ModuleNotFoundError:
-    from ocr import bundled_language_status, tesseract_environment
+    from ocr import bundled_language_status, find_tool, tesseract_environment
 
 
 def runtime_status() -> dict[str, object]:
-    paths = {name: shutil.which(name) for name in ("tesseract", "pdfinfo", "pdftoppm", "pdftotext")}
+    paths = {name: find_tool(name) for name in ("tesseract", "pdfinfo", "pdftoppm", "pdftotext")}
     languages: list[str] = []
     version = None
     if paths["tesseract"]:

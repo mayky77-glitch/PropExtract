@@ -3,3 +3,4 @@
 *.exe binary
 *.whl binary
 *.zip binary
+packages/windows/python312._pth text eol=lf
