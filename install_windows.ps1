@@ -13,10 +13,16 @@ function Install-WingetPackage([string]$Id) {
     if ($LASTEXITCODE -ne 0) { throw "winget failed: $Id" }
 }
 
+function Test-WingetSource {
+    winget search --exact --id "Python.Python.3.12" --source winget --accept-source-agreements | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Repair-WingetSource {
     Write-Host "Checking WinGet package source..."
     winget source update --name winget
-    if ($LASTEXITCODE -eq 0) { return }
+    $Updated = $LASTEXITCODE -eq 0
+    if ($Updated -and (Test-WingetSource)) { return }
 
     Write-Host "WinGet source is damaged. Windows will request administrator permission to repair it."
     $RepairCommand = "winget source reset --force --name winget; exit `$LASTEXITCODE"
@@ -31,7 +37,8 @@ function Repair-WingetSource {
     }
 
     winget source update --name winget
-    if ($LASTEXITCODE -ne 0) {
+    $Updated = $LASTEXITCODE -eq 0
+    if ((-not $Updated) -or (-not (Test-WingetSource))) {
         throw "WinGet source is unavailable after repair. Check internet access and Microsoft App Installer."
     }
 }

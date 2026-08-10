@@ -232,6 +232,7 @@ def test_one_command_installers_cover_required_runtime():
     for package in ("Python.Python.3.12", "tesseract-ocr.tesseract", "oschwartz10612.Poppler"):
         assert package in windows
     assert "source reset --force --name winget" in windows
+    assert 'winget search --exact --id "Python.Python.3.12"' in windows
     assert "-Verb RunAs" in windows
     assert "--source winget" in windows
     for package in ("python3-venv", "poppler-utils", "tesseract-ocr"):
