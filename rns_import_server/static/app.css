@@ -73,7 +73,14 @@ button, input, select { font: inherit; }
 nav { display: flex; align-items: center; gap: 28px; }
 .nav-link { padding: 33px 0 28px; border-bottom: 3px solid transparent; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 650; }
 .nav-link:hover, .nav-link.active { color: var(--ink); border-bottom-color: var(--lake); }
-.theme-control { justify-self: end; display: flex; padding: 3px; gap: 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 11px; }
+.app-controls { justify-self: end; display: flex; align-items: center; gap: 8px; }
+.lifecycle-state { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; color: var(--muted); font: 650 11px/1 "Trebuchet MS", sans-serif; letter-spacing: .02em; }
+.lifecycle-state > span { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 14%, transparent); }
+.stop-button { min-height: 42px; display: inline-flex; align-items: center; gap: 7px; padding: 0 11px; color: var(--error); background: color-mix(in srgb, var(--error) 6%, var(--paper)); border: 1px solid color-mix(in srgb, var(--error) 38%, var(--line)); border-radius: 10px; font-size: 11px; font-weight: 750; cursor: pointer; }
+.stop-button:hover { color: #fff; background: var(--error); border-color: var(--error); }
+.stop-button:disabled { opacity: .55; cursor: wait; }
+.stop-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.theme-control { display: flex; padding: 3px; gap: 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 11px; }
 .theme-button { width: 38px; height: 34px; display: grid; place-items: center; padding: 0; color: var(--muted); background: transparent; border: 0; border-radius: 8px; cursor: pointer; }
 .theme-button:hover { color: var(--ink); background: var(--soft); }
 .theme-button[aria-pressed="true"] { color: var(--lake-strong); background: var(--soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lake) 20%, transparent); }
@@ -165,6 +172,14 @@ footer { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 27px 0 
 footer a { color: var(--lake); font-weight: 700; text-decoration: none; }
 code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size: .9em; }
 .toast { position: fixed; z-index: 20; right: 24px; bottom: 24px; max-width: min(390px, calc(100% - 32px)); padding: 13px 16px; color: var(--paper); background: var(--ink); border-radius: 10px; box-shadow: var(--shadow); font-size: 13px; line-height: 1.45; }
+.shutdown-screen { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--canvas) 94%, transparent); backdrop-filter: blur(8px); }
+.shutdown-screen[hidden] { display: none; }
+.shutdown-card { width: min(560px, 100%); padding: 48px; text-align: center; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+.shutdown-icon { width: 72px; height: 72px; display: grid; place-items: center; margin: 0 auto 25px; color: var(--error); background: color-mix(in srgb, var(--error) 9%, transparent); border: 1px solid color-mix(in srgb, var(--error) 28%, var(--line)); border-radius: 50%; }
+.shutdown-icon svg { width: 34px; height: 34px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.shutdown-card .eyebrow { margin-bottom: 10px; }
+.shutdown-card h2 { margin: 0; font: 650 36px/1.08 "Aptos Display", "Segoe UI Variable Display", sans-serif; letter-spacing: -.035em; }
+.shutdown-card p:last-child { max-width: 430px; margin: 18px auto 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
 
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
@@ -183,10 +198,13 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .guide-grid article:nth-child(2) { border-right: 0; }
   .guide-grid article:nth-child(3), .guide-grid article:nth-child(4) { border-bottom: 0; }
   .result-stats { grid-template-columns: 1fr 1fr; }
+  .lifecycle-state { display: none; }
 }
 
 @media (max-width: 540px) {
   .brand small { display: none; }
+  .stop-button { width: 42px; padding: 0; justify-content: center; }
+  .stop-button span { display: none; }
   .topbar nav { justify-content: space-between; }
   .shell { padding-top: 42px; }
   h1 { font-size: 46px; }
@@ -201,5 +219,6 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .troubleshooting { grid-template-columns: 1fr; gap: 30px; }
   .result { padding: 28px 24px; }
   .result-stats { grid-template-columns: 1fr 1fr; }
+  .shutdown-card { padding: 38px 24px; }
   footer { width: calc(100% - 32px); flex-direction: column; }
 }

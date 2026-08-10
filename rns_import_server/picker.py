@@ -36,37 +36,44 @@ def _windows_system_directory() -> Path:
     return Path(buffer.value)
 
 
-def _choose_windows(kind: str) -> str:
-    powershell = _windows_system_directory() / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    if not powershell.is_file():
-        raise RuntimeError("windows_powershell_unavailable")
-
+def _windows_dialog_script(kind: str) -> str:
     dialog = (
         "$Dialog = New-Object System.Windows.Forms.FolderBrowserDialog\n"
         "$Dialog.Description = 'Выберите папку с PDF'\n"
         "$Dialog.ShowNewFolderButton = $false\n"
+        "$Dialog.SelectedPath = [Environment]::GetFolderPath('MyDocuments')\n"
         if kind == "directory"
         else
         "$Dialog = New-Object System.Windows.Forms.OpenFileDialog\n"
         "$Dialog.Title = 'Выберите целевой файл Excel'\n"
         "$Dialog.Filter = 'Книга Excel (*.xlsx)|*.xlsx'\n"
         "$Dialog.CheckFileExists = $true\n"
+        "$Dialog.CheckPathExists = $true\n"
         "$Dialog.Multiselect = $false\n"
+        "$Dialog.RestoreDirectory = $true\n"
+        "$Dialog.InitialDirectory = [Environment]::GetFolderPath('MyDocuments')\n"
     )
-    script = (
+    return (
         "$ErrorActionPreference = 'Stop'\n"
         "$Utf8 = New-Object System.Text.UTF8Encoding($false)\n"
         "[Console]::OutputEncoding = $Utf8\n"
         "Add-Type -AssemblyName System.Windows.Forms\n"
+        "Add-Type -AssemblyName System.Drawing\n"
+        "[System.Windows.Forms.Application]::EnableVisualStyles()\n"
         "$Owner = New-Object System.Windows.Forms.Form\n"
+        "$Owner.Text = 'PropExtract'\n"
         "$Owner.TopMost = $true\n"
         "$Owner.ShowInTaskbar = $false\n"
-        "$Owner.StartPosition = 'Manual'\n"
-        "$Owner.Opacity = 0\n"
+        "$Owner.StartPosition = 'CenterScreen'\n"
+        "$Owner.FormBorderStyle = 'FixedToolWindow'\n"
+        "$Owner.Size = New-Object System.Drawing.Size(1, 1)\n"
+        "$Owner.Opacity = 0.01\n"
         f"{dialog}"
         "try {\n"
         "  $null = $Owner.Show()\n"
+        "  $Owner.BringToFront()\n"
         "  $null = $Owner.Activate()\n"
+        "  [System.Windows.Forms.Application]::DoEvents()\n"
         "  $Result = $Dialog.ShowDialog($Owner)\n"
         "  if ($Result -eq [System.Windows.Forms.DialogResult]::OK) {\n"
         "    if ($Dialog -is [System.Windows.Forms.FolderBrowserDialog]) { $Dialog.SelectedPath } else { $Dialog.FileName }\n"
@@ -76,16 +83,28 @@ def _choose_windows(kind: str) -> str:
         "  $Owner.Dispose()\n"
         "}\n"
     )
-    result = subprocess.run(
-        [str(powershell), "-NoLogo", "-NoProfile", "-STA", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+
+
+def _choose_windows(kind: str) -> str:
+    powershell = _windows_system_directory() / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not powershell.is_file():
+        raise RuntimeError("windows_powershell_unavailable")
+    script = _windows_dialog_script(kind)
+    try:
+        result = subprocess.run(
+            [str(powershell), "-NoLogo", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("windows_picker_timeout") from error
     if result.returncode:
-        raise RuntimeError("windows_picker_failed")
+        detail = (result.stderr or result.stdout).strip().replace("\r", " ").replace("\n", " ")
+        raise RuntimeError(f"windows_picker_failed: {detail[-500:]}" if detail else "windows_picker_failed")
     return str(Path(result.stdout.strip()).resolve()) if result.stdout.strip() else ""
 
 

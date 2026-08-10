@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from rns_import_server.audit import sha256
 from rns_import_server import picker
 from rns_import_server.normalization import normalize_text
@@ -20,7 +22,7 @@ from rns_import_server.ocr import (
     tesseract_environment,
 )
 from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
-from rns_import_server.server import JobManager, create_server
+from rns_import_server.server import JobManager, create_server, user_path, validated_job_paths
 from rns_import_server.workbook import transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
 
@@ -51,6 +53,7 @@ def _wait(manager: JobManager, job_id: str) -> dict:
 def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
     pdf_dir = tmp_path / "pdf"
     pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
     target = tmp_path / "register.xlsx"
     target.write_bytes(b"original")
     manager = JobManager(_fake_runner)
@@ -78,6 +81,7 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
 def test_failed_job_leaves_target_unchanged(tmp_path: Path):
     target = tmp_path / "register.xlsx"
     target.write_bytes(b"original")
+    (tmp_path / "sample.pdf").write_bytes(b"pdf")
 
     def fail(*args, **kwargs):
         raise RuntimeError("test failure")
@@ -100,12 +104,14 @@ def _get(url: str) -> tuple[int, str, dict[str, str]]:
         return response.status, response.read().decode("utf-8"), dict(response.headers)
 
 
-def _post(url: str, payload: dict) -> tuple[int, dict]:
+def _post(url: str, payload: dict, headers: dict[str, str] | None = None) -> tuple[int, dict]:
+    request_headers = {"Content-Type": "application/json"}
+    request_headers.update(headers or {})
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
@@ -118,7 +124,7 @@ def test_http_serves_admin_help_health_and_security_headers():
     thread.start()
     try:
         status, body, headers = _get(f"http://127.0.0.1:{port}/")
-        assert status == 200 and "Перенести данные" in body
+        assert status == 200 and "Перенести данные" in body and "Остановить" in body
         assert headers["X-Frame-Options"] == "DENY"
         status, body, _ = _get(f"http://127.0.0.1:{port}/help")
         assert status == 200 and "Инструкция оператора" in body
@@ -156,6 +162,29 @@ def test_invalid_job_request_is_rejected():
         thread.join(timeout=5)
 
 
+def test_explorer_paths_with_quotes_are_normalized_before_job(tmp_path: Path):
+    pdf_dir = tmp_path / "PDF документы"
+    pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "Реестр РНС.xlsx"
+    target.write_bytes(b"original")
+
+    normalized_pdf, normalized_xlsx = validated_job_paths(f'"{pdf_dir}"', f'«{target}»')
+
+    assert normalized_pdf == pdf_dir
+    assert normalized_xlsx == target
+    assert user_path(pdf_dir.as_uri()) == pdf_dir
+
+
+def test_manual_paths_report_which_value_is_invalid(tmp_path: Path):
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"xlsx")
+    with pytest.raises(ValueError, match="Папка с PDF не найдена"):
+        validated_job_paths(str(tmp_path / "missing"), str(target))
+    with pytest.raises(ValueError, match="указан файл"):
+        validated_job_paths(str(target), str(target))
+
+
 def test_native_picker_endpoint_returns_selected_path(monkeypatch, tmp_path: Path):
     selected = tmp_path / "register.xlsx"
     monkeypatch.setattr("rns_import_server.server.select_path", lambda kind: str(selected) if kind == "xlsx" else None)
@@ -171,6 +200,58 @@ def test_native_picker_endpoint_returns_selected_path(monkeypatch, tmp_path: Pat
         assert status == 200
         assert payload == {"path": None, "cancelled": True}
     finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_shutdown_endpoint_stops_idle_server():
+    port = _unused_port()
+    server = create_server("127.0.0.1", port, _fake_runner)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/shutdown",
+            {},
+            {"X-PropExtract-Action": "shutdown"},
+        )
+        assert status == 202
+        assert payload == {"status": "stopping"}
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    finally:
+        server.server_close()
+
+
+def test_shutdown_is_rejected_while_excel_job_is_running(tmp_path: Path):
+    release = threading.Event()
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+
+    def slow_runner(*args, **kwargs):
+        release.wait(timeout=5)
+        return _fake_runner(*args, **kwargs)
+
+    port = _unused_port()
+    server = create_server("127.0.0.1", port, slow_runner)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    server.job_manager.start(str(pdf_dir), str(target))  # type: ignore[attr-defined]
+    try:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _post(
+                f"http://127.0.0.1:{port}/api/shutdown",
+                {},
+                {"X-PropExtract-Action": "shutdown"},
+            )
+        assert caught.value.code == 409
+        assert "идёт перенос данных" in caught.value.read().decode("utf-8")
+    finally:
+        release.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -210,6 +291,7 @@ def test_windows_picker_uses_exact_system_powershell(monkeypatch, tmp_path: Path
     def completed(argv, **kwargs):
         calls.append(argv)
         assert kwargs["encoding"] == "utf-8"
+        assert kwargs["timeout"] == 120
         return subprocess.CompletedProcess(argv, 0, f"{selected}\n", "")
 
     monkeypatch.setattr(picker.sys, "platform", "win32")
@@ -218,7 +300,10 @@ def test_windows_picker_uses_exact_system_powershell(monkeypatch, tmp_path: Path
 
     assert picker.choose("directory") == str(selected.resolve())
     assert calls[0][0] == str(powershell)
-    assert "FolderBrowserDialog" in calls[0][-1]
+    assert "FolderBrowserDialog" in picker._windows_dialog_script("directory")
+    assert "OpenFileDialog" in picker._windows_dialog_script("xlsx")
+    assert "$Owner.StartPosition = 'CenterScreen'" in calls[0][-1]
+    assert "$Owner.Opacity = 0.01" in calls[0][-1]
 
 
 def test_transfer_issue_explains_missing_and_conflicting_values():
@@ -265,6 +350,7 @@ def test_one_command_installers_cover_required_runtime():
     root = Path(__file__).resolve().parents[1]
     windows = (root / "install_windows.ps1").read_text(encoding="utf-8")
     windows_start = (root / "start_windows.ps1").read_text(encoding="utf-8")
+    windows_stop = (root / "stop_windows.ps1").read_text(encoding="utf-8")
     linux = (root / "install_linux.sh").read_text(encoding="utf-8")
     lock = json.loads((root / "windows-runtime.lock.json").read_text(encoding="utf-8"))
     assert lock["architectures"] == ["x64", "arm64-x64-emulation"]
@@ -286,6 +372,10 @@ def test_one_command_installers_cover_required_runtime():
     assert "struct.calcsize" not in windows
     assert "sys.maxsize > 2**32" in windows_start
     assert "struct.calcsize" not in windows_start
+    assert "/api/shutdown" in windows_stop
+    assert "X-PropExtract-Action" in windows_stop
+    assert (root / "Запустить PropExtract.cmd").is_file()
+    assert (root / "Остановить PropExtract.cmd").is_file()
     assert 'function Invoke-NativeProbe' in windows
     assert '$ErrorActionPreference = "Continue"' in windows
     assert 'tesseract v?5\\.' in windows

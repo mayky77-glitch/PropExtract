@@ -19,13 +19,20 @@
       <a class="nav-link active" href="/">Перенос данных</a>
       <a class="nav-link" href="/help">Инструкция</a>
     </nav>
-    <div class="theme-control" role="group" aria-label="Тема оформления">
-      <button class="theme-button" type="button" data-theme-choice="light" aria-label="Светлая тема" title="Светлая тема">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>
+    <div class="app-controls">
+      <span class="lifecycle-state"><span aria-hidden="true"></span>Программа запущена</span>
+      <button class="stop-button" type="button" data-shutdown aria-label="Остановить PropExtract" title="Остановить PropExtract">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9"></path><path d="M7.1 5.7a8 8 0 1 0 9.8 0"></path></svg>
+        <span>Остановить</span>
       </button>
-      <button class="theme-button" type="button" data-theme-choice="dark" aria-label="Тёмная тема" title="Тёмная тема">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.3A8.5 8.5 0 0 1 8.7 3.8 8.5 8.5 0 1 0 20.2 15.3Z"></path><path class="spark" d="m17.5 3 .45 1.05L19 4.5l-1.05.45L17.5 6l-.45-1.05L16 4.5l1.05-.45L17.5 3Z"></path></svg>
-      </button>
+      <div class="theme-control" role="group" aria-label="Тема оформления">
+        <button class="theme-button" type="button" data-theme-choice="light" aria-label="Светлая тема" title="Светлая тема">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>
+        </button>
+        <button class="theme-button" type="button" data-theme-choice="dark" aria-label="Тёмная тема" title="Тёмная тема">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.3A8.5 8.5 0 0 1 8.7 3.8 8.5 8.5 0 1 0 20.2 15.3Z"></path><path class="spark" d="m17.5 3 .45 1.05L19 4.5l-1.05.45L17.5 6l-.45-1.05L16 4.5l1.05-.45L17.5 3Z"></path></svg>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -48,7 +55,7 @@
               <span>Выбрать</span>
             </button>
           </div>
-          <small>Обрабатываются все PDF, включая вложенные папки.</small>
+          <small>Обрабатываются все PDF, включая вложенные папки. Путь из Проводника можно вставлять вместе с кавычками.</small>
         </div>
 
         <div class="field">
@@ -109,6 +116,14 @@
   </main>
 
   <div id="toast" class="toast" role="status" hidden></div>
+  <section id="shutdown-screen" class="shutdown-screen" role="status" hidden>
+    <div class="shutdown-card">
+      <span class="shutdown-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v9"></path><path d="M7.1 5.7a8 8 0 1 0 9.8 0"></path></svg></span>
+      <p class="eyebrow">Работа завершена</p>
+      <h2>PropExtract остановлен</h2>
+      <p>Эту вкладку можно закрыть. Чтобы запустить программу снова, дважды нажмите файл <code>Запустить PropExtract.cmd</code> в папке проекта.</p>
+    </div>
+  </section>
 
   <footer>
     <span>PropExtract работает только на 127.0.0.1</span>

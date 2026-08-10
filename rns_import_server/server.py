@@ -13,7 +13,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 try:
     from rns_import_server.audit import atomic_json, sha256
@@ -49,14 +49,20 @@ def select_path(kind: str) -> str | None:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=600,
+                timeout=150,
             )
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError("Время выбора пути истекло") from error
+            raise RuntimeError("Окно выбора не ответило за 2 минуты. Закройте скрытое окно в панели задач и повторите попытку.") from error
         if result.returncode:
             detail = result.stderr.strip()
             if "tkinter_unavailable" in detail:
                 raise RuntimeError("Системное окно недоступно: установите Tkinter")
+            if "windows_picker_timeout" in detail:
+                raise RuntimeError("Окно выбора не ответило за 2 минуты. Проверьте панель задач Windows и повторите попытку.")
+            if "windows_powershell_unavailable" in detail:
+                raise RuntimeError("Не найден системный Windows PowerShell для открытия окна выбора.")
+            if "windows_picker_failed" in detail:
+                raise RuntimeError("Windows не смог открыть окно выбора. Вставьте путь вручную или перезапустите PropExtract.")
             raise RuntimeError(detail or "Не удалось открыть системное окно")
         selected = result.stdout.strip()
         return selected or None
@@ -66,6 +72,50 @@ def select_path(kind: str) -> str | None:
 
 def _tool_status() -> dict[str, object]:
     return runtime_status()
+
+
+def user_path(value: str) -> Path:
+    """Normalize paths pasted from Explorer without changing valid filename characters."""
+    text = value.strip()
+    for opening, closing in (("\"", "\""), ("“", "”"), ("«", "»")):
+        if len(text) >= 2 and text.startswith(opening) and text.endswith(closing):
+            text = text[len(opening) : -len(closing)].strip()
+            break
+    if text.lower().startswith("file://"):
+        parsed = urlparse(text)
+        decoded = unquote(parsed.path)
+        if os.name == "nt":
+            if parsed.netloc:
+                decoded = f"//{parsed.netloc}{decoded}"
+            elif len(decoded) >= 3 and decoded[0] == "/" and decoded[2] == ":":
+                decoded = decoded[1:]
+        text = decoded
+    return Path(os.path.expandvars(os.path.expanduser(text)))
+
+
+def validated_job_paths(pdf_dir: str, xlsx: str) -> tuple[Path, Path]:
+    if not pdf_dir.strip() or not xlsx.strip():
+        raise ValueError("Укажите папку с PDF и целевой файл Excel")
+    pdf_path, xlsx_path = user_path(pdf_dir), user_path(xlsx)
+    if pdf_path.is_symlink():
+        raise ValueError("Папка с PDF не должна быть символической ссылкой")
+    if not pdf_path.exists():
+        raise ValueError(f"Папка с PDF не найдена: {pdf_path}")
+    if pdf_path.is_file():
+        raise ValueError(f"В поле «Папка с PDF» указан файл: {pdf_path}. Укажите папку, в которой лежат PDF.")
+    if not pdf_path.is_dir():
+        raise ValueError(f"Путь к PDF не является папкой: {pdf_path}")
+    if not any(path.is_file() for path in pdf_path.rglob("*.pdf")):
+        raise ValueError(f"В папке не найдено PDF: {pdf_path}")
+    if xlsx_path.is_symlink():
+        raise ValueError("Файл Excel не должен быть символической ссылкой")
+    if not xlsx_path.exists():
+        raise ValueError(f"Файл Excel не найден: {xlsx_path}")
+    if xlsx_path.is_dir():
+        raise ValueError(f"Указана папка вместо файла Excel: {xlsx_path}")
+    if not xlsx_path.is_file() or xlsx_path.suffix.lower() != ".xlsx":
+        raise ValueError(f"Нужен существующий файл Excel с расширением .xlsx: {xlsx_path}")
+    return pdf_path, xlsx_path
 
 
 class BusyError(RuntimeError):
@@ -82,9 +132,8 @@ class JobManager:
         self._lock = threading.Lock()
 
     def start(self, pdf_dir: str, xlsx: str, dpi: int = 180) -> dict[str, object]:
-        pdf_value, xlsx_value = pdf_dir.strip(), xlsx.strip()
-        if not pdf_value or not xlsx_value:
-            raise ValueError("Укажите папку с PDF и целевой файл Excel")
+        pdf_path, xlsx_path = validated_job_paths(pdf_dir, xlsx)
+        pdf_value, xlsx_value = str(pdf_path), str(xlsx_path)
         if dpi < 120 or dpi > 400:
             raise ValueError("DPI должен быть от 120 до 400")
         with self._lock:
@@ -105,13 +154,17 @@ class JobManager:
             }
             self._jobs[job_id] = job
             self._trim_locked()
-        threading.Thread(target=self._execute, args=(job_id, Path(pdf_value), Path(xlsx_value), dpi), daemon=True).start()
+        threading.Thread(target=self._execute, args=(job_id, pdf_path, xlsx_path, dpi), daemon=True).start()
         return self.get(job_id) or {}
 
     def get(self, job_id: str) -> dict[str, object] | None:
         with self._lock:
             job = self._jobs.get(job_id)
             return dict(job) if job else None
+
+    def has_active_job(self) -> bool:
+        with self._lock:
+            return any(job["status"] in {"queued", "running"} for job in self._jobs.values())
 
     def _trim_locked(self) -> None:
         finished = [key for key, job in self._jobs.items() if job["status"] in {"done", "error"}]
@@ -257,6 +310,13 @@ def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
                 elif path == "/api/picker":
                     selected = select_path(str(payload.get("kind", "")))
                     self.send_json(200, {"path": selected, "cancelled": selected is None})
+                elif path == "/api/shutdown":
+                    if self.headers.get("X-PropExtract-Action") != "shutdown":
+                        raise ValueError("Остановка разрешена только из интерфейса PropExtract")
+                    if manager.has_active_job():
+                        raise BusyError("Сейчас идёт перенос данных. Дождитесь завершения, затем остановите программу.")
+                    self.send_json(202, {"status": "stopping"})
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
                 elif path == "/process":
                     for key in ("pdf_dir", "xlsx", "output"):
                         if key not in payload:

@@ -7,8 +7,9 @@ on:
     paths:
       - ".github/workflows/windows-smoke.yml"
       - "install_windows.*"
-      - "start_windows.cmd"
-      - "start_windows.ps1"
+      - "start_windows.*"
+      - "stop_windows.*"
+      - "*PropExtract.cmd"
       - "windows_runtime_helpers.ps1"
       - "windows-runtime.lock.json"
       - "packages/**"
@@ -20,8 +21,9 @@ on:
     paths:
       - ".github/workflows/windows-smoke.yml"
       - "install_windows.*"
-      - "start_windows.cmd"
-      - "start_windows.ps1"
+      - "start_windows.*"
+      - "stop_windows.*"
+      - "*PropExtract.cmd"
       - "windows_runtime_helpers.ps1"
       - "windows-runtime.lock.json"
       - "packages/**"
@@ -103,3 +105,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "server import failed" }
           & $python -B -S -m rns_import_server.runtime
           if ($LASTEXITCODE -ne 0) { throw "runtime check failed" }
+      - name: Parse both Windows picker dialogs with PowerShell 5.1
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          foreach ($kind in @("directory", "xlsx")) {
+            $source = & $python -B -S -c "from rns_import_server.picker import _windows_dialog_script; import sys; print(_windows_dialog_script(sys.argv[1]))" $kind
+            if ($LASTEXITCODE -ne 0) { throw "picker script generation failed: $kind" }
+            $null = [ScriptBlock]::Create(($source | Out-String))
+          }
+      - name: Check visible start and safe stop lifecycle
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          $server = Start-Process -FilePath $python -ArgumentList @("-B", "-S", "-m", "rns_import_server.app", "serve", "--host", "127.0.0.1", "--port", "8775") -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            foreach ($attempt in 1..30) {
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+                if ($health.status -eq "ok") { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 300 }
+            }
+            if (-not $ready) { throw "server did not become ready" }
+            & .\stop_windows.cmd
+            if ($LASTEXITCODE -ne 0) { throw "stop_windows.cmd failed" }
+            if (-not $server.WaitForExit(10000)) { throw "server did not stop" }
+          } finally {
+            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          }

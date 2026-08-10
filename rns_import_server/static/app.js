@@ -22,6 +22,38 @@
     });
   });
 
+  const toast = document.querySelector("#toast");
+  const shutdownScreen = document.querySelector("#shutdown-screen");
+  let toastTimer = null;
+
+  function showToast(message, duration = 3500) {
+    if (!toast) return;
+    window.clearTimeout(toastTimer);
+    toast.textContent = message;
+    toast.hidden = false;
+    toastTimer = window.setTimeout(() => { toast.hidden = true; }, duration);
+  }
+
+  document.querySelectorAll("[data-shutdown]").forEach(button => {
+    button.addEventListener("click", async () => {
+      if (!window.confirm("Остановить PropExtract? Во время следующего запуска нужно будет открыть файл «Запустить PropExtract.cmd».")) return;
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/shutdown", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "X-PropExtract-Action": "shutdown"},
+          body: "{}"
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Не удалось остановить программу");
+        if (shutdownScreen) shutdownScreen.hidden = false;
+      } catch (error) {
+        button.disabled = false;
+        showToast(error.message, 6000);
+      }
+    });
+  });
+
   const form = document.querySelector("#import-form");
   if (!form) return;
 
@@ -38,29 +70,28 @@
   const resultBadge = document.querySelector("#result-badge");
   const resultStats = document.querySelector("#result-stats");
   const resultPaths = document.querySelector("#result-paths");
-  const toast = document.querySelector("#toast");
   const rulerSteps = [...document.querySelectorAll(".process-ruler li")];
   let pollTimer = null;
-  let toastTimer = null;
 
   const escapeText = (value) => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[char]);
-
-  function showToast(message) {
-    window.clearTimeout(toastTimer);
-    toast.textContent = message;
-    toast.hidden = false;
-    toastTimer = window.setTimeout(() => { toast.hidden = true; }, 3500);
-  }
 
   document.querySelectorAll("[data-picker-kind]").forEach(button => {
     button.addEventListener("click", async () => {
       const target = document.querySelector(`#${button.dataset.pickerTarget}`);
+      const label = button.querySelector("span");
+      const originalLabel = label?.textContent;
+      const controller = new AbortController();
+      const pickerTimeout = window.setTimeout(() => controller.abort(), 125000);
       button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      if (label) label.textContent = "Окно открыто";
+      showToast("Окно выбора открывается поверх браузера. Если его не видно, проверьте панель задач Windows.", 7000);
       try {
         const response = await fetch("/api/picker", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({kind: button.dataset.pickerKind})
+          body: JSON.stringify({kind: button.dataset.pickerKind}),
+          signal: controller.signal
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || "Не удалось открыть окно выбора");
@@ -69,9 +100,12 @@
           target.focus();
         }
       } catch (error) {
-        showToast(error.message);
+        showToast(error.name === "AbortError" ? "Окно выбора не ответило. Проверьте панель задач или вставьте путь вручную." : error.message, 7000);
       } finally {
+        window.clearTimeout(pickerTimeout);
         button.disabled = false;
+        button.removeAttribute("aria-busy");
+        if (label && originalLabel) label.textContent = originalLabel;
       }
     });
   });
@@ -147,6 +181,8 @@
       });
       const job = await response.json();
       if (!response.ok) throw new Error(job.error || "Не удалось запустить импорт");
+      if (job.pdf_dir) document.querySelector("#pdf-dir").value = job.pdf_dir;
+      if (job.xlsx) document.querySelector("#xlsx-path").value = job.xlsx;
       poll(job.id);
     } catch (error) {
       startButton.disabled = false;
