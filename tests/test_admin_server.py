@@ -273,6 +273,8 @@ def test_one_command_installers_cover_required_runtime():
     assert "Test-PropExtractFileSha256" in windows
     assert "Test-PropExtractPythonTree" in windows
     assert "Assert-SupportedWindows" in windows
+    assert 'GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")' in windows
+    assert 'GetEnvironmentVariable("TESSDATA_PREFIX", "Process")' in windows
     assert "-Verb RunAs" not in windows
     assert "EncodedCommand" not in windows
     assert "winget source reset" not in windows.lower()

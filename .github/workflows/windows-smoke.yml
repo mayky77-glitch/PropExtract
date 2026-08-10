@@ -43,8 +43,12 @@ jobs:
       - name: Run the one-click installer without WinGet or network downloads
         shell: powershell
         run: |
+          Remove-Item Env:\PYTHONDONTWRITEBYTECODE, Env:\TESSDATA_PREFIX -ErrorAction SilentlyContinue
+          $oldErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
           $output = & "$env:ComSpec" /d /c "call install_windows.cmd -NoStart" 2>&1 | Out-String
           $exitCode = $LASTEXITCODE
+          $ErrorActionPreference = $oldErrorActionPreference
           Write-Host $output
           if ($exitCode -ne 0) {
             $details = $output

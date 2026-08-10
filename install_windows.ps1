@@ -68,8 +68,12 @@ function Get-WindowsArchitecture {
     try {
         $Architecture = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" -Name PROCESSOR_ARCHITECTURE).PROCESSOR_ARCHITECTURE
     } catch { }
-    if (-not $Architecture) { $Architecture = $env:PROCESSOR_ARCHITEW6432 }
-    if (-not $Architecture) { $Architecture = $env:PROCESSOR_ARCHITECTURE }
+    if (-not $Architecture) {
+        $Architecture = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITEW6432", "Process")
+    }
+    if (-not $Architecture) {
+        $Architecture = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Process")
+    }
     switch -Regex ([string]$Architecture) {
         "ARM64" { return "arm64" }
         "AMD64" { return "x64" }
@@ -101,8 +105,8 @@ function Test-PythonRuntime([string]$Path) {
     if (-not (Test-PropExtractPythonTree $Path $RuntimeLock)) { return $false }
     $Python = Join-Path $Path ([string]$RuntimeLock.pythonTree.executablePath)
     if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) { return $false }
-    $OldNoBytecode = $env:PYTHONDONTWRITEBYTECODE
-    $env:PYTHONDONTWRITEBYTECODE = "1"
+    $OldNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
+    [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1", "Process")
     try {
         $Probe = & $Python -B -S -c "import openpyxl,struct,sys; from openpyxl import Workbook; Workbook(); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{struct.calcsize(`"P`")*8}|openpyxl-{openpyxl.__version__}')" 2>$null
         $Expected = "$([string]$RuntimeLock.artifacts.python.version)|64|openpyxl-3.1.5"
@@ -110,7 +114,7 @@ function Test-PythonRuntime([string]$Path) {
     } catch {
         return $false
     } finally {
-        $env:PYTHONDONTWRITEBYTECODE = $OldNoBytecode
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $OldNoBytecode, "Process")
     }
 }
 
@@ -188,8 +192,12 @@ function Test-NativeRuntime([string]$Path) {
     $PdfToPpm = Get-PropExtractNativeTool $Path "pdftoppm" $RuntimeLock
     if (-not $Tesseract -or -not $PdfInfo -or -not $PdfToPpm) { return $false }
 
-    $OldTessdata = $env:TESSDATA_PREFIX
-    $env:TESSDATA_PREFIX = Join-Path $Root "rns_import_server\tessdata"
+    $OldTessdata = [Environment]::GetEnvironmentVariable("TESSDATA_PREFIX", "Process")
+    [Environment]::SetEnvironmentVariable(
+        "TESSDATA_PREFIX",
+        (Join-Path $Root "rns_import_server\tessdata"),
+        "Process"
+    )
     try {
         $Version = Invoke-NativeProbe $Tesseract.FullName @("--version")
         $Languages = Invoke-NativeProbe $Tesseract.FullName @("--list-langs")
@@ -202,7 +210,7 @@ function Test-NativeRuntime([string]$Path) {
             $Info.ExitCode -eq 0 -and $Render.ExitCode -eq 0
         )
     } finally {
-        $env:TESSDATA_PREFIX = $OldTessdata
+        [Environment]::SetEnvironmentVariable("TESSDATA_PREFIX", $OldTessdata, "Process")
     }
 }
 
