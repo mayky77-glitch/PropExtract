@@ -19,7 +19,7 @@ from rns_import_server.ocr import (
     project_windows_tool,
     tesseract_environment,
 )
-from rns_import_server.runtime import runtime_status
+from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
 from rns_import_server.server import JobManager, create_server
 from rns_import_server.workbook import transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
@@ -253,6 +253,12 @@ def test_bundled_ocr_models_are_verified_and_forced():
 def test_runtime_reports_bundled_ocr_models():
     status = runtime_status()
     assert set(status["models"]) == {"rus", "eng"}
+
+
+def test_tesseract_version_formats_used_by_portable_and_system_builds():
+    assert _is_supported_tesseract_version("tesseract 5.5.1")
+    assert _is_supported_tesseract_version("tesseract v5.5.3.20260724")
+    assert not _is_supported_tesseract_version("tesseract 4.1.1")
 
 
 def test_one_command_installers_cover_required_runtime():

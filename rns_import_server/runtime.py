@@ -10,6 +10,12 @@ except ModuleNotFoundError:
     from ocr import bundled_language_status, find_tool, tesseract_environment
 
 
+def _is_supported_tesseract_version(version: str | None) -> bool:
+    if not version:
+        return False
+    return version.lower().startswith(("tesseract 5.", "tesseract v5."))
+
+
 def runtime_status() -> dict[str, object]:
     paths = {name: find_tool(name) for name in ("tesseract", "pdfinfo", "pdftoppm", "pdftotext")}
     languages: list[str] = []
@@ -39,7 +45,7 @@ def runtime_status() -> dict[str, object]:
     required_commands = all(paths[name] for name in ("tesseract", "pdfinfo", "pdftoppm"))
     models_valid = all(bool(item["valid"]) for item in models.values())
     required_languages = {"rus", "eng"}.issubset(languages)
-    tesseract_5 = bool(version and version.lower().startswith("tesseract 5."))
+    tesseract_5 = _is_supported_tesseract_version(version)
     return {
         "ready": bool(required_commands and models_valid and required_languages and tesseract_5),
         "commands": {key: bool(value) for key, value in paths.items()},
