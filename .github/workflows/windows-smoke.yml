@@ -17,6 +17,7 @@ on:
       - "requirements-rns-import.txt"
       - "rns_import_server/**"
       - "scripts/build_windows_*"
+      - "scripts/windows_ocr_stdio_probe.py"
       - "tests/test_admin_server.py"
   pull_request:
     paths:
@@ -31,6 +32,7 @@ on:
       - "requirements-rns-import.txt"
       - "rns_import_server/**"
       - "scripts/build_windows_*"
+      - "scripts/windows_ocr_stdio_probe.py"
       - "tests/test_admin_server.py"
   workflow_dispatch:
 
@@ -117,6 +119,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "server import failed" }
           & $python -B -S -m rns_import_server.runtime
           if ($LASTEXITCODE -ne 0) { throw "runtime check failed" }
+      - name: Verify blank and recognized Tesseract stdout through portable Python
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          & $python -B -S -m scripts.windows_ocr_stdio_probe
+          if ($LASTEXITCODE -ne 0) { throw "Tesseract stdout probe failed" }
       - name: Parse both Windows picker dialogs with PowerShell 5.1
         shell: powershell
         run: |
