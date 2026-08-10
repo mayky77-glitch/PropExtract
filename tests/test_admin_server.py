@@ -264,6 +264,7 @@ def test_tesseract_version_formats_used_by_portable_and_system_builds():
 def test_one_command_installers_cover_required_runtime():
     root = Path(__file__).resolve().parents[1]
     windows = (root / "install_windows.ps1").read_text(encoding="utf-8")
+    windows_start = (root / "start_windows.ps1").read_text(encoding="utf-8")
     linux = (root / "install_linux.sh").read_text(encoding="utf-8")
     lock = json.loads((root / "windows-runtime.lock.json").read_text(encoding="utf-8"))
     assert lock["architectures"] == ["x64", "arm64-x64-emulation"]
@@ -283,6 +284,8 @@ def test_one_command_installers_cover_required_runtime():
     assert 'GetEnvironmentVariable("TESSDATA_PREFIX", "Process")' in windows
     assert "sys.maxsize > 2**32" in windows
     assert "struct.calcsize" not in windows
+    assert "sys.maxsize > 2**32" in windows_start
+    assert "struct.calcsize" not in windows_start
     assert 'function Invoke-NativeProbe' in windows
     assert '$ErrorActionPreference = "Continue"' in windows
     assert 'tesseract v?5\\.' in windows

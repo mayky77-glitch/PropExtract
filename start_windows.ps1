@@ -48,7 +48,7 @@ $env:Path = "$($Tesseract.Directory.FullName);$($PdfInfo.Directory.FullName);$en
 $env:TESSDATA_PREFIX = Join-Path $Root "rns_import_server\tessdata"
 $env:PYTHONDONTWRITEBYTECODE = "1"
 
-$Probe = & $RuntimePython -B -S -c "import openpyxl,struct,sys; from openpyxl import Workbook; Workbook(); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{struct.calcsize(`"P`")*8}|openpyxl-{openpyxl.__version__}')" 2>$null
+$Probe = & $RuntimePython -B -S -c "import openpyxl,sys; from openpyxl import Workbook; Workbook(); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{64 if sys.maxsize > 2**32 else 32}|openpyxl-{openpyxl.__version__}')" 2>$null
 $Expected = "$([string]$RuntimeLock.artifacts.python.version)|64|openpyxl-3.1.5"
 $Actual = ($Probe | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $Actual -ne $Expected) {
