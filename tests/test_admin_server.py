@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
 
 from rns_import_server.audit import sha256
-from rns_import_server import app, ocr, picker, server
-from rns_import_server.normalization import normalize_text
+from rns_import_server import app, ocr, picker, rns_adapter, server
+from rns_import_server.normalization import canonical_rns_identities, normalize_text
 from rns_import_server.files import discover_pdfs
 from rns_import_server.ocr import (
     LANGUAGE_HASHES,
@@ -26,7 +27,7 @@ from rns_import_server.ocr import (
 )
 from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
 from rns_import_server.server import JobManager, create_server, error_hint, retry_file_operation, user_path, validated_job_paths
-from rns_import_server.workbook import SHEET, _change_outcome, _validate, apply, transfer_issue
+from rns_import_server.workbook import SHEET, _change_outcome, _row_by_number, _validate, apply, transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
 
 
@@ -267,6 +268,282 @@ def test_collect_keeps_valid_pdf_when_another_pdf_fails(monkeypatch, tmp_path: P
     assert list(records) == ["38-1-1-2026"]
     assert len(documents) == 2
     assert next(item for item in documents if item["file"] == str(broken))["error"] == "pdfinfo_failed"
+
+
+@pytest.mark.parametrize(
+    ("filename", "text", "expected"),
+    [
+        ("permit.pdf", "Разрешение № RU-12345678-09-2026", "RU-12345678-09-2026"),
+        ("permit.pdf", "Разрешение №RU-12345678-09-2026", "RU-12345678-09-2026"),
+        ("РY 12345678_09_2026.pdf", "скан без номера", "RU-12345678-09-2026"),
+        ("legacy.pdf", "№ 3В–7–2–2026", "38-7-2-2026"),
+        ("legacy.pdf", "№38-7-2-2026", "38-7-2-2026"),
+        ("3807122026.pdf", "скан без номера", "38-07-12-2026"),
+    ],
+)
+def test_rns_identity_accepts_sanitized_modern_ocr_and_legacy_variants(filename: str, text: str, expected: str):
+    assert rns_adapter.norm(Path(filename), text) == expected
+
+
+def test_rns_extracts_multiline_label_blocks_and_rejects_ambiguous_identity():
+    text = """№ РУ-12345678-09-2026
+Дата выдачи
+05.01.2026
+Срок действия
+до 05.01.2027
+Дата последнего изменения
+06.02.2026
+Наименование объекта
+Синтетический объект\nв две строки
+Орган выдачи
+Тестовый муниципальный орган
+Застройщик
+ООО «Синтетический застройщик»
+Разработчик ПД
+ООО «Синтетический проектировщик»
+Субъект РФ
+Тестовая область
+Муниципальный район
+Тестовый район
+"""
+    record = rns_adapter.extract(Path("form.pdf"), text)
+
+    assert record is not None
+    assert {field: record[field] for field in ("number", "issue", "end", "changed")} == {
+        "number": "RU-12345678-09-2026",
+        "issue": "05.01.2026",
+        "end": "05.01.2027",
+        "changed": "06.02.2026",
+    }
+    assert record["object"] == "Синтетический объект в две строки"
+    assert record["issuer"] == "Тестовый муниципальный орган"
+    assert record["builder"] == "ООО «Синтетический застройщик»"
+    assert record["developer"] == "ООО «Синтетический проектировщик»"
+    assert record["region"] == "Тестовая область"
+    assert record["district"] == "Тестовый район"
+    assert rns_adapter.norm(Path("none.pdf"), "без идентификатора") is None
+    assert rns_adapter.norm(Path("ambiguous.pdf"), "RU-12345678-09-2026; RU-87654321-09-2026") is None
+
+
+def test_ambiguous_body_identities_block_filename_fallback():
+    text = "RU-12345678-09-2026; RU-87654321-09-2026"
+    pdf = Path("RU-99999999-09-2026.pdf")
+
+    assert canonical_rns_identities(text) == ("RU-12345678-09-2026", "RU-87654321-09-2026")
+    assert rns_adapter.norm(pdf, text) is None
+    assert rns_adapter.extract(pdf, text) is None
+
+
+def test_collect_enriches_permit_only_with_same_explicit_id(monkeypatch, tmp_path: Path):
+    permit, amendment = tmp_path / "permit.pdf", tmp_path / "изменение.pdf"
+    permit.write_bytes(b"pdf")
+    amendment.write_bytes(b"pdf")
+    records = {
+        permit: {"number": "RU-12345678-09-2026", "issue": "05.01.2026", "object": "Синтетический объект", "changed": None},
+        amendment: {"number": "RU-12345678-09-2026", "issue": None, "object": None, "changed": "06.02.2026", "end": "05.01.2027"},
+    }
+
+    monkeypatch.setattr(app, "read_ocr", lambda pdf, *args: (pdf.name, 1))
+    monkeypatch.setattr(
+        app,
+        "extract",
+        lambda pdf, text: {
+            "filename": pdf.name,
+            "pdf": str(pdf),
+            "warnings": [],
+            **{field: None for field in app.EVIDENCE_FIELDS},
+            **records[pdf],
+        },
+    )
+    selected, documents = app.collect(tmp_path, 180, 0, pdfs=[permit, amendment])
+
+    assert documents[0]["number"] == "RU-12345678-09-2026"
+    assert selected["RU-12345678-09-2026"]["changed"] == "06.02.2026"
+    assert selected["RU-12345678-09-2026"]["end"] == "05.01.2027"
+    assert selected["RU-12345678-09-2026"]["source_files"] == ["permit.pdf", "изменение.pdf"]
+
+
+def test_collect_keeps_idless_directive_unlinked_with_diagnostic(monkeypatch, tmp_path: Path):
+    directive = tmp_path / "распоряжение-продление.pdf"
+    directive.write_bytes(b"pdf")
+    monkeypatch.setattr(app, "read_ocr", lambda pdf, *args: ("продление", 1))
+    monkeypatch.setattr(
+        app,
+        "extract",
+        lambda pdf, text: {"number": None, "filename": pdf.name, "pdf": str(pdf), "warnings": [], **{field: None for field in app.EVIDENCE_FIELDS}},
+    )
+
+    selected, documents = app.collect(tmp_path, 180, 0, pdfs=[directive])
+
+    assert selected == {}
+    diagnostic = documents[-1]
+    assert diagnostic["warnings"] == ["unlinked_directive"]
+    assert "не связано" in diagnostic["error"].casefold()
+
+
+def _synthetic_record(number: str, pdf: Path) -> dict[str, object]:
+    return {
+        "stage": None, "object": None, "issue": None, "end": None, "changed": None,
+        "issuer": None, "builder": None, "region": None, "district": None, "developer": None,
+        "filename": pdf.name, "pdf": str(pdf), "number": number,
+    }
+
+
+def test_decorated_workbook_identity_updates_only_unambiguous_row_and_preserves_formulas(tmp_path: Path):
+    source, output, pdf = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "№ RU-12345678-09-2026 от 05.01.2026\nизм от 06.02.2026"
+    sheet["B4"] = "1.0"
+    sheet["D4"] = "Синтетический объект"
+    sheet["G4"] = "05.01.2026"
+    sheet["H4"] = "05.01.2027"
+    sheet["I4"] = "06.02.2026"
+    sheet["J4"] = "Тестовый орган"
+    sheet["K4"] = "Тестовый застройщик"
+    sheet["L4"] = "Тестовая область"
+    sheet["M4"] = "Тестовый район"
+    sheet["N4"] = "Тестовый разработчик"
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    sheet["Z4"] = '=IF(F4<>"",ROW(),"")'
+    book.save(source)
+
+    record = _synthetic_record("RU-12345678-09-2026", pdf)
+    record.update({
+        "stage": "1.0", "object": "Синтетический объект", "issue": "05.01.2026",
+        "end": "05.01.2027", "changed": "06.02.2026", "issuer": "Тестовый орган",
+        "builder": "Тестовый застройщик", "region": "Тестовая область",
+        "district": "Тестовый район", "developer": "Тестовый разработчик",
+    })
+    result = apply({"RU-12345678-09-2026": record}, source, output, sha256(source))
+    saved = load_workbook(output)[SHEET]
+
+    assert result["changes"][0]["outcome"] == "already_present"
+    assert saved["F4"].value == "№ RU-12345678-09-2026 от 05.01.2026\nизм от 06.02.2026"
+    assert saved["Y4"].value == '=IF(A4<>"",ROW(),"")'
+    assert saved["Z4"].value == '=IF(F4<>"",ROW(),"")'
+    assert _row_by_number(saved, "RU-12345678-09-2026") == 4
+
+
+def test_duplicate_or_ambiguous_workbook_identity_is_conflict_without_publish_mutation(tmp_path: Path):
+    source, output, pdf = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "RU-12345678-09-2026"
+    sheet["F5"] = "№ RU-12345678-09-2026 от 05.01.2026"
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    sheet["Z5"] = '=IF(F5<>"",ROW(),"")'
+    book.save(source)
+
+    result = apply({"RU-12345678-09-2026": _synthetic_record("RU-12345678-09-2026", pdf)}, source, output, sha256(source))
+    saved = load_workbook(output)[SHEET]
+
+    assert result["changes"][0]["outcome"] == "review_conflict"
+    assert result["conflicts"][0]["action"] == "review_conflict"
+    assert saved["F4"].value == "RU-12345678-09-2026"
+    assert saved["F5"].value == "№ RU-12345678-09-2026 от 05.01.2026"
+    assert saved["Y4"].value == '=IF(A4<>"",ROW(),"")'
+    assert saved["Z5"].value == '=IF(F5<>"",ROW(),"")'
+    assert saved["W4"].value is None and saved["W5"].value is None
+
+
+def test_apply_preserves_synthetic_x14_extension_through_staged_publication(tmp_path: Path):
+    source, output, pdf = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "38-1-1-2026"
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    book.save(source)
+    with zipfile.ZipFile(source) as archive:
+        payload = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+    sheet_path = "xl/worksheets/sheet1.xml"
+    extension = (
+        b'<extLst><ext uri="{A1B2C3D4-E5F6-47A8-9B0C-D1E2F3A4B5C6}">'
+        b'<x14:conditionalFormattings xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"/>'
+        b"</ext></extLst>"
+    )
+    payload[sheet_path] = payload[sheet_path].replace(b"</worksheet>", extension + b"</worksheet>")
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in payload.items():
+            archive.writestr(name, data)
+
+    result = apply({"38-2-2-2026": _synthetic_record("38-2-2-2026", pdf)}, source, output, sha256(source))
+    with zipfile.ZipFile(source) as archive:
+        before = archive.read(sheet_path)
+    with zipfile.ZipFile(output) as archive:
+        after = archive.read(sheet_path)
+
+    assert result["verification"]["x14_preserved"] is True
+    assert extension in before and extension in after
+    assert load_workbook(output)[SHEET]["Y4"].value == '=IF(A4<>"",ROW(),"")'
+
+
+def test_directive_only_updates_one_existing_row_but_never_appends(tmp_path: Path):
+    source, output, absent = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "absent.xlsx"
+    pdf = tmp_path / "изменение.pdf"
+    pdf.write_bytes(b"pdf")
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "№ RU-12345678-09-2022 от 24.10.2022"
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    sheet["Z4"] = '=IF(F4<>"",ROW(),"")'
+    book.save(source)
+    record = _synthetic_record("RU-12345678-09-2022", pdf)
+    record.update({"existing_only": True, "end": "25.02.2027", "changed": "10.08.2026"})
+
+    result = apply({"RU-12345678-09-2022": record}, source, output, sha256(source))
+    saved = load_workbook(output)[SHEET]
+    assert result["changes"][0]["outcome"] == "updated"
+    assert saved["H4"].value.strftime("%d.%m.%Y") == "25.02.2027"
+    assert saved["I4"].value.strftime("%d.%m.%Y") == "10.08.2026"
+
+    absent_result = apply({"RU-12345678-09-2022": record}, source, absent, sha256(source))
+    assert absent_result["changes"][0]["outcome"] == "updated"
+    # Use a workbook without the identity to prove no append.
+    blank = tmp_path / "blank.xlsx"
+    book = Workbook(); sheet = book.active; sheet.title = SHEET; sheet["W3"] = "Ссылка на документ"; sheet["Y4"] = '=IF(A4<>"",ROW(),"")'; book.save(blank)
+    missing = apply({"RU-12345678-09-2022": record}, blank, tmp_path / "missing.xlsx", sha256(blank))
+    assert missing["changes"][0]["outcome"] == "review_conflict"
+    assert load_workbook(tmp_path / "missing.xlsx")[SHEET].max_row == 4
+
+
+def test_number_only_record_is_review_not_already_present(tmp_path: Path):
+    source, output, pdf = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    book = Workbook(); sheet = book.active; sheet.title = SHEET; sheet["W3"] = "Ссылка на документ"; sheet["F4"] = "38-1-1-2026"; book.save(source)
+
+    result = apply({"38-1-1-2026": _synthetic_record("38-1-1-2026", pdf)}, source, output, sha256(source))
+    assert result["changes"][0]["outcome"] == "review"
+    assert result["changes"][0]["issues"] == ["no_transferable_evidence"]
+    assert load_workbook(output)[SHEET]["W4"].value is None
+
+
+def test_rns_extracts_sanitized_modern_table_dates():
+    text = """RU-12345678-09-2022
+1. Дата выдачи разрешения | 24.10.2022 | 0
+2. Срок действия | 25.02.2027 | 0
+3. Дата последнего изменения | 01.01.2024 | 0
+3. Дата последнего изменения | 10.08.2026 | 0
+"""
+    record = rns_adapter.extract(Path("table.pdf"), text)
+    assert record is not None
+    assert {field: record[field] for field in ("issue", "end", "changed")} == {
+        "issue": "24.10.2022", "end": "25.02.2027", "changed": "10.08.2026",
+    }
+    assert {field: record["field_provenance"][field] for field in ("issue", "end", "changed")} == {
+        "issue": "ocr", "end": "ocr", "changed": "ocr",
+    }
 
 
 def test_run_does_not_publish_when_no_rns_record_is_found(monkeypatch, tmp_path: Path):

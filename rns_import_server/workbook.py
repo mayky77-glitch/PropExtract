@@ -16,10 +16,10 @@ from openpyxl.formula.translate import Translator
 
 try:
     from rns_import_server.audit import sha256
-    from rns_import_server.normalization import normalize_comparison_text
+    from rns_import_server.normalization import canonical_rns_identities, normalize_comparison_text
 except ModuleNotFoundError:  # Direct ``python rns_import_server/app.py`` invocation.
     from audit import sha256
-    from normalization import normalize_comparison_text
+    from normalization import canonical_rns_identities, normalize_comparison_text
 
 SHEET = "Реестр РНС"
 STATUS_COLUMN = 27  # AA; Y:Z are occupied by the register's service formulas.
@@ -75,6 +75,9 @@ def _change_outcome(new: bool, written: list[str], issues: list[str]) -> str:
     if written:
         return "updated"
     return "already_present"
+
+
+_TRANSFER_FIELDS = ("stage", "object", "issue", "end", "changed", "issuer", "builder", "region", "district", "developer")
 
 
 def _sheet_xml_path(book: Path, sheet_name: str) -> str:
@@ -133,11 +136,28 @@ def _reinject_extensions(source: Path, staged: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _row_by_number(sheet, number: str) -> int | None:
+def _rows_by_number(sheet, number: str) -> list[int]:
+    """Find only cells containing one unambiguous canonical RNS identity."""
+    rows: list[int] = []
     for row in range(4, sheet.max_row + 1):
-        if str(sheet.cell(row, HEADERS["Номер РНС"]).value or "").strip() == number:
-            return row
-    return None
+        identities = canonical_rns_identities(sheet.cell(row, HEADERS["Номер РНС"]).value)
+        if len(identities) == 1 and identities[0] == number:
+            rows.append(row)
+    return rows
+
+
+def _row_by_number(sheet, number: str) -> int | None:
+    rows = _rows_by_number(sheet, number)
+    return rows[0] if len(rows) == 1 else None
+
+
+def _ambiguous_rows_by_number(sheet, number: str) -> list[int]:
+    return [
+        row
+        for row in range(4, sheet.max_row + 1)
+        if number in canonical_rns_identities(sheet.cell(row, HEADERS["Номер РНС"]).value)
+        if len(canonical_rns_identities(sheet.cell(row, HEADERS["Номер РНС"]).value)) != 1
+    ]
 
 
 def _copy_row_style(sheet, source: int, target: int) -> None:
@@ -163,8 +183,6 @@ def _put(cell, value: object, label: str, number: str, conflicts: list[dict[str,
         return False
     if cell.value in (None, ""):
         cell.value = value
-        if isinstance(value, datetime):
-            cell.number_format = DATE_FMT
         return True
     previous = cell.value.date() if isinstance(cell.value, datetime) else str(cell.value).strip()
     proposed = value.date() if isinstance(value, datetime) else str(value).strip()
@@ -194,6 +212,18 @@ def _validate(
         if outcomes[number] != "already_present"
         if (row := _row_by_number(output_sheet, number)) is not None
     }
+    field_headers = {
+        "stage": "Номер этапа", "object": "Наименование объекта", "issue": "Дата выдачи", "end": "Срок действия",
+        "changed": "Дата последн. измен.", "issuer": "Орган выдачи", "builder": "Застройщик", "region": "Субъект РФ",
+        "district": "Муниципальный р-н", "developer": "Разработчик ПД",
+    }
+    intended_data_style_cells = {
+        source_sheet.cell(row, HEADERS[label]).coordinate
+        for number, record in records.items()
+        if (row := _row_by_number(source_sheet, number)) is not None
+        for field, label in field_headers.items()
+        if record.get(field) is not None
+    }
     new_record_rows = {
         row
         for number in records
@@ -206,7 +236,7 @@ def _validate(
         if outcomes[number] == "already_present"
         if (row := _row_by_number(source_sheet, number)) is not None
     }
-    intended_style_cells = intended_link_cells | intended_status_cells | {output_sheet.cell(3, STATUS_COLUMN).coordinate}
+    intended_style_cells = intended_link_cells | intended_status_cells | intended_data_style_cells | {output_sheet.cell(3, STATUS_COLUMN).coordinate}
     for row in range(4, source_sheet.max_row + 1):
         for column in range(1, source_sheet.max_column + 1):
             before, after = source_sheet.cell(row, column), output_sheet.cell(row, column)
@@ -221,6 +251,8 @@ def _validate(
             if isinstance(before.value, str) and before.value.startswith("=") and before.value != after.value:
                 raise RuntimeError(f"formula_changed:{before.coordinate}")
     for number, record in records.items():
+        if outcomes[number] == "review_conflict" or not any(record.get(field) is not None for field in _TRANSFER_FIELDS):
+            continue
         row = _row_by_number(output_sheet, number)
         if row is None:
             raise RuntimeError(f"record_missing:{number}")
@@ -258,6 +290,8 @@ def _validate(
                 datetime,
             )
             for number in records
+            if outcomes[number] != "review_conflict"
+            if any(record.get(field) is not None for field in _TRANSFER_FIELDS)
         },
     }
 
@@ -282,16 +316,41 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
         statuses: dict[str, str | None] = {}
         outcomes: dict[str, str] = {}
         for number, record in records.items():
-            row = _row_by_number(sheet, number)
+            matches = _rows_by_number(sheet, number)
+            ambiguous = _ambiguous_rows_by_number(sheet, number)
+            if len(matches) > 1 or ambiguous:
+                rows = matches if len(matches) > 1 else ambiguous
+                existing = "несколько строк Excel" if len(matches) > 1 else "несколько номеров РНС в ячейке Excel"
+                conflicts.append({"number": number, "cell": ",".join(f"F{row}" for row in rows), "field": "Номер РНС", "existing": existing, "pdf": number, "action": "review_conflict"})
+                outcomes[number] = "review_conflict"
+                statuses[number] = None
+                changes.append({"number": number, "row": None, "new": False, "outcome": "review_conflict", "written": [], "document": record["filename"], "end": record.get("end"), "status": None, "issues": ["Несколько строк Excel содержат этот номер РНС; перенос не выполнен."]})
+                continue
+            row = matches[0] if matches else None
+            if record.get("existing_only") and row is None:
+                conflicts.append({"number": number, "cell": "F", "field": "Номер РНС", "existing": "строка Excel не найдена", "pdf": number, "action": "review_conflict"})
+                outcomes[number] = "review_conflict"
+                statuses[number] = None
+                changes.append({"number": number, "row": None, "new": False, "outcome": "review_conflict", "written": [], "document": record["filename"], "end": record.get("end"), "status": None, "issues": ["Изменение/продление содержит номер РНС, но строка Excel не найдена; новая строка не создана."]})
+                continue
             new = row is None
+            if not any(record.get(field) is not None for field in _TRANSFER_FIELDS):
+                outcomes[number] = "review"
+                statuses[number] = sheet.cell(row, STATUS_COLUMN).value if row is not None else None
+                changes.append({"number": number, "row": row, "new": False, "outcome": "review", "written": [], "document": record["filename"], "end": record.get("end"), "status": statuses[number], "issues": ["no_transferable_evidence"]})
+                continue
             if new:
                 row = _next_data_row(sheet)
                 _copy_row_style(sheet, row - 1, row)
                 ids = [sheet.cell(item, 1).value for item in range(4, row) if isinstance(sheet.cell(item, 1).value, int)]
                 sheet.cell(row, 1).value = max(ids, default=0) + 1
-            mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
+            mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number if new else None, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
             issues, written = [], []
             for label, value in mapping.items():
+                if label == "Номер РНС" and not new:
+                    continue
+                if value is None:
+                    continue
                 target = sheet.cell(row, HEADERS[label])
                 if issue := transfer_issue(label, target.value, value):
                     issues.append(issue)

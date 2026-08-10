@@ -21,8 +21,56 @@ except ModuleNotFoundError:  # Direct ``python rns_import_server/app.py`` invoca
     from rns_adapter import date, extract
     from workbook import apply
 
-EVIDENCE_FIELDS = ("issue", "end", "changed", "issuer", "developer", "builder", "district", "stage", "object")
+EVIDENCE_FIELDS = ("issue", "end", "changed", "issuer", "developer", "builder", "district", "region", "stage", "object")
 ProgressCallback = Callable[[int, str, str | None], None]
+
+
+def _is_amendment(record: dict) -> bool:
+    source = str(record.get("filename", "")).casefold()
+    return any(token in source for token in ("измен", "продлен", "продлён", "приказ", "распоряжен", "extension", "amendment"))
+
+
+def _evidence_count(record: dict) -> int:
+    return sum(record.get(field) is not None for field in EVIDENCE_FIELDS)
+
+
+def _merge_group(number: str, versions: list[dict], documents: list[dict]) -> dict | None:
+    """Keep a substantive permit, then fill its gaps from identified directives only."""
+    permits = [record for record in versions if not _is_amendment(record)]
+    directives = [record for record in versions if _is_amendment(record)]
+    if not permits:
+        # Explicit ID can update one proven existing row only.  ``apply``
+        # emits a diagnostic instead of appending when that proof is absent.
+        selected = max(directives, key=lambda item: (_evidence_count(item), date(item.get("changed")) or datetime.min, str(item["filename"])))
+        existing_only = dict(selected)
+        existing_only["existing_only"] = True
+        existing_only["source_files"] = [record["filename"] for record in directives]
+        return existing_only
+    selected = max(permits, key=lambda item: (_evidence_count(item), date(item.get("changed")) or datetime.min, str(item["filename"])))
+    merged = dict(selected)
+    merged["field_provenance"] = dict(selected.get("field_provenance", {}))
+    merged["source_files"] = [selected["filename"]]
+    for directive in directives:
+        # Explicit canonical ID is supplied by the parser; evidence must be
+        # material before a directive can enrich a permit.
+        if directive.get("number") != number or _evidence_count(directive) == 0:
+            documents.append({"file": directive["pdf"], "pages": directive.get("pages"), "ocr_characters": None, "number": number, "extracted": {}, "warnings": ["unlinked_directive"], "error": "Изменение/продление не связано: недостаточно подтверждённых данных."})
+            continue
+        for field in EVIDENCE_FIELDS:
+            proposed = directive.get(field)
+            if proposed is None:
+                continue
+            if field == "changed":
+                current = merged.get(field)
+                if current is None or (date(proposed) and date(proposed) > (date(current) or datetime.min)):
+                    merged[field] = proposed
+                    merged["field_provenance"][field] = "ocr"
+            elif merged.get(field) is None:
+                merged[field] = proposed
+                merged["field_provenance"][field] = "ocr"
+        merged["source_files"].append(directive["filename"])
+    merged["warnings"] = [field for field in merged.get("warnings", []) if merged.get(field) is None]
+    return merged
 
 
 def collect(
@@ -42,9 +90,12 @@ def collect(
             text, pages = read_ocr(pdf, dpi, max_pages)
             record = extract(pdf, text)
             document = {"file": str(pdf), "pages": pages, "ocr_characters": len(text), "number": record.get("number") if record else None, "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {}, "warnings": record.get("warnings", []) if record else ["unidentified"]}
-            if record:
+            if record and record.get("number"):
                 record["pages"] = pages
                 groups.setdefault(str(record["number"]), []).append(record)
+            elif record and _is_amendment(record):
+                document["warnings"] = ["unlinked_directive"]
+                document["error"] = "Изменение/продление не связано: отсутствует явный номер РНС."
             else:
                 document["error"] = "Не найден номер РНС"
             documents.append(document)
@@ -52,7 +103,7 @@ def collect(
             documents.append({"file": str(pdf), "pages": None, "ocr_characters": 0, "number": None, "extracted": {}, "warnings": ["processing_failed"], "error": str(error) or type(error).__name__})
         if progress:
             progress(8 + int(index / len(pdfs) * 68), "PDF обработан", pdf.name)
-    chosen = {number: max(versions, key=lambda item: (date(item.get("changed")) or date(item.get("end")) or datetime.min, str(item["filename"]))) for number, versions in groups.items()}
+    chosen = {number: record for number, versions in groups.items() if (record := _merge_group(number, versions, documents)) is not None}
     return chosen, documents
 
 
