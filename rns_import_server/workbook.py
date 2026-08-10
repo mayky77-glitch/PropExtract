@@ -181,11 +181,21 @@ def _validate(
         for number in records
         if (row := _row_by_number(output_sheet, number)) is not None
     }
+    new_record_rows = {
+        row
+        for number in records
+        if _row_by_number(source_sheet, number) is None
+        if (row := _row_by_number(output_sheet, number)) is not None
+    }
     intended_style_cells = intended_link_cells | intended_status_cells | {output_sheet.cell(3, STATUS_COLUMN).coordinate}
     for row in range(4, source_sheet.max_row + 1):
         for column in range(1, source_sheet.max_column + 1):
             before, after = source_sheet.cell(row, column), output_sheet.cell(row, column)
-            if before.coordinate not in intended_style_cells and before._style != after._style:
+            if (
+                row not in new_record_rows
+                and before.coordinate not in intended_style_cells
+                and before._style != after._style
+            ):
                 raise RuntimeError(f"style_changed:{before.coordinate}")
             if isinstance(before.value, str) and before.value.startswith("=") and before.value != after.value:
                 raise RuntimeError(f"formula_changed:{before.coordinate}")

@@ -11,6 +11,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 
 from rns_import_server.audit import sha256
 from rns_import_server import app, ocr, picker, server
@@ -24,7 +26,7 @@ from rns_import_server.ocr import (
 )
 from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
 from rns_import_server.server import JobManager, create_server, error_hint, retry_file_operation, user_path, validated_job_paths
-from rns_import_server.workbook import transfer_issue
+from rns_import_server.workbook import SHEET, _validate, apply, transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
 
 
@@ -118,6 +120,60 @@ def test_failed_job_leaves_target_unchanged(tmp_path: Path):
     assert finished["error_hint"] == "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён."
     assert finished["error_log"] == str(error_log)
     assert "RuntimeError: test failure" in error_log.read_text(encoding="utf-8")
+
+
+def test_new_record_style_is_allowed_but_existing_row_style_change_is_rejected(tmp_path: Path):
+    source = tmp_path / "register.xlsx"
+    output = tmp_path / "output.xlsx"
+    pdf = tmp_path / "new-record.pdf"
+    pdf.write_bytes(b"pdf")
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["A4"] = 1
+    sheet["F4"] = "38-1-1-2026"
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    sheet["Z4"] = '=IF(F4<>"",ROW(),"")'
+    sheet["A4"].fill = PatternFill("solid", fgColor="00FF00")
+    sheet["A5"].fill = PatternFill("solid", fgColor="FFFF00")
+    sheet["Y5"] = '=IF(A5<>"",ROW(),"")'
+    sheet["Z5"] = '=IF(F5<>"",ROW(),"")'
+    workbook.save(source)
+    record = {
+        "stage": "13.5",
+        "object": "Новый объект",
+        "issue": "10.08.2026",
+        "end": None,
+        "changed": None,
+        "issuer": None,
+        "builder": None,
+        "region": None,
+        "district": None,
+        "developer": None,
+        "filename": pdf.name,
+        "pdf": str(pdf),
+    }
+
+    result = apply({"38-2-2-2026": record}, source, output, sha256(source))
+
+    saved_book = load_workbook(output)
+    saved = saved_book[SHEET]
+    assert result["changes"][0]["row"] == 5
+    assert saved["F5"].value == "38-2-2-2026"
+    assert saved["A5"]._style == saved["A4"]._style
+    assert saved["Y5"].value == '=IF(A5<>"",ROW(),"")'
+    assert saved["Z5"].value == '=IF(F5<>"",ROW(),"")'
+
+    saved["A4"].fill = PatternFill("solid", fgColor="FF0000")
+    saved_book.save(output)
+    with pytest.raises(RuntimeError, match=r"^style_changed:A4$"):
+        _validate(
+            source,
+            output,
+            {"38-2-2-2026": record},
+            {"38-2-2-2026": result["changes"][0]["status"]},
+        )
 
 
 def test_empty_native_ocr_stdout_is_safe_text(monkeypatch, tmp_path: Path):
