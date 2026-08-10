@@ -106,14 +106,23 @@ function Test-PythonRuntime([string]$Path) {
     $Python = Join-Path $Path ([string]$RuntimeLock.pythonTree.executablePath)
     if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) { return $false }
     $OldNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
+    $OldErrorActionPreference = $ErrorActionPreference
     [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1", "Process")
+    $ErrorActionPreference = "Continue"
     try {
-        $Probe = & $Python -B -S -c "import openpyxl,struct,sys; from openpyxl import Workbook; Workbook(); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{struct.calcsize(`"P`")*8}|openpyxl-{openpyxl.__version__}')" 2>$null
+        $Probe = & $Python -B -S -c "import openpyxl,struct,sys; from openpyxl import Workbook; Workbook(); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{struct.calcsize(`"P`")*8}|openpyxl-{openpyxl.__version__}')" 2>&1
+        $ProbeExitCode = $LASTEXITCODE
         $Expected = "$([string]$RuntimeLock.artifacts.python.version)|64|openpyxl-3.1.5"
-        return ($LASTEXITCODE -eq 0) -and (($Probe | Out-String).Trim() -eq $Expected)
+        $ProbeText = ($Probe | Out-String).Trim()
+        if (($ProbeExitCode -eq 0) -and ($ProbeText -eq $Expected)) { return $true }
+        $PathProbe = & $Python -B -S -c "import sys; print('|'.join(sys.path))" 2>&1 | Out-String
+        Write-Warning "Portable Python probe failed (exit $ProbeExitCode). Output: $ProbeText. sys.path: $($PathProbe.Trim())"
+        return $false
     } catch {
+        Write-Warning "Portable Python probe could not run: $($_.Exception.Message)"
         return $false
     } finally {
+        $ErrorActionPreference = $OldErrorActionPreference
         [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $OldNoBytecode, "Process")
     }
 }
