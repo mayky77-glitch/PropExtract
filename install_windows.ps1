@@ -223,7 +223,7 @@ function Test-NativeRuntime([string]$Path) {
         $Info = Invoke-NativeProbe $PdfInfo.FullName @("-v")
         $Render = Invoke-NativeProbe $PdfToPpm.FullName @("-v")
         $Ready = (
-            $Version.ExitCode -eq 0 -and $Version.Output -match "tesseract 5\." -and
+            $Version.ExitCode -eq 0 -and $Version.Output -match "(?i)tesseract v?5\." -and
             $Languages.ExitCode -eq 0 -and $Languages.Output -match "(?m)^rus\s*$" -and
             $Languages.Output -match "(?m)^eng\s*$" -and
             $Info.ExitCode -eq 0 -and $Render.ExitCode -eq 0

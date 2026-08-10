@@ -279,6 +279,7 @@ def test_one_command_installers_cover_required_runtime():
     assert "struct.calcsize" not in windows
     assert 'function Invoke-NativeProbe' in windows
     assert '$ErrorActionPreference = "Continue"' in windows
+    assert 'tesseract v?5\\.' in windows
     assert "-Verb RunAs" not in windows
     assert "EncodedCommand" not in windows
     assert "winget source reset" not in windows.lower()
