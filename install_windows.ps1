@@ -199,7 +199,13 @@ function Invoke-NativeProbe([string]$Path, [string[]]$Arguments) {
 }
 
 function Test-NativeRuntime([string]$Path) {
-    if (-not (Test-PropExtractNativeTree $Path $RuntimeLock)) { return $false }
+    if (-not (Test-PropExtractNativeTree $Path $RuntimeLock)) {
+        if (Test-Path -LiteralPath $Path -PathType Container) {
+            $ActualDigest = Get-PropExtractDirectoryDigest $Path
+            Write-Warning "Portable OCR tree mismatch: files=$($ActualDigest.Files), sha256=$($ActualDigest.Sha256)"
+        }
+        return $false
+    }
     $Tesseract = Get-PropExtractNativeTool $Path "tesseract" $RuntimeLock
     $PdfInfo = Get-PropExtractNativeTool $Path "pdfinfo" $RuntimeLock
     $PdfToPpm = Get-PropExtractNativeTool $Path "pdftoppm" $RuntimeLock
@@ -216,12 +222,22 @@ function Test-NativeRuntime([string]$Path) {
         $Languages = Invoke-NativeProbe $Tesseract.FullName @("--list-langs")
         $Info = Invoke-NativeProbe $PdfInfo.FullName @("-v")
         $Render = Invoke-NativeProbe $PdfToPpm.FullName @("-v")
-        return (
+        $Ready = (
             $Version.ExitCode -eq 0 -and $Version.Output -match "tesseract 5\." -and
             $Languages.ExitCode -eq 0 -and $Languages.Output -match "(?m)^rus\s*$" -and
             $Languages.Output -match "(?m)^eng\s*$" -and
             $Info.ExitCode -eq 0 -and $Render.ExitCode -eq 0
         )
+        if (-not $Ready) {
+            Write-Warning (
+                "Portable OCR probe failed. " +
+                "tesseract(exit=$($Version.ExitCode)): $($Version.Output.Trim()); " +
+                "languages(exit=$($Languages.ExitCode)): $($Languages.Output.Trim()); " +
+                "pdfinfo(exit=$($Info.ExitCode)): $($Info.Output.Trim()); " +
+                "pdftoppm(exit=$($Render.ExitCode)): $($Render.Output.Trim())"
+            )
+        }
+        return $Ready
     } finally {
         [Environment]::SetEnvironmentVariable("TESSDATA_PREFIX", $OldTessdata, "Process")
     }
