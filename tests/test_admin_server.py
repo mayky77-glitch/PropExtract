@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from rns_import_server.audit import sha256
-from rns_import_server import picker
+from rns_import_server import ocr, picker
 from rns_import_server.normalization import normalize_text
 from rns_import_server.ocr import (
     LANGUAGE_HASHES,
@@ -22,7 +22,7 @@ from rns_import_server.ocr import (
     tesseract_environment,
 )
 from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
-from rns_import_server.server import JobManager, create_server, user_path, validated_job_paths
+from rns_import_server.server import JobManager, create_server, error_hint, user_path, validated_job_paths
 from rns_import_server.workbook import transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
 
@@ -86,11 +86,39 @@ def test_failed_job_leaves_target_unchanged(tmp_path: Path):
     def fail(*args, **kwargs):
         raise RuntimeError("test failure")
 
-    manager = JobManager(fail)
+    error_log = tmp_path / "propextract-error.log"
+    manager = JobManager(fail, error_log=error_log)
     finished = _wait(manager, str(manager.start(str(tmp_path), str(target))["id"]))
     assert finished["status"] == "error"
     assert target.read_bytes() == b"original"
     assert not (tmp_path / "Резервные копии PropExtract").exists()
+    assert finished["error_hint"] == "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён."
+    assert finished["error_log"] == str(error_log)
+    assert "RuntimeError: test failure" in error_log.read_text(encoding="utf-8")
+
+
+def test_empty_native_ocr_stdout_is_safe_text(monkeypatch, tmp_path: Path):
+    image = tmp_path / "blank-page.png"
+    image.write_bytes(b"png")
+    monkeypatch.setattr(
+        ocr,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, None, None),
+    )
+
+    assert ocr._ocr_image(image, "tesseract") == ""
+    assert ocr._captured_text(None) == ""
+    assert ocr._captured_text("текст") == "текст"
+
+
+def test_error_hint_mentions_excel_only_for_access_errors():
+    generic = error_hint(RuntimeError("unexpected data"))
+    denied = error_hint(PermissionError("[WinError 32] used by another process"))
+    javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
+
+    assert "Закройте" not in generic
+    assert "Система запретила запись" in denied
+    assert "Проверьте пути, закройте Excel" not in javascript
 
 
 def _unused_port() -> int:

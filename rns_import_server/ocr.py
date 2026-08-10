@@ -102,6 +102,15 @@ def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) ->
     return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout, env=env)
 
 
+def _captured_text(value: object) -> str:
+    """Normalize an unexpectedly empty native-process stream to safe text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def page_count(pdf: Path) -> int:
     command = find_tool("pdfinfo")
     if not command:
@@ -112,7 +121,7 @@ def page_count(pdf: Path) -> int:
         raise RuntimeError("pdfinfo_timeout") from error
     if result.returncode:
         raise RuntimeError("pdfinfo_failed")
-    for line in result.stdout.splitlines():
+    for line in _captured_text(result.stdout).splitlines():
         if line.startswith("Pages:"):
             return int(line.split(":", 1)[1].strip())
     raise RuntimeError("pdfinfo_invalid_output")
@@ -126,9 +135,10 @@ def _text_layer(pdf: Path, last_page: int) -> str | None:
         result = _run([command, "-f", "1", "-l", str(last_page), str(pdf), "-"], timeout=90)
     except subprocess.TimeoutExpired:
         return None
-    if result.returncode or not result.stdout.strip():
+    output = _captured_text(result.stdout)
+    if result.returncode or not output.strip():
         return None
-    return result.stdout
+    return output
 
 
 def _ocr_image(image: Path, tesseract: str) -> str:
@@ -142,7 +152,7 @@ def _ocr_image(image: Path, tesseract: str) -> str:
         raise RuntimeError(f"tesseract_timeout:{image.name}") from error
     if result.returncode:
         raise RuntimeError(f"tesseract_failed:{image.name}")
-    return result.stdout
+    return _captured_text(result.stdout)
 
 
 def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
@@ -176,4 +186,4 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
         workers = min(2, len(images))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             parts = list(executor.map(lambda item: _ocr_image(item, tesseract), images))
-    return "\n".join(parts), total
+    return "\n".join(_captured_text(part) for part in parts), total

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +35,7 @@ ASSETS = {
     "/favicon.png": ("logo.png", "image/png"),
 }
 PICKER_LOCK = threading.Lock()
+ERROR_LOG = Path(__file__).resolve().parents[1] / "propextract-error.log"
 
 
 def select_path(kind: str) -> str | None:
@@ -122,12 +124,30 @@ class BusyError(RuntimeError):
     pass
 
 
+def error_hint(error: Exception) -> str:
+    """Return an actionable hint without assuming that Excel is open."""
+    message = str(error).lower()
+    lock_markers = (
+        "permission denied",
+        "access is denied",
+        "used by another process",
+        "winerror 5",
+        "winerror 32",
+    )
+    if isinstance(error, PermissionError) or any(marker in message for marker in lock_markers):
+        return "Система запретила запись в файл. Проверьте права доступа, Excel, Проводник и защитное ПО."
+    if "expected str instance, nonetype found" in message:
+        return "Обнаружено пустое значение при разборе PDF или Excel. Установите последнюю версию PropExtract и повторите запуск."
+    return "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён."
+
+
 class JobManager:
     """Own one OCR job at a time and retain a small in-memory history."""
 
-    def __init__(self, runner: Runner, history_limit: int = 20):
+    def __init__(self, runner: Runner, history_limit: int = 20, error_log: Path = ERROR_LOG):
         self.runner = runner
         self.history_limit = history_limit
+        self.error_log = error_log
         self._jobs: dict[str, dict[str, object]] = {}
         self._lock = threading.Lock()
 
@@ -178,6 +198,21 @@ class JobManager:
                 values["progress"] = max(int(job["progress"]), min(100, int(values["progress"])))
             values["updated_at"] = datetime.now().isoformat(timespec="seconds")
             job.update(values)
+
+    def _write_error_log(self, job_id: str, error: Exception, job: dict[str, object]) -> str | None:
+        details = (
+            f"PropExtract error {datetime.now().isoformat(timespec='seconds')}\n"
+            f"Job: {job_id}\n"
+            f"Stage: {job.get('stage') or '-'}\n"
+            f"PDF: {job.get('current_file') or '-'}\n"
+            f"Error: {type(error).__name__}: {error}\n\n"
+            f"{traceback.format_exc()}"
+        )
+        try:
+            self.error_log.write_text(details, encoding="utf-8")
+            return str(self.error_log)
+        except OSError:
+            return None
 
     def _execute(self, job_id: str, pdf_dir: Path, target: Path, dpi: int) -> None:
         temporary: Path | None = None
@@ -242,7 +277,19 @@ class JobManager:
                 warning=f"Excel обновлён, но отчёт не записан: {report_error}" if report_error else None,
             )
         except Exception as error:
-            self._update(job_id, status="error", stage="Обработка остановлена", error=str(error), current_file=None)
+            failed_job = self.get(job_id) or {}
+            error_log = self._write_error_log(job_id, error, failed_job)
+            self._update(
+                job_id,
+                status="error",
+                stage="Обработка остановлена",
+                error=str(error),
+                error_hint=error_hint(error),
+                error_phase=failed_job.get("stage"),
+                error_file=failed_job.get("current_file"),
+                error_log=error_log,
+                current_file=None,
+            )
         finally:
             if temporary:
                 temporary.unlink(missing_ok=True)

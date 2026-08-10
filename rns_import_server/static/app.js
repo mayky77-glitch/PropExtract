@@ -130,7 +130,10 @@
     resultBadge.textContent = failed ? "Ошибка" : "Готово";
     if (failed) {
       resultStats.innerHTML = "";
-      resultPaths.innerHTML = `<p><strong>Причина:</strong> ${escapeText(job.error || "Неизвестная ошибка")}</p><p>Проверьте пути, закройте Excel и повторите запуск.</p>`;
+      const phase = job.error_phase ? `<p><strong>Этап:</strong> ${escapeText(job.error_phase)}</p>` : "";
+      const file = job.error_file ? `<p><strong>PDF:</strong> ${escapeText(job.error_file)}</p>` : "";
+      const log = job.error_log ? `<p><strong>Технический журнал:</strong> ${escapeText(job.error_log)}</p>` : "";
+      resultPaths.innerHTML = `<p><strong>Причина:</strong> ${escapeText(job.error || "Неизвестная ошибка")}</p><p>${escapeText(job.error_hint || "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён.")}</p>${phase}${file}${log}`;
       return;
     }
     const stats = job.summary || {};
