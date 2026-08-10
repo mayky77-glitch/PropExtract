@@ -121,10 +121,18 @@ jobs:
         run: |
           $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
           $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          $env:PYTHONIOENCODING = "utf-8"
+          [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
           foreach ($kind in @("directory", "xlsx")) {
-            $source = & $python -B -S -c "from rns_import_server.picker import _windows_dialog_script; import sys; print(_windows_dialog_script(sys.argv[1]))" $kind
-            if ($LASTEXITCODE -ne 0) { throw "picker script generation failed: $kind" }
-            $null = [ScriptBlock]::Create(($source | Out-String))
+            try {
+              $source = & $python -B -S -c "from rns_import_server.picker import _windows_dialog_script; import sys; print(_windows_dialog_script(sys.argv[1]))" $kind
+              if ($LASTEXITCODE -ne 0) { throw "picker script generation failed: $kind" }
+              $null = [ScriptBlock]::Create(($source | Out-String))
+            } catch {
+              $details = $_.Exception.ToString().Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+              Write-Output "::error title=PropExtract Windows picker parse failed::$details"
+              throw
+            }
           }
       - name: Check visible start and safe stop lifecycle
         shell: powershell
