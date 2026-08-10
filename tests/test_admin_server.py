@@ -231,6 +231,9 @@ def test_one_command_installers_cover_required_runtime():
     linux = (root / "install_linux.sh").read_text(encoding="utf-8")
     for package in ("Python.Python.3.12", "tesseract-ocr.tesseract", "oschwartz10612.Poppler"):
         assert package in windows
+    assert "source reset --force --name winget" in windows
+    assert "-Verb RunAs" in windows
+    assert "--source winget" in windows
     for package in ("python3-venv", "poppler-utils", "tesseract-ocr"):
         assert package in linux
     assert "-m rns_import_server.runtime" in windows

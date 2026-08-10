@@ -3,20 +3,44 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
 function Install-WingetPackage([string]$Id) {
-    winget list --exact --id $Id --accept-source-agreements | Out-Null
+    winget list --exact --id $Id --source winget --accept-source-agreements | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Installed: $Id"
         return
     }
     Write-Host "Installing: $Id"
-    winget install --exact --id $Id --silent --accept-package-agreements --accept-source-agreements
+    winget install --exact --id $Id --source winget --silent --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -ne 0) { throw "winget failed: $Id" }
+}
+
+function Repair-WingetSource {
+    Write-Host "Checking WinGet package source..."
+    winget source update --name winget
+    if ($LASTEXITCODE -eq 0) { return }
+
+    Write-Host "WinGet source is damaged. Windows will request administrator permission to repair it."
+    $RepairCommand = "winget source reset --force --name winget; exit `$LASTEXITCODE"
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($RepairCommand))
+    $Repair = Start-Process powershell.exe `
+        -Verb RunAs `
+        -ArgumentList "-NoProfile -EncodedCommand $EncodedCommand" `
+        -Wait `
+        -PassThru
+    if ($Repair.ExitCode -ne 0) {
+        throw "WinGet source repair was cancelled or failed"
+    }
+
+    winget source update --name winget
+    if ($LASTEXITCODE -ne 0) {
+        throw "WinGet source is unavailable after repair. Check internet access and Microsoft App Installer."
+    }
 }
 
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
     throw "winget is missing. Install Microsoft App Installer, then run install_windows.cmd again."
 }
 
+Repair-WingetSource
 Install-WingetPackage "Python.Python.3.12"
 Install-WingetPackage "tesseract-ocr.tesseract"
 Install-WingetPackage "oschwartz10612.Poppler"
