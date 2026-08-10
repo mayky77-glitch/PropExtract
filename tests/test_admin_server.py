@@ -277,6 +277,8 @@ def test_one_command_installers_cover_required_runtime():
     assert 'GetEnvironmentVariable("TESSDATA_PREFIX", "Process")' in windows
     assert "sys.maxsize > 2**32" in windows
     assert "struct.calcsize" not in windows
+    assert 'function Invoke-NativeProbe' in windows
+    assert '$ErrorActionPreference = "Continue"' in windows
     assert "-Verb RunAs" not in windows
     assert "EncodedCommand" not in windows
     assert "winget source reset" not in windows.lower()

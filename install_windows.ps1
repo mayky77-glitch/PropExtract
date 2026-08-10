@@ -186,11 +186,15 @@ function Install-PythonRuntime {
 }
 
 function Invoke-NativeProbe([string]$Path, [string[]]$Arguments) {
+    $OldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         $Output = & $Path @Arguments 2>&1 | Out-String
         return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $Output }
     } catch {
         return [PSCustomObject]@{ ExitCode = -1; Output = $_.Exception.Message }
+    } finally {
+        $ErrorActionPreference = $OldErrorActionPreference
     }
 }
 
