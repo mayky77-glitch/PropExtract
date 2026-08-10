@@ -1,0 +1,5 @@
+*.cab binary
+*.dll binary
+*.exe binary
+*.whl binary
+*.zip binary
