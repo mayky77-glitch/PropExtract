@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -18,9 +20,11 @@ from urllib.parse import unquote, urlparse
 
 try:
     from rns_import_server.audit import atomic_json, sha256
+    from rns_import_server.files import discover_pdfs
     from rns_import_server.runtime import runtime_status
 except ModuleNotFoundError:
     from audit import atomic_json, sha256
+    from files import discover_pdfs
     from runtime import runtime_status
 
 Runner = Callable[..., dict]
@@ -107,7 +111,7 @@ def validated_job_paths(pdf_dir: str, xlsx: str) -> tuple[Path, Path]:
         raise ValueError(f"В поле «Папка с PDF» указан файл: {pdf_path}. Укажите папку, в которой лежат PDF.")
     if not pdf_path.is_dir():
         raise ValueError(f"Путь к PDF не является папкой: {pdf_path}")
-    if not any(path.is_file() for path in pdf_path.rglob("*.pdf")):
+    if not discover_pdfs(pdf_path):
         raise ValueError(f"В папке не найдено PDF: {pdf_path}")
     if xlsx_path.is_symlink():
         raise ValueError("Файл Excel не должен быть символической ссылкой")
@@ -139,6 +143,23 @@ def error_hint(error: Exception) -> str:
     if "expected str instance, nonetype found" in message:
         return "Обнаружено пустое значение при разборе PDF или Excel. Установите последнюю версию PropExtract и повторите запуск."
     return "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён."
+
+
+def retry_file_operation(operation: Callable[[], object], attempts: int = 6) -> object:
+    """Retry only transient Windows/share locks for a few bounded seconds."""
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except OSError as error:
+            transient = (
+                isinstance(error, PermissionError)
+                or error.errno in {errno.EACCES, errno.EBUSY, errno.EPERM}
+                or getattr(error, "winerror", None) in {5, 32, 33}
+            )
+            if not transient or attempt + 1 >= attempts:
+                raise
+            time.sleep(min(1.0, 0.2 * (2**attempt)))
+    raise RuntimeError("file_retry_exhausted")
 
 
 class JobManager:
@@ -241,11 +262,11 @@ class JobManager:
             backup_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
             backup = backup_dir / f"{target.stem} — до импорта {stamp}.xlsx"
-            shutil.copy2(target, backup)
+            retry_file_operation(lambda: shutil.copy2(target, backup))
             if sha256(backup) != expected_hash:
                 backup.unlink(missing_ok=True)
                 raise RuntimeError("Не удалось проверить резервную копию")
-            os.replace(temporary, target)
+            retry_file_operation(lambda: os.replace(temporary, target))
             temporary = None
             result["output"] = str(target)
             result["backup"] = str(backup)
@@ -255,8 +276,11 @@ class JobManager:
                 atomic_json(report, result)
             except Exception as error:  # Workbook is already safely published and backed up.
                 report_error = str(error)
+            documents = result.get("documents", [])
+            failed_documents = [item for item in documents if item.get("error")]
             summary = {
-                "pdf_count": len(result.get("documents", [])),
+                "pdf_count": len(documents) - len(failed_documents),
+                "failed_pdf_count": len(failed_documents),
                 "record_count": len(result.get("logical_records", [])),
                 "changed_rows": len(result.get("changes", [])),
                 "new_rows": sum(1 for item in result.get("changes", []) if item.get("new")),
@@ -266,6 +290,11 @@ class JobManager:
                 "row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("row")],
                 "new_row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("new") and item.get("row")],
             }
+            warnings = []
+            if failed_documents:
+                warnings.append(f"PDF пропущено: {len(failed_documents)}. Причины сохранены в отчёте.")
+            if report_error:
+                warnings.append(f"Excel обновлён, но отчёт не записан: {report_error}")
             self._update(
                 job_id,
                 status="done",
@@ -274,7 +303,7 @@ class JobManager:
                 summary=summary,
                 backup=str(backup),
                 report=str(report) if report_error is None else None,
-                warning=f"Excel обновлён, но отчёт не записан: {report_error}" if report_error else None,
+                warning=" ".join(warnings) or None,
             )
         except Exception as error:
             failed_job = self.get(job_id) or {}

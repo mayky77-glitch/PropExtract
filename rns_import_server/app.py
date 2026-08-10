@@ -10,11 +10,13 @@ from typing import Callable
 
 try:
     from rns_import_server.audit import atomic_json, digest, sha256
+    from rns_import_server.files import discover_pdfs
     from rns_import_server.ocr import read as read_ocr
     from rns_import_server.rns_adapter import date, extract
     from rns_import_server.workbook import apply
 except ModuleNotFoundError:  # Direct ``python rns_import_server/app.py`` invocation.
     from audit import atomic_json, digest, sha256
+    from files import discover_pdfs
     from ocr import read as read_ocr
     from rns_adapter import date, extract
     from workbook import apply
@@ -28,19 +30,26 @@ def collect(
     dpi: int,
     max_pages: int,
     progress: ProgressCallback | None = None,
+    pdfs: list[Path] | None = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     groups: dict[str, list[dict]] = {}
     documents: list[dict] = []
-    pdfs = sorted(pdf_dir.rglob("*.pdf"))
+    pdfs = pdfs if pdfs is not None else discover_pdfs(pdf_dir)
     for index, pdf in enumerate(pdfs, start=1):
         if progress:
             progress(8 + int((index - 1) / len(pdfs) * 68), "Распознаём PDF", pdf.name)
-        text, pages = read_ocr(pdf, dpi, max_pages)
-        record = extract(pdf, text)
-        documents.append({"file": str(pdf), "pages": pages, "ocr_characters": len(text), "number": record.get("number") if record else None, "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {}, "warnings": record.get("warnings", []) if record else ["unidentified"]})
-        if record:
-            record["pages"] = pages
-            groups.setdefault(str(record["number"]), []).append(record)
+        try:
+            text, pages = read_ocr(pdf, dpi, max_pages)
+            record = extract(pdf, text)
+            document = {"file": str(pdf), "pages": pages, "ocr_characters": len(text), "number": record.get("number") if record else None, "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {}, "warnings": record.get("warnings", []) if record else ["unidentified"]}
+            if record:
+                record["pages"] = pages
+                groups.setdefault(str(record["number"]), []).append(record)
+            else:
+                document["error"] = "Не найден номер РНС"
+            documents.append(document)
+        except Exception as error:
+            documents.append({"file": str(pdf), "pages": None, "ocr_characters": 0, "number": None, "extracted": {}, "warnings": ["processing_failed"], "error": str(error) or type(error).__name__})
         if progress:
             progress(8 + int(index / len(pdfs) * 68), "PDF обработан", pdf.name)
     chosen = {number: max(versions, key=lambda item: (date(item.get("changed")) or date(item.get("end")) or datetime.min, str(item["filename"]))) for number, versions in groups.items()}
@@ -63,13 +72,19 @@ def run(
         raise ValueError("xlsx must be a non-symlink .xlsx file")
     if output.suffix.lower() != ".xlsx" or output.resolve() == xlsx.resolve():
         raise ValueError("output must be a distinct .xlsx file")
-    pdfs = sorted(pdf_dir.rglob("*.pdf"))
-    if not pdfs or any(path.is_symlink() for path in pdfs):
+    pdfs = discover_pdfs(pdf_dir)
+    if not pdfs:
         raise ValueError("pdf_dir must contain non-symlink PDF files")
     if progress:
         progress(5, f"Найдено PDF: {len(pdfs)}", None)
     before = {"xlsx": sha256(xlsx), "pdfs": {str(path.relative_to(pdf_dir)): sha256(path) for path in pdfs}}
-    records, documents = collect(pdf_dir, dpi, max_pages, progress)
+    records, documents = collect(pdf_dir, dpi, max_pages, progress, pdfs)
+    if not records:
+        failures = [f"{Path(str(item['file'])).name}: {item.get('error', 'номер РНС не найден')}" for item in documents]
+        detail = "; ".join(failures[:3])
+        if len(failures) > 3:
+            detail += f"; ещё {len(failures) - 3}"
+        raise RuntimeError(f"Не удалось извлечь ни одной записи РНС. {detail}")
     if progress:
         progress(80, "Переносим данные в Excel", None)
     result = apply(records, xlsx, output, before["xlsx"])

@@ -99,7 +99,16 @@ def find_tool(name: str) -> str | None:
 
 
 def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout, env=env)
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=timeout,
+        env=env,
+    )
 
 
 def _captured_text(value: object) -> str:

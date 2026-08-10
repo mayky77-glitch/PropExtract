@@ -137,12 +137,14 @@
       return;
     }
     const stats = job.summary || {};
-    resultStats.innerHTML = [
+    const statItems = [
       [stats.pdf_count, "PDF обработано"],
       [stats.record_count, "Записей найдено"],
       [stats.new_rows, "Новых строк"],
       [stats.issue_count ?? stats.conflicts, "Замечаний в Excel"]
-    ].map(([number, label]) => `<div class="stat"><strong>${escapeText(number ?? 0)}</strong><span>${label}</span></div>`).join("");
+    ];
+    if (stats.failed_pdf_count) statItems.push([stats.failed_pdf_count, "PDF пропущено"]);
+    resultStats.innerHTML = statItems.map(([number, label]) => `<div class="stat"><strong>${escapeText(number ?? 0)}</strong><span>${label}</span></div>`).join("");
     const rows = (stats.row_numbers || []).join(", ") || "нет";
     const newRows = (stats.new_row_numbers || []).join(", ") || "нет";
     const issueRows = (stats.rows_with_issues || []).join(", ") || "нет";

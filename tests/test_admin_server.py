@@ -13,8 +13,9 @@ from pathlib import Path
 import pytest
 
 from rns_import_server.audit import sha256
-from rns_import_server import ocr, picker
+from rns_import_server import app, ocr, picker, server
 from rns_import_server.normalization import normalize_text
+from rns_import_server.files import discover_pdfs
 from rns_import_server.ocr import (
     LANGUAGE_HASHES,
     bundled_language_status,
@@ -22,7 +23,7 @@ from rns_import_server.ocr import (
     tesseract_environment,
 )
 from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
-from rns_import_server.server import JobManager, create_server, error_hint, user_path, validated_job_paths
+from rns_import_server.server import JobManager, create_server, error_hint, retry_file_operation, user_path, validated_job_paths
 from rns_import_server.workbook import transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
 
@@ -67,6 +68,7 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
     assert backup.read_bytes() == b"original"
     assert finished["summary"] == {
         "pdf_count": 1,
+        "failed_pdf_count": 0,
         "record_count": 1,
         "changed_rows": 1,
         "new_rows": 0,
@@ -76,6 +78,27 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "row_numbers": [42],
         "new_row_numbers": [],
     }
+
+
+def test_partial_pdf_failure_is_reported_without_stopping_valid_records(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+
+    def partial_runner(*args, **kwargs):
+        result = _fake_runner(*args, **kwargs)
+        result["documents"].append({"file": str(pdf_dir / "broken.pdf"), "error": "pdfinfo_failed"})
+        return result
+
+    manager = JobManager(partial_runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+
+    assert finished["status"] == "done"
+    assert finished["summary"]["pdf_count"] == 1
+    assert finished["summary"]["failed_pdf_count"] == 1
+    assert finished["warning"] == "PDF пропущено: 1. Причины сохранены в отчёте."
 
 
 def test_failed_job_leaves_target_unchanged(tmp_path: Path):
@@ -109,6 +132,102 @@ def test_empty_native_ocr_stdout_is_safe_text(monkeypatch, tmp_path: Path):
     assert ocr._ocr_image(image, "tesseract") == ""
     assert ocr._captured_text(None) == ""
     assert ocr._captured_text("текст") == "текст"
+
+
+def test_native_process_output_is_always_decoded_as_utf8(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def completed(argv, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "текст", "")
+
+    monkeypatch.setattr(ocr.subprocess, "run", completed)
+    result = ocr._run(["tesseract"], timeout=1)
+
+    assert result.stdout == "текст"
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def test_pdf_discovery_is_case_insensitive_and_skips_symlinks(tmp_path: Path):
+    lower = tmp_path / "lower.pdf"
+    upper = tmp_path / "UPPER.PDF"
+    lower.write_bytes(b"pdf")
+    upper.write_bytes(b"pdf")
+    (tmp_path / "notes.txt").write_text("not a pdf", encoding="utf-8")
+    try:
+        (tmp_path / "linked.pdf").symlink_to(lower)
+    except OSError:
+        pass
+
+    assert discover_pdfs(tmp_path) == [lower, upper]
+
+
+def test_collect_keeps_valid_pdf_when_another_pdf_fails(monkeypatch, tmp_path: Path):
+    broken = tmp_path / "broken.pdf"
+    valid = tmp_path / "VALID.PDF"
+    broken.write_bytes(b"broken")
+    valid.write_bytes(b"valid")
+
+    def read(pdf: Path, dpi: int, max_pages: int):
+        if pdf == broken:
+            raise RuntimeError("pdfinfo_failed")
+        return "38-1-1-2026", 1
+
+    def extract(pdf: Path, text: str):
+        return {
+            "number": "38-1-1-2026",
+            "changed": None,
+            "end": None,
+            "filename": pdf.name,
+            "pdf": str(pdf),
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(app, "read_ocr", read)
+    monkeypatch.setattr(app, "extract", extract)
+    records, documents = app.collect(tmp_path, 180, 0)
+
+    assert list(records) == ["38-1-1-2026"]
+    assert len(documents) == 2
+    assert next(item for item in documents if item["file"] == str(broken))["error"] == "pdfinfo_failed"
+
+
+def test_run_does_not_publish_when_no_rns_record_is_found(monkeypatch, tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "blank.PDF"
+    pdf.write_bytes(b"pdf")
+    xlsx = tmp_path / "register.xlsx"
+    xlsx.write_bytes(b"xlsx")
+    output = tmp_path / "output.xlsx"
+    monkeypatch.setattr(
+        app,
+        "collect",
+        lambda *args, **kwargs: ({}, [{"file": str(pdf), "error": "Не найден номер РНС"}]),
+    )
+    monkeypatch.setattr(app, "apply", lambda *args, **kwargs: pytest.fail("Excel must not be published"))
+
+    with pytest.raises(RuntimeError, match="ни одной записи РНС"):
+        app.run(pdf_dir, xlsx, output)
+    assert not output.exists()
+
+
+def test_transient_file_lock_is_retried_with_a_bound(monkeypatch):
+    attempts: list[int] = []
+    delays: list[float] = []
+
+    def operation():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise PermissionError("[WinError 32] used by another process")
+        return "ready"
+
+    monkeypatch.setattr(server.time, "sleep", delays.append)
+
+    assert retry_file_operation(operation) == "ready"
+    assert len(attempts) == 3
+    assert delays == [0.2, 0.4]
 
 
 def test_error_hint_mentions_excel_only_for_access_errors():
