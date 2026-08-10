@@ -65,7 +65,7 @@ $Url = "http://127.0.0.1:8775"
 try {
     $Health = Invoke-RestMethod -Uri "$Url/health" -TimeoutSec 2
     if ($Health.status -eq "ok" -and $Health.service -eq "rns-import") {
-        Write-Host "PropExtract уже запущен: $Url" -ForegroundColor Green
+        Write-Host "PropExtract is already running: $Url" -ForegroundColor Green
         if (-not $NoBrowser) { Start-Process $Url }
         exit 0
     }
@@ -74,6 +74,6 @@ try {
 if (-not $NoBrowser) {
     Start-Process $Url
 }
-Write-Host "PropExtract запущен. Для остановки нажмите кнопку на сайте или откройте «Остановить PropExtract.cmd»." -ForegroundColor Green
+Write-Host "PropExtract is running. Use the Stop button in the browser or run stop_windows.cmd." -ForegroundColor Green
 & $RuntimePython -B -S -m rns_import_server.app serve --host 127.0.0.1 --port 8775
 exit $LASTEXITCODE

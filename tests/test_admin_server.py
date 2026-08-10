@@ -372,6 +372,7 @@ def test_one_command_installers_cover_required_runtime():
     assert "struct.calcsize" not in windows
     assert "sys.maxsize > 2**32" in windows_start
     assert "struct.calcsize" not in windows_start
+    assert windows_start.isascii() and windows_stop.isascii()
     assert "/api/shutdown" in windows_stop
     assert "X-PropExtract-Action" in windows_stop
     assert (root / "Запустить PropExtract.cmd").is_file()
