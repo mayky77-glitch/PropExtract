@@ -278,17 +278,22 @@ class JobManager:
                 report_error = str(error)
             documents = result.get("documents", [])
             failed_documents = [item for item in documents if item.get("error")]
+            changes = result.get("changes", [])
+            already_present = [item for item in changes if item.get("outcome") == "already_present"]
             summary = {
                 "pdf_count": len(documents) - len(failed_documents),
                 "failed_pdf_count": len(failed_documents),
                 "record_count": len(result.get("logical_records", [])),
-                "changed_rows": len(result.get("changes", [])),
-                "new_rows": sum(1 for item in result.get("changes", []) if item.get("new")),
+                "changed_rows": sum(1 for item in changes if item.get("outcome") != "already_present"),
+                "new_rows": sum(1 for item in changes if item.get("new")),
+                "already_present_count": len(already_present),
+                "already_present_files": [str(item["document"]) for item in already_present if item.get("document")],
+                "already_present_rows": [item["row"] for item in already_present if item.get("row")],
                 "conflicts": len(result.get("conflicts", [])),
-                "issue_count": sum(len(item.get("issues", [])) for item in result.get("changes", [])),
-                "rows_with_issues": [item.get("row") for item in result.get("changes", []) if item.get("issues") and item.get("row")],
-                "row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("row")],
-                "new_row_numbers": [item.get("row") for item in result.get("changes", []) if item.get("new") and item.get("row")],
+                "issue_count": sum(len(item.get("issues", [])) for item in changes),
+                "rows_with_issues": [item.get("row") for item in changes if item.get("issues") and item.get("row")],
+                "row_numbers": [item.get("row") for item in changes if item.get("row")],
+                "new_row_numbers": [item.get("row") for item in changes if item.get("new") and item.get("row")],
             }
             warnings = []
             if failed_documents:

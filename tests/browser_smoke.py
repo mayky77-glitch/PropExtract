@@ -1,4 +1,5 @@
 """Manual browser QA run through tests; screenshots are written outside the repo."""
+import json
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -45,6 +46,48 @@ with sync_playwright() as playwright:
     assert page.locator("html").get_attribute("data-theme") == "dark"
     assert page.get_by_role("button", name="Тёмная тема").get_attribute("aria-pressed") == "true"
     page.screenshot(path=SCREENSHOTS / "desktop-dark.png", full_page=True)
+
+    def mock_job(route):
+        if route.request.method == "POST":
+            route.fulfill(status=202, content_type="application/json", body='{"id":"matched-records"}')
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "id": "matched-records",
+                "status": "done",
+                "progress": 100,
+                "stage": "Готово",
+                "summary": {
+                    "pdf_count": 7,
+                    "record_count": 4,
+                    "changed_rows": 0,
+                    "new_rows": 0,
+                    "already_present_count": 4,
+                    "already_present_files": ["Разрешение ВЛ 110кВ.pdf", "Продление до 28.11.2026.pdf"],
+                    "issue_count": 0,
+                    "row_numbers": [584, 585, 586, 587],
+                    "new_row_numbers": [],
+                    "rows_with_issues": [],
+                },
+                "backup": "C:\\Реестр\\Резервная копия.xlsx",
+                "report": "C:\\Реестр\\Отчёт.json",
+            }, ensure_ascii=False),
+        )
+
+    page.route("**/api/jobs**", mock_job)
+    page.get_by_label("Папка с PDF").fill("C:\\PDF")
+    page.get_by_label("Целевой файл Excel").fill("C:\\Реестр.xlsx")
+    page.get_by_role("button", name="Перенести данные").click()
+    page.get_by_role("heading", name="Данные уже внесены").wait_for(timeout=5000)
+    result_text = page.locator("#result").inner_text()
+    assert "Разрешение ВЛ 110кВ.pdf" in result_text
+    assert "Продление до 28.11.2026.pdf" in result_text
+    assert "Для этих строк" in result_text
+    assert "обновятся только цветовые маркеры сроков" in result_text
+    page.screenshot(path=SCREENSHOTS / "already-present-dark.png", full_page=True)
+    page.unroute("**/api/jobs**", mock_job)
 
     page.get_by_label("Папка с PDF").fill('"/path/that/does/not/exist"')
     page.get_by_label("Целевой файл Excel").fill("/path/that/does/not/exist.xlsx")

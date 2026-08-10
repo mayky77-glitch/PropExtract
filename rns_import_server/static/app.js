@@ -126,9 +126,9 @@
     const failed = job.status === "error";
     result.classList.toggle("error", failed);
     progressPanel.classList.toggle("error", failed);
-    resultTitle.textContent = failed ? "Реестр не изменён" : "Реестр обновлён";
-    resultBadge.textContent = failed ? "Ошибка" : "Готово";
     if (failed) {
+      resultTitle.textContent = "Реестр не изменён";
+      resultBadge.textContent = "Ошибка";
       resultStats.innerHTML = "";
       const phase = job.error_phase ? `<p><strong>Этап:</strong> ${escapeText(job.error_phase)}</p>` : "";
       const file = job.error_file ? `<p><strong>PDF:</strong> ${escapeText(job.error_file)}</p>` : "";
@@ -137,9 +137,15 @@
       return;
     }
     const stats = job.summary || {};
+    const allAlreadyPresent = Number(stats.record_count || 0) > 0
+      && Number(stats.already_present_count || 0) === Number(stats.record_count || 0)
+      && Number(stats.changed_rows || 0) === 0;
+    resultTitle.textContent = allAlreadyPresent ? "Данные уже внесены" : "Реестр обновлён";
+    resultBadge.textContent = allAlreadyPresent ? "Совпадают" : "Готово";
+    const alreadyPresentRatio = `${Number(stats.already_present_count || 0)} из ${Number(stats.record_count || 0)}`;
     const statItems = [
       [stats.pdf_count, "PDF обработано"],
-      [stats.record_count, "Записей найдено"],
+      [alreadyPresentRatio, "Уже были в реестре"],
       [stats.new_rows, "Новых строк"],
       [stats.issue_count ?? stats.conflicts, "Замечаний в Excel"]
     ];
@@ -148,7 +154,11 @@
     const rows = (stats.row_numbers || []).join(", ") || "нет";
     const newRows = (stats.new_row_numbers || []).join(", ") || "нет";
     const issueRows = (stats.rows_with_issues || []).join(", ") || "нет";
-    resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p><p><strong>Резервная копия:</strong> ${escapeText(job.backup)}</p>${job.report ? `<p><strong>Отчёт:</strong> ${escapeText(job.report)}</p>` : ""}${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
+    const alreadyPresentFiles = stats.already_present_files || [];
+    const alreadyPresent = alreadyPresentFiles.length
+      ? `<div class="result-files"><strong>Уже внесены, данные PDF совпадают:</strong><ul>${alreadyPresentFiles.map(file => `<li>${escapeText(file)}</li>`).join("")}</ul><p>Для этих строк при открытии Excel обновятся только цветовые маркеры сроков.</p></div>`
+      : "";
+    resultPaths.innerHTML = `${alreadyPresent}<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p><p><strong>Резервная копия:</strong> ${escapeText(job.backup)}</p>${job.report ? `<p><strong>Отчёт:</strong> ${escapeText(job.report)}</p>` : ""}${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
   }
 
   async function poll(jobId) {

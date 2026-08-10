@@ -67,6 +67,16 @@ def transfer_issue(label: str, existing: object, proposed: object) -> str | None
     )
 
 
+def _change_outcome(new: bool, written: list[str], issues: list[str]) -> str:
+    if new:
+        return "added"
+    if issues:
+        return "review"
+    if written:
+        return "updated"
+    return "already_present"
+
+
 def _sheet_xml_path(book: Path, sheet_name: str) -> str:
     main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -168,17 +178,20 @@ def _validate(
     staged: Path,
     records: dict[str, dict[str, object]],
     statuses: dict[str, str | None],
+    outcomes: dict[str, str],
 ) -> dict[str, Any]:
     source_book, output_book = load_workbook(source, data_only=False), load_workbook(staged, data_only=False)
     source_sheet, output_sheet = source_book[SHEET], output_book[SHEET]
     intended_link_cells = {
         f"{source_sheet.cell(row, HEADERS['Ссылка на документ']).coordinate}"
         for number in records
+        if outcomes[number] != "already_present"
         if (row := _row_by_number(source_sheet, number)) is not None
     }
     intended_status_cells = {
         f"{output_sheet.cell(row, STATUS_COLUMN).coordinate}"
         for number in records
+        if outcomes[number] != "already_present"
         if (row := _row_by_number(output_sheet, number)) is not None
     }
     new_record_rows = {
@@ -186,6 +199,12 @@ def _validate(
         for number in records
         if _row_by_number(source_sheet, number) is None
         if (row := _row_by_number(output_sheet, number)) is not None
+    }
+    already_present_rows = {
+        row
+        for number in records
+        if outcomes[number] == "already_present"
+        if (row := _row_by_number(source_sheet, number)) is not None
     }
     intended_style_cells = intended_link_cells | intended_status_cells | {output_sheet.cell(3, STATUS_COLUMN).coordinate}
     for row in range(4, source_sheet.max_row + 1):
@@ -197,6 +216,8 @@ def _validate(
                 and before._style != after._style
             ):
                 raise RuntimeError(f"style_changed:{before.coordinate}")
+            if row in already_present_rows and before.value != after.value:
+                raise RuntimeError(f"data_changed:{before.coordinate}")
             if isinstance(before.value, str) and before.value.startswith("=") and before.value != after.value:
                 raise RuntimeError(f"formula_changed:{before.coordinate}")
     for number, record in records.items():
@@ -204,7 +225,16 @@ def _validate(
         if row is None:
             raise RuntimeError(f"record_missing:{number}")
         link = output_sheet.cell(row, HEADERS["Ссылка на документ"])
-        if not link.hyperlink or link.hyperlink.target != Path(str(record["pdf"])).as_uri():
+        if outcomes[number] == "already_present":
+            source_row = _row_by_number(source_sheet, number)
+            if source_row is None:
+                raise RuntimeError(f"record_missing:{number}")
+            source_link = source_sheet.cell(source_row, HEADERS["Ссылка на документ"])
+            source_target = source_link.hyperlink.target if source_link.hyperlink else None
+            output_target = link.hyperlink.target if link.hyperlink else None
+            if link.value != source_link.value or output_target != source_target:
+                raise RuntimeError(f"link_changed:{number}")
+        elif not link.hyperlink or link.hyperlink.target != Path(str(record["pdf"])).as_uri():
             raise RuntimeError(f"link_invalid:{number}")
         if output_sheet.cell(row, STATUS_COLUMN).value != statuses[number]:
             raise RuntimeError(f"status_invalid:{number}")
@@ -250,6 +280,7 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
         sheet.column_dimensions[status_header.column_letter].width = 58
         conflicts, changes = [], []
         statuses: dict[str, str | None] = {}
+        outcomes: dict[str, str] = {}
         for number, record in records.items():
             row = _row_by_number(sheet, number)
             new = row is None
@@ -266,22 +297,35 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                     issues.append(issue)
                 if _put(target, value, label, number, conflicts):
                     written.append(target.coordinate)
+            outcome = _change_outcome(new, written, issues)
+            outcomes[number] = outcome
             link = sheet.cell(row, HEADERS["Ссылка на документ"])
-            link.value, link.hyperlink, link.style = str(record["filename"]), Path(str(record["pdf"])).as_uri(), "Hyperlink"
             status = sheet.cell(row, STATUS_COLUMN)
-            status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
-            status_alignment = copy(status.alignment)
-            status_alignment.wrap_text = True
-            status_alignment.vertical = "top"
-            status.alignment = status_alignment
-            status.value = "\n".join(issues) or None
+            if outcome != "already_present":
+                link.value, link.hyperlink, link.style = str(record["filename"]), Path(str(record["pdf"])).as_uri(), "Hyperlink"
+                status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
+                status_alignment = copy(status.alignment)
+                status_alignment.wrap_text = True
+                status_alignment.vertical = "top"
+                status.alignment = status_alignment
+                status.value = "\n".join(issues) or None
             statuses[number] = status.value
-            changes.append({"number": number, "row": row, "new": new, "written": written, "document": record["filename"], "end": record.get("end"), "status": status.value, "issues": issues})
+            changes.append({
+                "number": number,
+                "row": row,
+                "new": new,
+                "outcome": outcome,
+                "written": written,
+                "document": record["filename"],
+                "end": record.get("end"),
+                "status": status.value,
+                "issues": issues,
+            })
         workbook.save(staged)
         _reinject_extensions(source, staged)
         if sha256(source) != source_hash:
             raise RuntimeError("source_xlsx_changed")
-        verification = _validate(source, staged, records, statuses)
+        verification = _validate(source, staged, records, statuses, outcomes)
         os.replace(staged, output)
         return {"changes": changes, "conflicts": conflicts, "verification": verification}
     finally:

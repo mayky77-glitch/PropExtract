@@ -26,7 +26,7 @@ from rns_import_server.ocr import (
 )
 from rns_import_server.runtime import _is_supported_tesseract_version, runtime_status
 from rns_import_server.server import JobManager, create_server, error_hint, retry_file_operation, user_path, validated_job_paths
-from rns_import_server.workbook import SHEET, _validate, apply, transfer_issue
+from rns_import_server.workbook import SHEET, _change_outcome, _validate, apply, transfer_issue
 from scripts.build_windows_python_runtime import build as build_windows_python_runtime
 
 
@@ -39,7 +39,13 @@ def _fake_runner(pdf_dir: Path, xlsx: Path, output: Path, dpi: int, max_pages: i
         "input_hashes": {"xlsx": sha256(xlsx)},
         "documents": [{"file": str(pdf_dir / "sample.pdf")}],
         "logical_records": ["00-00-00-0000"],
-        "changes": [{"new": False, "row": 42, "issues": []}],
+        "changes": [{
+            "new": False,
+            "row": 42,
+            "issues": [],
+            "outcome": "already_present",
+            "document": "sample.pdf",
+        }],
         "conflicts": [],
     }
 
@@ -72,8 +78,11 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "pdf_count": 1,
         "failed_pdf_count": 0,
         "record_count": 1,
-        "changed_rows": 1,
+        "changed_rows": 0,
         "new_rows": 0,
+        "already_present_count": 1,
+        "already_present_files": ["sample.pdf"],
+        "already_present_rows": [42],
         "conflicts": 0,
         "issue_count": 0,
         "rows_with_issues": [],
@@ -144,13 +153,13 @@ def test_new_record_style_is_allowed_but_existing_row_style_change_is_rejected(t
         "stage": "13.5",
         "object": "Новый объект",
         "issue": "10.08.2026",
-        "end": None,
-        "changed": None,
-        "issuer": None,
-        "builder": None,
-        "region": None,
-        "district": None,
-        "developer": None,
+        "end": "10.08.2027",
+        "changed": "10.08.2026",
+        "issuer": "Администрация",
+        "builder": "Застройщик",
+        "region": "Иркутская область",
+        "district": "Иркутский район",
+        "developer": "Разработчик",
         "filename": pdf.name,
         "pdf": str(pdf),
     }
@@ -164,6 +173,16 @@ def test_new_record_style_is_allowed_but_existing_row_style_change_is_rejected(t
     assert saved["A5"]._style == saved["A4"]._style
     assert saved["Y5"].value == '=IF(A5<>"",ROW(),"")'
     assert saved["Z5"].value == '=IF(F5<>"",ROW(),"")'
+    saved["W5"] = "Старая ссылка"
+    saved["W5"].hyperlink = "https://example.invalid/old.pdf"
+    saved["AA5"] = "Старый статус"
+    saved_book.save(output)
+    repeated = apply({"38-2-2-2026": record}, output, tmp_path / "repeated.xlsx", sha256(output))
+    assert repeated["changes"][0]["outcome"] == "already_present"
+    repeated_sheet = load_workbook(tmp_path / "repeated.xlsx")[SHEET]
+    assert repeated_sheet["W5"].value == "Старая ссылка"
+    assert repeated_sheet["W5"].hyperlink.target == "https://example.invalid/old.pdf"
+    assert repeated_sheet["AA5"].value == "Старый статус"
 
     saved["A4"].fill = PatternFill("solid", fgColor="FF0000")
     saved_book.save(output)
@@ -173,6 +192,7 @@ def test_new_record_style_is_allowed_but_existing_row_style_change_is_rejected(t
             output,
             {"38-2-2-2026": record},
             {"38-2-2-2026": result["changes"][0]["status"]},
+            {"38-2-2-2026": "added"},
         )
 
 
@@ -524,6 +544,10 @@ def test_transfer_issue_explains_missing_and_conflicting_values():
     assert transfer_issue("Срок действия", "28.11.2025", "28.11.2025") is None
     assert transfer_issue("Застройщик", 'ПАО "Газпром"', "ПАО «Газпром»") is None
     assert transfer_issue("Орган выдачи", "СЛУЖБА НАДЗОРА", "Служба надзора") is None
+    assert _change_outcome(False, [], []) == "already_present"
+    assert _change_outcome(False, ["D42"], []) == "updated"
+    assert _change_outcome(False, [], ["расхождение"]) == "review"
+    assert _change_outcome(True, ["D43"], []) == "added"
 
 
 def test_document_optimizer_text_normalization_contract_is_preserved():

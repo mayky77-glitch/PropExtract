@@ -8,6 +8,7 @@ __pycache__/
 .coverage
 htmlcov/
 .runtime/
+.codex/
 
 # Editors and operating systems
 .DS_Store

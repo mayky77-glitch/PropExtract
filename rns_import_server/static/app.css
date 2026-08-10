@@ -145,6 +145,10 @@ h1 { max-width: 920px; margin: 0 0 30px; font-family: "Aptos Display", "Segoe UI
 .stat span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
 .result-paths { margin-top: 22px; color: var(--muted); font-size: 12px; line-height: 1.65; }
 .result-paths p { margin: 5px 0; overflow-wrap: anywhere; }
+.result-files { margin-bottom: 18px; padding: 16px 18px; color: var(--ink); background: color-mix(in srgb, var(--ok) 8%, var(--canvas)); border: 1px solid color-mix(in srgb, var(--ok) 28%, var(--line)); border-radius: 10px; }
+.result-files ul { margin: 8px 0; padding-left: 20px; }
+.result-files li { margin: 4px 0; overflow-wrap: anywhere; }
+.result-files p { color: var(--muted); }
 
 .help-shell { padding-top: 78px; }
 .help-title { max-width: 840px; }
