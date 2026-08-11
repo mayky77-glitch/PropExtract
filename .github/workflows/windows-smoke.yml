@@ -181,6 +181,10 @@ jobs:
             if ($held) { try { $mutex.ReleaseMutex() } catch { } }
             $mutex.Dispose()
           }
+          # The rejected child is expected to leave LASTEXITCODE=1. GitHub's
+          # PowerShell wrapper returns that value unless this successful probe
+          # explicitly clears it; assertion throws above still terminate.
+          $global:LASTEXITCODE = 0
       - name: Reject Python and native runtime junctions
         shell: powershell
         run: |

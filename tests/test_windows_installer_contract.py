@@ -34,6 +34,7 @@ def test_windows_installer_serializes_runs_and_releases_mutex_in_finally():
     workflow = (ROOT / ".github" / "workflows" / "windows-smoke.yml").read_text(encoding="utf-8")
     assert "$exitCode -eq 0 -or $elapsed -gt 10" in workflow
     assert '$output -notmatch "Установка уже выполняется"' not in workflow
+    assert "$global:LASTEXITCODE = 0" in workflow
 
 
 def test_windows_installer_preflight_rejects_unsafe_unwritable_low_space_and_long_paths():
