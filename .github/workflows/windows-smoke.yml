@@ -58,27 +58,67 @@ jobs:
       - name: Reproduce installation from a source archive
         shell: powershell
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP "propextract-source.zip"
-          $unicodeFolder = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JDRgNGF0LjQsiAmINGD0YHRgtCw0L3QvtCy0LrQsCAoMTUp"))
+          $ProgressPreference = "SilentlyContinue"
+          $env:CI = "true"
+          $archiveId = [Guid]::NewGuid().ToString("N")
+          $archive = Join-Path $env:RUNNER_TEMP ("propextract-codeload-" + $archiveId + ".zip")
+          $unicodeFolder = "Архив & установка (15) " + $archiveId
           $destination = Join-Path $env:RUNNER_TEMP $unicodeFolder
-          git archive --format=zip --prefix=PropExtract-main/ --output=$archive HEAD
-          if ($LASTEXITCODE -ne 0) { throw "source archive creation failed" }
+          $sourceArchiveUrl = "https://codeload.github.com/$env:GITHUB_REPOSITORY/zip/$env:GITHUB_SHA"
+          Invoke-WebRequest -UseBasicParsing -Uri $sourceArchiveUrl -OutFile $archive
           Expand-Archive -LiteralPath $archive -DestinationPath $destination
-          $root = Join-Path $destination "PropExtract-main"
+          $roots = @(Get-ChildItem -LiteralPath $destination -Directory -Force)
+          if ($roots.Count -ne 1) { throw "codeload archive must contain exactly one root directory; found $($roots.Count)" }
+          $root = $roots[0].FullName
           $installer = Join-Path $root "install_windows.cmd"
-          $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($installer))
-          Write-Host "archive launcher CRLF=$(([regex]::Matches($text, "`r`n")).Count) LF=$(([regex]::Matches($text, "(?<!`r)`n")).Count)"
-          Push-Location $root
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "codeload archive lacks install_windows.cmd" }
+
+          $lock = Get-Content -LiteralPath (Join-Path $root "windows-runtime.lock.json") -Raw | ConvertFrom-Json
+          $vcRuntime = $lock.artifacts.vcruntime
+          if ($vcRuntime.filename -ne "vc_runtimeMinimum_x64.zip" -or $vcRuntime.path -ne "packages/windows/vc_runtimeMinimum_x64.zip") {
+            throw "codeload runtime lock no longer points to vc_runtimeMinimum_x64.zip"
+          }
+          if ($vcRuntime.sha256 -ne "05d023de0a652a64369e9bbef971281ffd4042fd722528f194234aae5864fbcf") {
+            throw "codeload VC runtime ZIP hash is not the pinned value"
+          }
+          $vcArchive = Join-Path $root $vcRuntime.path
+          if (-not (Test-Path -LiteralPath $vcArchive -PathType Leaf)) { throw "codeload archive lacks the pinned VC runtime ZIP" }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $vcArchive).Hash.ToLowerInvariant() -ne $vcRuntime.sha256) {
+            throw "codeload VC runtime ZIP bytes do not match its lock hash"
+          }
+          $installerSource = Get-Content -LiteralPath (Join-Path $root "install_windows.ps1") -Raw
+          if ($installerSource -notmatch 'Expand-Archive\s+-LiteralPath\s+\$VcRuntimeArchive\s+-DestinationPath\s+\$PopplerBin\s+-Force') {
+            throw "installer no longer uses Unicode-safe Expand-Archive for the VC runtime"
+          }
+          if ($installerSource -match '(?i)expand\.exe|VcRuntimeCab') {
+            throw "installer contains a legacy VC extraction token"
+          }
+
+          $transcript = Join-Path $destination "absolute-cmd-install-transcript.log"
+          Push-Location $env:RUNNER_TEMP
           try {
             $oldErrorActionPreference = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
-            $output = & "$env:ComSpec" /d /c "call install_windows.cmd -NoStart" 2>&1 | Out-String
+            $cmdLine = 'call "{0}" -NoStart' -f $installer
+            $output = & "$env:ComSpec" /d /s /c $cmdLine 2>&1 | Out-String
             $exitCode = $LASTEXITCODE
             $ErrorActionPreference = $oldErrorActionPreference
+            Set-Content -LiteralPath $transcript -Value $output -Encoding utf8
             Write-Host $output
-            if ($exitCode -ne 0) { throw "source-archive installer failed with exit code $exitCode" }
+            if ($exitCode -ne 0) {
+              $tail = Get-Content -LiteralPath $transcript -Tail 150 | Out-String
+              throw "absolute codeload CMD installer failed with exit code $exitCode. Transcript tail:`n$tail"
+            }
           } finally {
             Pop-Location
+          }
+
+          # The explicit Open verb retains Windows ShellExecute file-association behavior,
+          # matching Explorer's handling of an absolute .cmd path.
+          $shellExecute = Start-Process -FilePath $installer -ArgumentList @("-NoStart") -Verb Open -WorkingDirectory $env:RUNNER_TEMP -Wait -PassThru
+          if ($shellExecute.ExitCode -ne 0) {
+            $tail = Get-Content -LiteralPath $transcript -Tail 150 | Out-String
+            throw "ShellExecute codeload CMD installer failed with exit code $($shellExecute.ExitCode). Prior CMD transcript tail:`n$tail"
           }
       - name: Run the one-click installer without WinGet or network downloads
         shell: powershell
