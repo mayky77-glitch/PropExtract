@@ -77,3 +77,14 @@ def test_windows_installer_keeps_offline_no_uac_and_russian_failure_contract():
     assert "-Verb RunAs" not in command
     assert "ОШИБКА УСТАНОВКИ" in installer
     assert "Установка завершилась с ошибкой" in command
+
+
+def test_windows_installer_preserves_preflight_failure_for_console_and_transcript():
+    installer = (ROOT / "install_windows.ps1").read_text(encoding="utf-8")
+
+    mutex = installer.index("Enter-PropExtractInstallerMutex")
+    transcript = installer.index("Start-Transcript")
+    preflight = installer.index("Assert-PropExtractInstallerPreflight $Root")
+    assert mutex < transcript < preflight
+    assert 'Write-Host "`nОШИБКА УСТАНОВКИ: $($_.Exception.Message)"' in installer
+    assert 'throw "Установка остановлена.' not in installer

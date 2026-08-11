@@ -307,7 +307,6 @@ function Install-NativeRuntime {
 try {
     $script:InstallerMutex = Get-PropExtractInstallerMutex $Root
     $script:InstallerMutexHeld = Enter-PropExtractInstallerMutex $script:InstallerMutex
-    Assert-PropExtractInstallerPreflight $Root $RuntimeRoot $PythonRoot $NativeRoot $RuntimeLock
 
     try {
         Start-Transcript -LiteralPath $TranscriptPath -Append | Out-Null
@@ -315,6 +314,8 @@ try {
     } catch {
         Write-Warning "Не удалось открыть журнал установки."
     }
+
+    Assert-PropExtractInstallerPreflight $Root $RuntimeRoot $PythonRoot $NativeRoot $RuntimeLock
 
     Write-Step "Проверка платформы Windows"
     Assert-SupportedWindows
@@ -340,9 +341,9 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Автоматический запуск PropExtract завершился с кодом $LASTEXITCODE." }
     }
 } catch {
-    Write-Host "`nОШИБКА УСТАНОВКИ. Установка остановлена." -ForegroundColor Red
+    Write-Host "`nОШИБКА УСТАНОВКИ: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Журнал: $TranscriptPath"
-    throw "Установка остановлена. Проверьте журнал установки."
+    throw
 } finally {
     Stop-InstallerTranscript
     if ($script:InstallerMutex) {
