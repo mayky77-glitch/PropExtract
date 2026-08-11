@@ -93,6 +93,7 @@ with sync_playwright() as playwright:
     assert "Продление до 28.11.2026.pdf" in result_text
     assert "Строка Excel 584" in result_text
     assert "Строка не изменена: данные уже есть в таблице." in result_text
+    assert "При открытии Excel обновятся только родные цветовые маркеры сроков." in result_text
     assert page.get_by_role("button", name="Открыть PDF").count() == 2
     page.screenshot(path=SCREENSHOTS / "already-present-dark.png", full_page=True)
     page.unroute("**/api/jobs**", mock_job)

@@ -181,7 +181,7 @@
     });
     (job.row_cards || []).filter(item => item.outcome === "already_present").forEach(item => {
       const document = documents[item.document_id] || {};
-      cards.push(`<article class="result-row"><div><h3>Строка Excel ${escapeText(item.row)} · РНС ${escapeText(item.number)}</h3><p>Строка не изменена: данные уже есть в таблице.</p><p>${escapeText(item.object || "")}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}</div></article>`);
+      cards.push(`<article class="result-row"><div><h3>Строка Excel ${escapeText(item.row)} · РНС ${escapeText(item.number)}</h3><p>Строка не изменена: данные уже есть в таблице.</p><p>При открытии Excel обновятся только родные цветовые маркеры сроков.</p><p>${escapeText(item.object || "")}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}</div></article>`);
     });
     resultRows.innerHTML = cards.join("");
   }
