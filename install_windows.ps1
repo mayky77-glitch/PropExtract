@@ -15,17 +15,23 @@ $script:TranscriptStarted = $false
 Set-Location $Root
 $HelpersPath = Join-Path $Root "windows_runtime_helpers.ps1"
 if (-not (Test-Path -LiteralPath $HelpersPath -PathType Leaf)) {
-    throw "windows_runtime_helpers.ps1 is missing; download the project again"
+    throw "Отсутствует windows_runtime_helpers.ps1; скачайте проект заново."
 }
 . $HelpersPath
 
 if (-not (Test-Path -LiteralPath $LockPath -PathType Leaf)) {
-    throw "windows-runtime.lock.json is missing; download the project again"
+    throw "Отсутствует windows-runtime.lock.json; скачайте проект заново."
 }
-$RuntimeLock = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+try {
+    $RuntimeLock = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+} catch {
+    throw "Не удалось прочитать windows-runtime.lock.json; скачайте проект заново."
+}
 $PythonRoot = Join-Path $RuntimeRoot ("python-" + [string]$RuntimeLock.artifacts.python.version)
 $RuntimePython = Join-Path $PythonRoot ([string]$RuntimeLock.pythonTree.executablePath)
 $NativeRoot = Join-Path $RuntimeRoot ("native-" + [string]$RuntimeLock.runtime)
+$script:InstallerMutex = $null
+$script:InstallerMutexHeld = $false
 
 function Write-Step([string]$Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -40,7 +46,7 @@ function Stop-InstallerTranscript {
 
 function Get-Artifact([string]$Name) {
     $Artifact = $RuntimeLock.artifacts.$Name
-    if (-not $Artifact) { throw "Unknown runtime artifact: $Name" }
+    if (-not $Artifact) { throw "Неизвестный компонент runtime: $Name" }
     return $Artifact
 }
 
@@ -48,18 +54,18 @@ function Get-VerifiedArtifact([string]$Name) {
     $Artifact = Get-Artifact $Name
     $Path = Join-Path $Root ([string]$Artifact.path)
     if (-not (Test-PropExtractFileSha256 $Path ([string]$Artifact.sha256))) {
-        throw "Bundled artifact is missing or damaged: $($Artifact.filename). Download the project again."
+        throw "Встроенный компонент отсутствует или повреждён: $($Artifact.filename). Скачайте проект заново."
     }
-    Write-Host "Verified bundled artifact: $($Artifact.filename)"
+    Write-Host "Проверен встроенный компонент: $($Artifact.filename)"
     return $Path
 }
 
 function Get-VerifiedPythonPackage([object]$Package) {
     $Path = Join-Path $Root ([string]$Package.path)
     if (-not (Test-PropExtractFileSha256 $Path ([string]$Package.sha256))) {
-        throw "Bundled Python package is missing or damaged: $($Package.filename). Download the project again."
+        throw "Встроенный пакет Python отсутствует или повреждён: $($Package.filename). Скачайте проект заново."
     }
-    Write-Host "Verified bundled Python package: $($Package.filename)"
+    Write-Host "Проверен встроенный пакет Python: $($Package.filename)"
     return $Path
 }
 
@@ -84,21 +90,21 @@ function Get-WindowsArchitecture {
 
 function Assert-SupportedWindows {
     if (-not [Environment]::Is64BitOperatingSystem) {
-        throw "32-bit Windows is not supported: the pinned OCR runtime is x64"
+        throw "32-разрядная Windows не поддерживается: закреплённый OCR runtime предназначен для x64."
     }
     $Architecture = Get-WindowsArchitecture
     if ($Architecture -eq "x64") {
-        Write-Host "Windows architecture: x64"
+        Write-Host "Архитектура Windows: x64"
         return
     }
     if ($Architecture -eq "arm64") {
         if ([Environment]::OSVersion.Version.Build -lt 22000) {
-            throw "ARM64 requires Windows 11 with x64 application emulation"
+            throw "Для ARM64 требуется Windows 11 с эмуляцией приложений x64."
         }
-        Write-Warning "ARM64 detected. The pinned x64 runtime will run through Windows 11 emulation and will be tested before use."
+        Write-Warning "Обнаружена ARM64. Закреплённый runtime x64 будет работать через эмуляцию Windows 11 и будет проверен перед использованием."
         return
     }
-    throw "Unsupported Windows architecture: $Architecture"
+    throw "Неподдерживаемая архитектура Windows: $Architecture"
 }
 
 function Test-PythonRuntime([string]$Path) {
@@ -116,10 +122,10 @@ function Test-PythonRuntime([string]$Path) {
         $ProbeText = ($Probe | Out-String).Trim()
         if (($ProbeExitCode -eq 0) -and ($ProbeText -eq $Expected)) { return $true }
         $PathProbe = & $Python -B -S -c "import sys; print('|'.join(sys.path))" 2>&1 | Out-String
-        Write-Warning "Portable Python probe failed (exit $ProbeExitCode). Output: $ProbeText. sys.path: $($PathProbe.Trim())"
+        Write-Warning "Проверка portable Python не пройдена (код $ProbeExitCode). Вывод: $ProbeText. sys.path: $($PathProbe.Trim())"
         return $false
     } catch {
-        Write-Warning "Portable Python probe could not run: $($_.Exception.Message)"
+        Write-Warning "Не удалось запустить проверку portable Python: $($_.Exception.Message)"
         return $false
     } finally {
         $ErrorActionPreference = $OldErrorActionPreference
@@ -127,21 +133,32 @@ function Test-PythonRuntime([string]$Path) {
     }
 }
 
-function Publish-RuntimeTree([string]$Staging, [string]$Target) {
+function Publish-RuntimeTree([string]$Staging, [string]$Target, [scriptblock]$TargetIsVerified) {
     $Backup = $null
+    $ReplacementPublished = $false
     if (Test-Path -LiteralPath $Target) {
         $Backup = "$Target.invalid.$(Get-Date -Format 'yyyyMMdd-HHmmss').$([Guid]::NewGuid().ToString('N'))"
         Move-Item -LiteralPath $Target -Destination $Backup
     }
     try {
         Move-Item -LiteralPath $Staging -Destination $Target
+        $ReplacementPublished = $true
+        if (-not (& $TargetIsVerified $Target)) {
+            throw "Проверка опубликованного runtime не пройдена."
+        }
     } catch {
         $PublishError = $_
-        if ($Backup -and -not (Test-Path -LiteralPath $Target) -and (Test-Path -LiteralPath $Backup)) {
+        if ($Backup -and (Test-Path -LiteralPath $Backup)) {
             try {
-                Move-Item -LiteralPath $Backup -Destination $Target
+                if ($ReplacementPublished -and (Test-Path -LiteralPath $Target)) {
+                    $Failed = "$Staging.publish-failed.$([Guid]::NewGuid().ToString('N'))"
+                    Move-Item -LiteralPath $Target -Destination $Failed
+                }
+                if (-not (Test-Path -LiteralPath $Target)) {
+                    Move-Item -LiteralPath $Backup -Destination $Target
+                }
             } catch {
-                Write-Warning "Runtime rollback failed; preserved tree: $Backup"
+                Write-Warning "Откат runtime не выполнен; сохранено дерево: $Backup"
             }
         }
         throw $PublishError
@@ -150,11 +167,11 @@ function Publish-RuntimeTree([string]$Staging, [string]$Target) {
 
 function Install-PythonRuntime {
     if (Test-PythonRuntime $PythonRoot) {
-        Write-Host "Pinned portable Python is ready: $PythonRoot"
+        Write-Host "Закреплённый portable Python готов: $PythonRoot"
         return $RuntimePython
     }
 
-    Write-Step "Preparing portable Python 3.12.10 (no installer, no UAC)"
+    Write-Step "Подготовка portable Python 3.12.10 (без установщика и UAC)"
     $PythonArchive = Get-VerifiedArtifact "python"
     $VerifiedPackages = @()
     foreach ($Package in $RuntimeLock.pythonTree.packages) {
@@ -162,7 +179,7 @@ function Install-PythonRuntime {
     }
     $PthTemplate = Join-Path $Root ([string]$RuntimeLock.pythonTree.pthTemplatePath)
     if (-not (Test-Path -LiteralPath $PthTemplate -PathType Leaf)) {
-        throw "python312._pth is missing; download the project again"
+        throw "Отсутствует python312._pth; скачайте проект заново."
     }
 
     New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
@@ -178,10 +195,11 @@ function Install-PythonRuntime {
     Copy-Item -LiteralPath $PthTemplate -Destination (Join-Path $Staging "python312._pth") -Force
 
     if (-not (Test-PythonRuntime $Staging)) {
-        throw "Portable Python integrity or import check failed. Staging kept for diagnostics: $Staging"
+        throw "Проверка целостности или импорта portable Python не пройдена. Временное дерево сохранено для диагностики: $Staging"
     }
-    Publish-RuntimeTree $Staging $PythonRoot
-    Write-Host "Portable Python verified: $PythonRoot"
+    Publish-RuntimeTree $Staging $PythonRoot { param($Path) Test-PythonRuntime $Path }
+    Remove-PropExtractStaleRuntimeBackups $PythonRoot { param($Path) Test-PythonRuntime $Path }
+    Write-Host "Portable Python проверен: $PythonRoot"
     return $RuntimePython
 }
 
@@ -202,7 +220,7 @@ function Test-NativeRuntime([string]$Path) {
     if (-not (Test-PropExtractNativeTree $Path $RuntimeLock)) {
         if (Test-Path -LiteralPath $Path -PathType Container) {
             $ActualDigest = Get-PropExtractDirectoryDigest $Path
-            Write-Warning "Portable OCR tree mismatch: files=$($ActualDigest.Files), sha256=$($ActualDigest.Sha256)"
+            Write-Warning "Дерево portable OCR не соответствует ожидаемому: файлов=$($ActualDigest.Files), sha256=$($ActualDigest.Sha256)"
         }
         return $false
     }
@@ -230,7 +248,7 @@ function Test-NativeRuntime([string]$Path) {
         )
         if (-not $Ready) {
             Write-Warning (
-                "Portable OCR probe failed. " +
+                "Проверка portable OCR не пройдена. " +
                 "tesseract(exit=$($Version.ExitCode)): $($Version.Output.Trim()); " +
                 "languages(exit=$($Languages.ExitCode)): $($Languages.Output.Trim()); " +
                 "pdfinfo(exit=$($Info.ExitCode)): $($Info.Output.Trim()); " +
@@ -245,11 +263,11 @@ function Test-NativeRuntime([string]$Path) {
 
 function Install-NativeRuntime {
     if (Test-NativeRuntime $NativeRoot) {
-        Write-Host "Pinned OCR runtime is ready: $NativeRoot"
+        Write-Host "Закреплённый OCR runtime готов: $NativeRoot"
         return $NativeRoot
     }
 
-    Write-Step "Preparing portable Tesseract and Poppler (no installer, no UAC)"
+    Write-Step "Подготовка portable Tesseract и Poppler (без установщика и UAC)"
     $TesseractArchive = Get-VerifiedArtifact "tesseract"
     $PopplerArchive = Get-VerifiedArtifact "poppler"
     $VcRuntimeCab = Get-VerifiedArtifact "vcruntime"
@@ -263,14 +281,14 @@ function Install-NativeRuntime {
     Expand-Archive -LiteralPath $PopplerArchive -DestinationPath $PopplerPath -Force
     $PopplerBin = Join-Path $Staging ([string]$RuntimeLock.nativeTree.popplerBinPath)
     if (-not (Test-Path -LiteralPath (Join-Path $PopplerBin "pdfinfo.exe") -PathType Leaf)) {
-        throw "Pinned Poppler archive has an unexpected layout"
+        throw "Закреплённый архив Poppler имеет непредвиденную структуру."
     }
 
     $VcStaging = Join-Path $Staging "vcruntime"
     New-Item -ItemType Directory -Path $VcStaging -Force | Out-Null
     $ExpandExe = Join-Path $env:SystemRoot "System32\expand.exe"
     & $ExpandExe "-F:*" $VcRuntimeCab $VcStaging | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Microsoft VC runtime CAB extraction failed" }
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось распаковать CAB-файл Microsoft VC runtime." }
     foreach ($File in Get-ChildItem -LiteralPath $VcStaging -File) {
         $TargetName = $File.Name -replace "_amd64$", ""
         Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $PopplerBin $TargetName) -Force
@@ -278,24 +296,29 @@ function Install-NativeRuntime {
     Remove-Item -LiteralPath $VcStaging -Recurse -Force
 
     if (-not (Test-NativeRuntime $Staging)) {
-        throw "Portable OCR runtime integrity or smoke check failed. Staging kept for diagnostics: $Staging"
+        throw "Проверка целостности или работоспособности portable OCR runtime не пройдена. Временное дерево сохранено для диагностики: $Staging"
     }
-    Publish-RuntimeTree $Staging $NativeRoot
-    Write-Host "Portable OCR runtime verified: $NativeRoot"
+    Publish-RuntimeTree $Staging $NativeRoot { param($Path) Test-NativeRuntime $Path }
+    Remove-PropExtractStaleRuntimeBackups $NativeRoot { param($Path) Test-NativeRuntime $Path }
+    Write-Host "Portable OCR runtime проверен: $NativeRoot"
     return $NativeRoot
 }
 
 try {
+    $script:InstallerMutex = Get-PropExtractInstallerMutex $Root
+    $script:InstallerMutexHeld = Enter-PropExtractInstallerMutex $script:InstallerMutex
+    Assert-PropExtractInstallerPreflight $Root $RuntimeRoot $PythonRoot $NativeRoot $RuntimeLock
+
     try {
         Start-Transcript -LiteralPath $TranscriptPath -Append | Out-Null
         $script:TranscriptStarted = $true
     } catch {
-        Write-Warning "Installation log could not be opened: $($_.Exception.Message)"
+        Write-Warning "Не удалось открыть журнал установки."
     }
 
-    Write-Step "Checking Windows platform"
+    Write-Step "Проверка платформы Windows"
     Assert-SupportedWindows
-    Write-Host "WinGet, Microsoft Store, network downloads and administrator rights are not used."
+    Write-Host "WinGet, Microsoft Store, network downloads и права администратора не используются."
 
     $Python = Install-PythonRuntime
     $Native = Install-NativeRuntime
@@ -305,21 +328,29 @@ try {
     $env:TESSDATA_PREFIX = Join-Path $Root "rns_import_server\tessdata"
     $env:PYTHONDONTWRITEBYTECODE = "1"
 
-    Write-Step "Checking the complete OCR runtime"
+    Write-Step "Проверка полного OCR runtime"
     & $Python -B -S -m rns_import_server.runtime
-    if ($LASTEXITCODE -ne 0) { throw "OCR runtime check failed" }
+    if ($LASTEXITCODE -ne 0) { throw "Проверка OCR runtime завершилась с ошибкой." }
 
-    Write-Host "`nPropExtract is ready." -ForegroundColor Green
-    Write-Host "Installation log: $TranscriptPath"
+    Write-Host "`nPropExtract готов к работе." -ForegroundColor Green
+    Write-Host "Журнал установки: $TranscriptPath"
     Stop-InstallerTranscript
     if (-not $NoStart) {
         & (Join-Path $Root "start_windows.cmd")
-        if ($LASTEXITCODE -ne 0) { throw "PropExtract automatic start failed with exit code $LASTEXITCODE" }
+        if ($LASTEXITCODE -ne 0) { throw "Автоматический запуск PropExtract завершился с кодом $LASTEXITCODE." }
     }
 } catch {
-    Write-Host "`nINSTALLATION ERROR: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Log: $TranscriptPath"
-    throw
+    Write-Host "`nОШИБКА УСТАНОВКИ. Установка остановлена." -ForegroundColor Red
+    Write-Host "Журнал: $TranscriptPath"
+    throw "Установка остановлена. Проверьте журнал установки."
 } finally {
     Stop-InstallerTranscript
+    if ($script:InstallerMutex) {
+        if ($script:InstallerMutexHeld) {
+            try { $script:InstallerMutex.ReleaseMutex() } catch { }
+        }
+        $script:InstallerMutex.Dispose()
+        $script:InstallerMutex = $null
+        $script:InstallerMutexHeld = $false
+    }
 }
