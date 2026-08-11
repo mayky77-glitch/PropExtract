@@ -38,7 +38,7 @@ def _native_relative_path(value: str | Path, workspace: Path | None) -> str:
 
 def _native_argv(command: str, arguments: list[str], workspace: Path | None = None) -> list[str]:
     return [
-        _native_relative_path(command, workspace),
+        command,
         *[_native_relative_path(argument, workspace) for argument in arguments],
     ]
 
