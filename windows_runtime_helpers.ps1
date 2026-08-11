@@ -59,11 +59,20 @@ function Test-PropExtractTreeContainsReparsePoint([string]$Path) {
 
 function Assert-PropExtractWritableDirectory([string]$Path, [string]$Label) {
     $Probe = Join-Path $Path (".propextract-write-probe-" + [Guid]::NewGuid().ToString("N"))
+    $ProbeStream = $null
     try {
-        New-Item -ItemType File -LiteralPath $Probe -ErrorAction Stop | Out-Null
+        $ProbeStream = [IO.File]::Open(
+            $Probe,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $ProbeStream.Dispose()
+        $ProbeStream = $null
     } catch {
         throw "Нет прав на запись в $Label. Переместите проект в доступную папку и повторите установку."
     } finally {
+        if ($ProbeStream) { $ProbeStream.Dispose() }
         if (Test-Path -LiteralPath $Probe -PathType Leaf) {
             Remove-Item -LiteralPath $Probe -Force -ErrorAction SilentlyContinue
         }
@@ -208,7 +217,7 @@ function Assert-PropExtractInstallerPreflight(
     }
 
     Assert-PropExtractWritableDirectory $ResolvedRoot "папке проекта"
-    New-Item -ItemType Directory -LiteralPath $RuntimeRoot -Force | Out-Null
+    [IO.Directory]::CreateDirectory($RuntimeRoot) | Out-Null
     Assert-PropExtractWritableDirectory $RuntimeRoot "рабочем каталоге runtime"
 }
 

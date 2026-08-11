@@ -40,6 +40,11 @@ def test_windows_installer_preflight_rejects_unsafe_unwritable_low_space_and_lon
     assert "foreach ($Path in @($RuntimeRoot, $PythonRoot, $NativeRoot))" in helpers
     assert "Test-PropExtractTreeContainsReparsePoint $Path" in helpers
     assert "Assert-PropExtractWritableDirectory" in helpers
+    assert "[IO.File]::Open(" in helpers
+    assert "[IO.FileMode]::CreateNew" in helpers
+    assert "[IO.Directory]::CreateDirectory($RuntimeRoot)" in helpers
+    assert "New-Item -ItemType File -LiteralPath" not in helpers
+    assert "New-Item -ItemType Directory -LiteralPath" not in helpers
     assert "Get-PropExtractRequiredStagingBytes" in helpers
     assert "Get-PropExtractArchiveExpandedBytes" in helpers
     assert "$SafetyReserveBytes = 64MB" in helpers
