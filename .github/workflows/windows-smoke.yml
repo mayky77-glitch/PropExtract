@@ -144,10 +144,6 @@ jobs:
           Invoke-ShellExecuteCmdProbe "ASCII path" $asciiProbe (Join-Path $probeRoot "ascii-probe.marker")
           Invoke-ShellExecuteCmdProbe "complex codeload path" $complexProbe (Join-Path $probeRoot "complex-probe.marker")
 
-          # The explicit Open verb uses Windows ShellExecute file association, matching
-          # Explorer's no-argument handling of an absolute .cmd path. This must be the
-          # first launch against the clean archive root.
-          $shellExecute = Start-Process -FilePath $installer -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
           $installLog = Join-Path $root "install-windows.log"
           $archiveRuntimeRoot = Join-Path $root ".runtime\windows"
           $pythonRoot = Join-Path $archiveRuntimeRoot ("python-" + $lock.artifacts.python.version)
@@ -155,6 +151,75 @@ jobs:
           $nativeRoot = Join-Path $archiveRuntimeRoot ("native-" + $lock.runtime)
           $nativeRuntime = Join-Path (Join-Path $nativeRoot $lock.nativeTree.popplerBinPath) "pdfinfo.exe"
           . (Join-Path $root "windows_runtime_helpers.ps1")
+          $currentInstallerBytes = [IO.File]::ReadAllBytes($installer)
+          $currentCrlfCount = 0
+          $currentLoneLfCount = 0
+          for ($index = 0; $index -lt $currentInstallerBytes.Length; $index++) {
+            if ($currentInstallerBytes[$index] -eq 10) {
+              if ($index -gt 0 -and $currentInstallerBytes[$index - 1] -eq 13) { $currentCrlfCount++ } else { $currentLoneLfCount++ }
+            }
+          }
+          if ($currentCrlfCount -eq 0 -or $currentLoneLfCount -ne 0) { throw "current codeload install_windows.cmd is not CRLF-only" }
+          Write-Host "current codeload install_windows.cmd CRLF=$currentCrlfCount loneLF=$currentLoneLfCount"
+
+          $legacyProbe = Join-Path $root "legacy-crlf-only-install.cmd"
+          $legacyBytes = [Convert]::FromBase64String("QGVjaG8gb2ZmCnNldGxvY2FsCmNoY3AgNjUwMDEgPm51bApjZCAvZCAiJX5kcDAiCiIlU3lzdGVtUm9vdCVcU3lzdGVtMzJcV2luZG93c1Bvd2VyU2hlbGxcdjEuMFxwb3dlcnNoZWxsLmV4ZSIgLU5vTG9nbyAtTm9Qcm9maWxlIC1FeGVjdXRpb25Qb2xpY3kgQnlwYXNzIC1GaWxlICIlfmRwMGluc3RhbGxfd2luZG93cy5wczEiICUqCmlmIGVycm9ybGV2ZWwgMSAoCiAgZWNoby4KICBlY2hvINCj0YHRgtCw0L3QvtCy0LrQsCDQt9Cw0LLQtdGA0YjQuNC70LDRgdGMINGBINC+0YjQuNCx0LrQvtC5LiDQodC8LiDRgdC+0L7QsdGJ0LXQvdC40LUg0LLRi9GI0LUuCiAgaWYgbm90IGRlZmluZWQgQ0kgcGF1c2UKICBleGl0IC9iIDEKKQplbmRsb2NhbAo=")
+          $legacyCrlfBytes = New-Object 'System.Collections.Generic.List[byte]'
+          foreach ($legacyByte in $legacyBytes) {
+            if ($legacyByte -eq 10) { [void]$legacyCrlfBytes.Add([byte]13) }
+            [void]$legacyCrlfBytes.Add($legacyByte)
+          }
+          [IO.File]::WriteAllBytes($legacyProbe, $legacyCrlfBytes.ToArray())
+          $legacyLogObserved = $false
+          $legacyRuntimeVerified = $false
+          $legacyHealthObserved = $false
+          $legacyOutcome = "failed"
+          $legacyDetails = "not started"
+          $legacyProcess = $null
+          try {
+            $legacyProcess = Start-Process -FilePath $legacyProbe -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
+            $legacyDeadline = [DateTime]::UtcNow.AddSeconds(120)
+            while ([DateTime]::UtcNow -lt $legacyDeadline) {
+              $legacyLogObserved = $legacyLogObserved -or (Test-Path -LiteralPath $installLog -PathType Leaf)
+              if (-not $legacyRuntimeVerified -and (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -and (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
+                $legacyRuntimeVerified = (Test-PropExtractPythonTree $pythonRoot $lock) -and (Test-PropExtractNativeTree $nativeRoot $lock)
+              }
+              if ($legacyRuntimeVerified) {
+                try {
+                  $legacyHealthResponse = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+                  $legacyHealth = $legacyHealthResponse.Content | ConvertFrom-Json
+                  if ($legacyHealth.status -eq "ok" -and $legacyHealth.service -eq "rns-import") { $legacyHealthObserved = $true; break }
+                } catch { }
+              }
+              if ($legacyProcess.HasExited) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if ($legacyHealthObserved) {
+              $legacyShutdown = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:8775/api/shutdown" -Headers @{ "X-PropExtract-Action" = "shutdown" } -ContentType "application/json" -Body "{}" -TimeoutSec 8
+              if ($legacyShutdown.StatusCode -ne 202) { throw "shutdown returned HTTP $($legacyShutdown.StatusCode)" }
+              $legacyExitDeadline = [DateTime]::UtcNow.AddSeconds(30)
+              while (-not $legacyProcess.HasExited -and [DateTime]::UtcNow -lt $legacyExitDeadline) { Start-Sleep -Milliseconds 250 }
+              if (-not $legacyProcess.HasExited) { throw "process did not exit after shutdown" }
+              if ($legacyProcess.ExitCode -ne 0) { throw "process exited $($legacyProcess.ExitCode) after shutdown" }
+              $legacyOutcome = "passed"
+              $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$($legacyProcess.ExitCode)"
+            } else {
+              $legacyExit = if ($legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "running at timeout" }
+              $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$legacyExit"
+              if (-not $legacyProcess.HasExited) { Stop-Process -Id $legacyProcess.Id -Force }
+            }
+          } catch {
+            $legacyExit = if ($legacyProcess -and $legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "unavailable" }
+            $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$legacyExit error=$($_.Exception.Message)"
+            if ($legacyProcess -and -not $legacyProcess.HasExited) { Stop-Process -Id $legacyProcess.Id -Force }
+          }
+          Write-Host "legacy CRLF-only $legacyOutcome: $legacyDetails"
+          Remove-Item -LiteralPath $installLog -Force -ErrorAction SilentlyContinue
+
+          # The explicit Open verb uses Windows ShellExecute file association, matching
+          # Explorer's no-argument handling of an absolute .cmd path. This must be the
+          # first launch against the clean archive root.
+          $shellExecute = Start-Process -FilePath $installer -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
           $runtimeVerified = $false
           $healthReady = $false
           $healthDeadline = [DateTime]::UtcNow.AddSeconds(180)
@@ -180,17 +245,78 @@ jobs:
             throw "ShellExecute no-argument installer did not become healthy (process exit: $processExit). Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
           }
           if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw "ShellExecute installer became healthy without install-windows.log" }
-          $shutdownResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:8775/api/shutdown" -Headers @{ "X-PropExtract-Action" = "shutdown" } -ContentType "application/json" -Body "{}" -TimeoutSec 8
-          if ($shutdownResponse.StatusCode -ne 202) { throw "ShellExecute server shutdown returned HTTP $($shutdownResponse.StatusCode)" }
+          $currentInstance = [string]$healthResponse.Headers["X-PropExtract-Instance"]
+          if ($currentInstance -notmatch '^[0-9a-f]{64}$') { throw "ShellExecute health response lacks the expected instance identifier" }
+          $stopLauncherName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0J7RgdGC0LDQvdC+0LLQuNGC0YwgUHJvcEV4dHJhY3QuY21k"))
+          $startLauncherName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JfQsNC/0YPRgdGC0LjRgtGMIFByb3BFeHRyYWN0LmNtZA=="))
+          $stopLauncher = Join-Path $root $stopLauncherName
+          $startLauncher = Join-Path $root $startLauncherName
+          if (-not (Test-Path -LiteralPath $stopLauncher -PathType Leaf) -or -not (Test-Path -LiteralPath $startLauncher -PathType Leaf)) {
+            throw "codeload archive lacks a user-facing lifecycle launcher"
+          }
+          $stopProcess = Start-Process -FilePath $stopLauncher -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
           $exitDeadline = [DateTime]::UtcNow.AddSeconds(30)
+          while (-not $stopProcess.HasExited -and [DateTime]::UtcNow -lt $exitDeadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $stopProcess.HasExited -or $stopProcess.ExitCode -ne 0) {
+            $stopExit = if ($stopProcess.HasExited) { [string]$stopProcess.ExitCode } else { "timeout" }
+            throw "ShellExecute user stop launcher failed with exit $stopExit"
+          }
+          $instanceStopped = $false
+          $stopHealthDeadline = [DateTime]::UtcNow.AddSeconds(15)
+          while ([DateTime]::UtcNow -lt $stopHealthDeadline) {
+            try {
+              $stoppedHealthResponse = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+              $stoppedInstance = [string]$stoppedHealthResponse.Headers["X-PropExtract-Instance"]
+              if ($stoppedInstance -ne $currentInstance) { $instanceStopped = $true; break }
+            } catch {
+              $instanceStopped = $true
+              break
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $instanceStopped) { throw "ShellExecute user stop launcher did not remove the running instance" }
           while (-not $shellExecute.HasExited -and [DateTime]::UtcNow -lt $exitDeadline) {
             Start-Sleep -Milliseconds 250
           }
           if (-not $shellExecute.HasExited) {
-            throw "ShellExecute no-argument installer did not exit after shutdown. Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
+            throw "ShellExecute no-argument installer did not exit after user stop. Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
           }
           if ($shellExecute.ExitCode -ne 0) {
-            throw "ShellExecute no-argument installer failed with exit code $($shellExecute.ExitCode). Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
+            throw "ShellExecute no-argument installer failed with exit code $($shellExecute.ExitCode) after user stop. Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
+          }
+          $restartProcess = Start-Process -FilePath $startLauncher -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
+          $restartReady = $false
+          $restartDeadline = [DateTime]::UtcNow.AddSeconds(45)
+          while ([DateTime]::UtcNow -lt $restartDeadline) {
+            if ($restartProcess.HasExited) { break }
+            try {
+              $restartHealthResponse = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+              $restartHealth = $restartHealthResponse.Content | ConvertFrom-Json
+              $restartInstance = [string]$restartHealthResponse.Headers["X-PropExtract-Instance"]
+              if ($restartHealth.status -eq "ok" -and $restartHealth.service -eq "rns-import" -and $restartInstance -eq $currentInstance) {
+                $restartReady = $true
+                break
+              }
+            } catch { }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $restartReady) {
+            $restartExit = if ($restartProcess.HasExited) { [string]$restartProcess.ExitCode } else { "timeout" }
+            throw "ShellExecute user start launcher did not restore health (exit $restartExit)"
+          }
+          $finalStopProcess = Start-Process -FilePath $stopLauncher -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
+          $finalStopDeadline = [DateTime]::UtcNow.AddSeconds(30)
+          while (-not $finalStopProcess.HasExited -and [DateTime]::UtcNow -lt $finalStopDeadline) { Start-Sleep -Milliseconds 250 }
+          if (-not $finalStopProcess.HasExited -or $finalStopProcess.ExitCode -ne 0) {
+            $finalStopExit = if ($finalStopProcess.HasExited) { [string]$finalStopProcess.ExitCode } else { "timeout" }
+            throw "ShellExecute final user stop launcher failed with exit $finalStopExit"
+          }
+          while (-not $restartProcess.HasExited -and [DateTime]::UtcNow -lt $finalStopDeadline) { Start-Sleep -Milliseconds 250 }
+          if (-not $restartProcess.HasExited -or $restartProcess.ExitCode -ne 0) {
+            $restartExit = if ($restartProcess.HasExited) { [string]$restartProcess.ExitCode } else { "timeout" }
+            throw "ShellExecute user start launcher did not exit cleanly after final stop (exit $restartExit)"
           }
 
           $transcript = Join-Path $destination "absolute-cmd-install-transcript.log"
