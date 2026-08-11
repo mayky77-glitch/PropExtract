@@ -179,6 +179,38 @@ jobs:
             if ($held) { try { $mutex.ReleaseMutex() } catch { } }
             $mutex.Dispose()
           }
+      - name: Reject Python and native runtime junctions
+        shell: powershell
+        run: |
+          . .\windows_runtime_helpers.ps1
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $root = (Get-Location).Path
+          foreach ($kind in @("python", "native")) {
+            $probeParent = Join-Path $root (".runtime-junction-probe-" + $kind)
+            $runtimeRoot = Join-Path $probeParent "windows"
+            $pythonRoot = Join-Path $runtimeRoot ("python-" + $lock.artifacts.python.version)
+            $nativeRoot = Join-Path $runtimeRoot ("native-" + $lock.runtime)
+            $outside = Join-Path $env:RUNNER_TEMP ("propextract-junction-target-" + $kind)
+            New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+            New-Item -ItemType Directory -Path $outside -Force | Out-Null
+            $junction = if ($kind -eq "python") { $pythonRoot } else { $nativeRoot }
+            try {
+              New-Item -ItemType Junction -Path $junction -Target $outside -ErrorAction Stop | Out-Null
+              $rejected = $false
+              try {
+                Assert-PropExtractInstallerPreflight $root $runtimeRoot $pythonRoot $nativeRoot $lock
+              } catch {
+                if ($_.Exception.Message -match "точка повторной обработки") { $rejected = $true } else { throw }
+              }
+              if (-not $rejected) { throw "$kind runtime junction was accepted" }
+              $digest = Get-PropExtractDirectoryDigest $junction
+              if ($digest.Files -ne 0 -or $digest.Sha256 -ne "") { throw "$kind runtime junction received a valid digest" }
+            } finally {
+              if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }
+              if (Test-Path -LiteralPath $probeParent) { Remove-Item -LiteralPath $probeParent -Recurse -Force }
+              if (Test-Path -LiteralPath $outside) { Remove-Item -LiteralPath $outside -Recurse -Force }
+            }
+          }
       - name: Parse both Windows picker dialogs with PowerShell 5.1
         shell: powershell
         run: |

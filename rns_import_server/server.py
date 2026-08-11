@@ -353,24 +353,33 @@ class JobManager:
             result = self.runner(pdf_dir, target, temporary, dpi, 0, progress)
             self._update(job_id, progress=98, stage="Создаём резервную копию", current_file=None)
             expected_hash = str(result["input_hashes"]["xlsx"])
-            if sha256(target) != expected_hash:
-                raise RuntimeError("Целевой Excel изменился во время обработки")
             changes = result.get("changes", [])
             is_noop = all(item.get("outcome") == "already_present" for item in changes)
-            if is_noop:
-                temporary.unlink(missing_ok=True)
-                temporary = None
-            else:
-                backup_dir = target.parent / "Резервные копии PropExtract"
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-                backup = backup_dir / f"{target.stem} — до импорта {stamp}.xlsx"
-                retry_file_operation(lambda: shutil.copy2(target, backup))
-                if sha256(backup) != expected_hash:
-                    backup.unlink(missing_ok=True)
-                    raise RuntimeError("Не удалось проверить резервную копию")
-                retry_file_operation(lambda: os.replace(temporary, target))
-                temporary = None
+            # Imports and delayed proposal approvals publish to the same target.
+            # Serialize both paths, then recheck the user's workbook immediately
+            # before replacement because Excel/sync tools do not share this lock.
+            with self._publish_lock:
+                if sha256(target) != expected_hash:
+                    raise RuntimeError("Целевой Excel изменился во время обработки")
+                if is_noop:
+                    temporary.unlink(missing_ok=True)
+                    temporary = None
+                else:
+                    backup_dir = target.parent / "Резервные копии PropExtract"
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+                    backup = backup_dir / f"{target.stem} — до импорта {stamp}.xlsx"
+                    retry_file_operation(lambda: shutil.copy2(target, backup))
+                    if sha256(backup) != expected_hash:
+                        backup.unlink(missing_ok=True)
+                        backup = None
+                        raise RuntimeError("Не удалось проверить резервную копию")
+                    if sha256(target) != expected_hash:
+                        backup.unlink(missing_ok=True)
+                        backup = None
+                        raise RuntimeError("Целевой Excel изменился во время обработки")
+                    retry_file_operation(lambda: os.replace(temporary, target))
+                    temporary = None
             result["output"] = str(target)
             result["backup"] = str(backup) if backup else None
             report = target.with_name(f"{target.stem} — отчет PropExtract.json")

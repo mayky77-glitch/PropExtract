@@ -27,6 +27,11 @@ def test_windows_installer_preflight_rejects_unsafe_unwritable_low_space_and_lon
     assert "Assert-PropExtractInstallerPreflight $Root $RuntimeRoot $PythonRoot $NativeRoot $RuntimeLock" in installer
     assert "Test-PropExtractPathIsInside" in helpers
     assert "ReparsePoint" in helpers
+    assert "function Test-PropExtractTreeContainsReparsePoint" in helpers
+    assert "System.Collections.Generic.Stack[string]" in helpers
+    assert "Get-ChildItem -LiteralPath $Current.FullName -Force" in helpers
+    assert "foreach ($Path in @($RuntimeRoot, $PythonRoot, $NativeRoot))" in helpers
+    assert "Test-PropExtractTreeContainsReparsePoint $Path" in helpers
     assert "Assert-PropExtractWritableDirectory" in helpers
     assert "Get-PropExtractRequiredStagingBytes" in helpers
     assert "Get-PropExtractArchiveExpandedBytes" in helpers
@@ -45,6 +50,20 @@ def test_windows_installer_preflight_rejects_unsafe_unwritable_low_space_and_lon
     assert r'TrimEnd("\\")' not in helpers
     assert "Путь проекта слишком длинный" in helpers
     assert "Недостаточно свободного места" in helpers
+
+
+def test_runtime_digest_and_native_tool_reject_nested_reparse_points():
+    helpers = (ROOT / "windows_runtime_helpers.ps1").read_text(encoding="utf-8")
+
+    digest = helpers.index("function Get-PropExtractDirectoryDigest")
+    digest_reparse = helpers.index("Test-PropExtractTreeContainsReparsePoint $Path", digest)
+    digest_enumeration = helpers.index("Get-ChildItem -LiteralPath $ResolvedRoot -File -Recurse", digest)
+    native_tool = helpers.index("function Get-PropExtractNativeTool")
+    native_reparse = helpers.index("Test-PropExtractTreeContainsReparsePoint $RootPath", native_tool)
+    native_candidate = helpers.index("$Candidate = Join-Path $RootPath", native_tool)
+
+    assert digest < digest_reparse < digest_enumeration
+    assert native_tool < native_reparse < native_candidate
 
 
 def test_windows_installer_rolls_back_failed_publication_and_cleans_only_verified_backups():

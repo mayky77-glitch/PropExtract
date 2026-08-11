@@ -134,6 +134,57 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
     }
 
 
+def test_job_refuses_external_edit_after_verified_backup(monkeypatch, tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+    original_copy = server.shutil.copy2
+
+    def copy_then_user_edit(source: Path, destination: Path):
+        copied = original_copy(source, destination)
+        Path(source).write_bytes(b"user-edit-after-backup")
+        return copied
+
+    monkeypatch.setattr(server.shutil, "copy2", copy_then_user_edit)
+    manager = JobManager(_fake_runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+
+    assert finished["status"] == "error"
+    assert target.read_bytes() == b"user-edit-after-backup"
+    assert not list((target.parent / "Резервные копии PropExtract").glob("*.xlsx"))
+    assert not list(target.parent.glob(f".{target.stem}.propextract-*.xlsx"))
+
+
+def test_import_uses_shared_publication_lock(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+    manager = JobManager(_fake_runner, error_log=tmp_path / "error.log")
+
+    manager._publish_lock.acquire()
+    try:
+        job_id = str(manager.start(str(pdf_dir), str(target))["id"])
+        for _ in range(100):
+            current = manager.get(job_id) or {}
+            if current.get("stage") == "Создаём резервную копию":
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("import did not reach publication")
+        assert target.read_bytes() == b"original"
+        assert current["status"] == "running"
+    finally:
+        manager._publish_lock.release()
+
+    finished = _wait(manager, job_id)
+    assert finished["status"] == "done"
+    assert target.read_bytes() == b"original-updated"
+
+
 def test_job_with_only_already_present_changes_keeps_workbook_unchanged(tmp_path: Path):
     pdf_dir = tmp_path / "pdf"
     pdf_dir.mkdir()

@@ -37,6 +37,26 @@ function Test-PropExtractPathIsInside([string]$Parent, [string]$Child) {
     )
 }
 
+function Test-PropExtractTreeContainsReparsePoint([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $Pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $Pending.Push([IO.Path]::GetFullPath($Path))
+    while ($Pending.Count -gt 0) {
+        $Current = Get-Item -LiteralPath $Pending.Pop() -Force -ErrorAction Stop
+        if (($Current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $true
+        }
+        if (-not $Current.PSIsContainer) { continue }
+        foreach ($Child in @(Get-ChildItem -LiteralPath $Current.FullName -Force -ErrorAction Stop)) {
+            if (($Child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $true
+            }
+            if ($Child.PSIsContainer) { $Pending.Push($Child.FullName) }
+        }
+    }
+    return $false
+}
+
 function Assert-PropExtractWritableDirectory([string]$Path, [string]$Label) {
     $Probe = Join-Path $Path (".propextract-write-probe-" + [Guid]::NewGuid().ToString("N"))
     try {
@@ -136,6 +156,11 @@ function Assert-PropExtractInstallerPreflight(
             }
         }
     }
+    foreach ($Path in @($RuntimeRoot, $PythonRoot, $NativeRoot)) {
+        if ((Test-Path -LiteralPath $Path) -and (Test-PropExtractTreeContainsReparsePoint $Path)) {
+            throw "Небезопасный путь к runtime: обнаружена ссылка или точка повторной обработки."
+        }
+    }
 
     $StagingId = "00000000000000000000000000000000"
     $PythonStaging = Join-Path $RuntimeRoot ("python-staging-" + $StagingId)
@@ -229,6 +254,9 @@ function Get-PropExtractDirectoryDigest([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         return [PSCustomObject]@{ Sha256 = ""; Files = 0 }
     }
+    if (Test-PropExtractTreeContainsReparsePoint $Path) {
+        return [PSCustomObject]@{ Sha256 = ""; Files = 0 }
+    }
     $ResolvedRoot = (Resolve-Path -LiteralPath $Path).Path.TrimEnd("\")
     $Files = @(Get-ChildItem -LiteralPath $ResolvedRoot -File -Recurse)
     [string[]]$RelativePaths = @(
@@ -256,6 +284,7 @@ function Get-PropExtractDirectoryDigest([string]$Path) {
 }
 
 function Get-PropExtractNativeTool([string]$RootPath, [string]$Name, [object]$RuntimeLock) {
+    if (Test-PropExtractTreeContainsReparsePoint $RootPath) { return $null }
     if ($Name -eq "tesseract") {
         $RelativePath = [string]$RuntimeLock.nativeTree.tesseractPath
     } else {
