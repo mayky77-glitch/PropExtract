@@ -1107,6 +1107,16 @@ def test_bundled_ocr_models_are_verified_and_forced():
     assert Path(tesseract_environment()["TESSDATA_PREFIX"]).name == "tessdata"
 
 
+def test_windows_installer_uses_relative_tessdata_prefix_for_native_probes_and_runtime():
+    root = Path(__file__).resolve().parents[1]
+    installer = (root / "install_windows.ps1").read_text(encoding="utf-8")
+
+    assert installer.count('"TESSDATA_PREFIX"') >= 2
+    assert '(Join-Path $Root "rns_import_server\\tessdata")' not in installer
+    assert '[Environment]::SetEnvironmentVariable("TESSDATA_PREFIX", "rns_import_server\\tessdata", "Process")' not in installer
+    assert '"rns_import_server\\tessdata"' in installer
+
+
 def test_runtime_reports_bundled_ocr_models():
     status = runtime_status()
     assert set(status["models"]) == {"rus", "eng"}

@@ -232,7 +232,7 @@ function Test-NativeRuntime([string]$Path) {
     $OldTessdata = [Environment]::GetEnvironmentVariable("TESSDATA_PREFIX", "Process")
     [Environment]::SetEnvironmentVariable(
         "TESSDATA_PREFIX",
-        (Join-Path $Root "rns_import_server\tessdata"),
+        "rns_import_server\tessdata",
         "Process"
     )
     try {
@@ -321,7 +321,7 @@ try {
     $TesseractDirectory = (Get-PropExtractNativeTool $Native "tesseract" $RuntimeLock).Directory.FullName
     $PopplerDirectory = (Get-PropExtractNativeTool $Native "pdfinfo" $RuntimeLock).Directory.FullName
     $env:Path = "$TesseractDirectory;$PopplerDirectory;$env:Path"
-    $env:TESSDATA_PREFIX = Join-Path $Root "rns_import_server\tessdata"
+    $env:TESSDATA_PREFIX = "rns_import_server\tessdata"
     $env:PYTHONDONTWRITEBYTECODE = "1"
 
     Write-Step "Проверка полного OCR runtime"

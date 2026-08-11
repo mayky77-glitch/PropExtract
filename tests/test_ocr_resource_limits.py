@@ -43,6 +43,69 @@ def test_ocr_renders_bounded_unicode_batches_in_page_order(monkeypatch, tmp_path
     assert before_render == [0, 0, 0]
 
 
+def test_windows_ocr_stages_unicode_source_with_ascii_native_process_data(monkeypatch, tmp_path: Path):
+    project = tmp_path / "проект"
+    source_directory = project / "Исходные PDF"
+    source_directory.mkdir(parents=True)
+    source = source_directory / "разрешение № 42.pdf"
+    source.write_bytes(b"original pdf bytes")
+    source_hash = source.read_bytes()
+    source_mtime_ns = source.stat().st_mtime_ns
+    tessdata = project / "rns_import_server" / "tessdata"
+    tessdata.mkdir(parents=True)
+    native_calls: list[tuple[list[str], dict[str, object]]] = []
+    staged_workspaces: list[Path] = []
+
+    monkeypatch.setattr(ocr, "_is_windows", lambda: True)
+    monkeypatch.setattr(ocr, "PROJECT_ROOT", project)
+    monkeypatch.setattr(ocr, "TESSDATA", tessdata)
+    monkeypatch.setattr(
+        ocr,
+        "bundled_language_status",
+        lambda: {"rus": {"valid": True}, "eng": {"valid": True}},
+    )
+    monkeypatch.setattr(
+        ocr,
+        "find_tool",
+        lambda name: {"pdfinfo": "pdfinfo", "pdftotext": "pdftotext", "pdftoppm": "pdftoppm", "tesseract": "tesseract"}.get(name),
+    )
+    monkeypatch.setenv("SOURCE_PDF", str(source))
+
+    def runner(argv, **kwargs):
+        native_calls.append((argv, kwargs))
+        workspace = Path(str(kwargs["cwd"]))
+        staged_workspaces.append(workspace)
+        if argv[0] == "pdfinfo":
+            assert argv == ["pdfinfo", "input.pdf"]
+            return subprocess.CompletedProcess(argv, 0, "Pages: 3\n", "")
+        if argv[0] == "pdftotext":
+            assert "input.pdf" in argv
+            return subprocess.CompletedProcess(argv, 1, "", "no text layer")
+        if argv[0] == "pdftoppm":
+            prefix = workspace / argv[-1]
+            first = int(argv[argv.index("-f") + 1])
+            last = int(argv[argv.index("-l") + 1])
+            for page in range(first, last + 1):
+                (prefix.parent / f"page-{page:02d}.png").write_text(str(page), encoding="ascii")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, (workspace / argv[1]).read_text(encoding="ascii"), "")
+
+    monkeypatch.setattr(ocr, "_run", runner)
+
+    assert ocr.read(source) == ("1\n2\n3", 3)
+    assert source.read_bytes() == source_hash
+    assert source.stat().st_mtime_ns == source_mtime_ns
+    assert staged_workspaces and all(not workspace.exists() for workspace in staged_workspaces)
+    assert not list(project.glob(".rns-ocr-*"))
+    for argv, kwargs in native_calls:
+        assert all(argument.isascii() for argument in argv)
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert all(value.isascii() for value in environment.values())
+        if argv[0] == "tesseract":
+            assert environment["TESSDATA_PREFIX"] == "../rns_import_server/tessdata"
+
+
 def test_ocr_empty_native_stdout_is_preserved_as_empty_page(monkeypatch, tmp_path: Path):
     pdf = tmp_path / "blank.pdf"
     pdf.write_bytes(b"pdf")

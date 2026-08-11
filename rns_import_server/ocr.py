@@ -20,6 +20,40 @@ LANGUAGE_HASHES = {
 OCR_PAGE_BATCH_SIZE = 2
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _native_relative_path(value: str | Path, workspace: Path | None) -> str:
+    """Return an ASCII path suitable for a legacy Windows native process."""
+    text = str(value)
+    if not (_is_windows() and workspace is not None):
+        return text
+    path = Path(text)
+    relative = os.path.relpath(path, workspace) if path.is_absolute() else text
+    if not relative.isascii():
+        raise RuntimeError("windows_native_path_not_ascii")
+    return relative
+
+
+def _native_argv(command: str, arguments: list[str], workspace: Path | None = None) -> list[str]:
+    return [
+        _native_relative_path(command, workspace),
+        *[_native_relative_path(argument, workspace) for argument in arguments],
+    ]
+
+
+def _native_environment(workspace: Path | None = None) -> dict[str, str] | None:
+    """Keep inherited Unicode project paths out of Windows native environments."""
+    if not (_is_windows() and workspace is not None):
+        return None
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if isinstance(key, str) and isinstance(value, str) and key.isascii() and value.isascii()
+    }
+
+
 @lru_cache(maxsize=1)
 def bundled_language_status() -> dict[str, dict[str, object]]:
     """Verify bundled OCR models once per process."""
@@ -35,11 +69,15 @@ def bundled_language_status() -> dict[str, dict[str, object]]:
     return status
 
 
-def tesseract_environment() -> dict[str, str]:
+def tesseract_environment(workspace: Path | None = None) -> dict[str, str]:
     invalid = [language for language, item in bundled_language_status().items() if not item["valid"]]
     if invalid:
         raise RuntimeError(f"ocr_models_invalid:{','.join(invalid)}")
-    return dict(os.environ, TESSDATA_PREFIX=str(TESSDATA))
+    environment = _native_environment(workspace)
+    if environment is None:
+        environment = dict(os.environ)
+    environment["TESSDATA_PREFIX"] = _native_relative_path(TESSDATA, workspace)
+    return environment
 
 
 def _file_sha256(path: Path) -> str:
@@ -94,12 +132,14 @@ def project_windows_tool(name: str, project_root: Path = PROJECT_ROOT) -> str | 
 @lru_cache(maxsize=None)
 def find_tool(name: str) -> str | None:
     """Use the pinned runtime on Windows and system packages on Unix."""
-    if os.name == "nt":
+    if _is_windows():
         return project_windows_tool(name)
     return shutil.which(name)
 
 
-def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str], *, timeout: int, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
         capture_output=True,
@@ -109,6 +149,7 @@ def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) ->
         check=False,
         timeout=timeout,
         env=env,
+        cwd=str(cwd) if cwd is not None else None,
     )
 
 
@@ -121,12 +162,17 @@ def _captured_text(value: object) -> str:
     return str(value)
 
 
-def page_count(pdf: Path) -> int:
+def page_count(pdf: Path, *, native_workspace: Path | None = None) -> int:
     command = find_tool("pdfinfo")
     if not command:
         raise RuntimeError("pdfinfo_unavailable")
     try:
-        result = _run([command, str(pdf)], timeout=30)
+        result = _run(
+            _native_argv(command, [str(pdf)], native_workspace),
+            timeout=30,
+            env=_native_environment(native_workspace),
+            cwd=native_workspace,
+        )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("pdfinfo_timeout") from error
     if result.returncode:
@@ -137,12 +183,17 @@ def page_count(pdf: Path) -> int:
     raise RuntimeError("pdfinfo_invalid_output")
 
 
-def _text_layer(pdf: Path, last_page: int) -> str | None:
+def _text_layer(pdf: Path, last_page: int, *, native_workspace: Path | None = None) -> str | None:
     command = find_tool("pdftotext")
     if not command:
         return None
     try:
-        result = _run([command, "-f", "1", "-l", str(last_page), str(pdf), "-"], timeout=90)
+        result = _run(
+            _native_argv(command, ["-f", "1", "-l", str(last_page), str(pdf), "-"], native_workspace),
+            timeout=90,
+            env=_native_environment(native_workspace),
+            cwd=native_workspace,
+        )
     except subprocess.TimeoutExpired:
         return None
     output = _captured_text(result.stdout)
@@ -151,12 +202,20 @@ def _text_layer(pdf: Path, last_page: int) -> str | None:
     return output
 
 
-def _ocr_image(image: Path, tesseract: str) -> str:
+def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = None) -> str:
     try:
+        environment = (
+            tesseract_environment(native_workspace) if native_workspace is not None else tesseract_environment()
+        )
         result = _run(
-            [tesseract, str(image), "stdout", "-l", "rus+eng", "--oem", "1", "--psm", "6"],
+            _native_argv(
+                tesseract,
+                [str(image), "stdout", "-l", "rus+eng", "--oem", "1", "--psm", "6"],
+                native_workspace,
+            ),
             timeout=120,
-            env=tesseract_environment(),
+            env=environment,
+            cwd=native_workspace,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(f"tesseract_timeout:{image.name}") from error
@@ -165,43 +224,52 @@ def _ocr_image(image: Path, tesseract: str) -> str:
     return _captured_text(result.stdout)
 
 
-def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
-    """Prefer the PDF text layer, then render and OCR bounded page batches."""
-    total = page_count(pdf)
+def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = None) -> tuple[str, int]:
+    total = page_count(pdf, native_workspace=native_workspace) if native_workspace is not None else page_count(pdf)
     last_page = min(total, max_pages) if max_pages else total
-    if text := _text_layer(pdf, last_page):
+    text = (
+        _text_layer(pdf, last_page, native_workspace=native_workspace)
+        if native_workspace is not None
+        else _text_layer(pdf, last_page)
+    )
+    if text:
         return text, total
     renderer, tesseract = find_tool("pdftoppm"), find_tool("tesseract")
     if not renderer:
         raise RuntimeError("pdftoppm_unavailable")
     if not tesseract:
         raise RuntimeError("tesseract_unavailable")
-    with tempfile.TemporaryDirectory(prefix="rns-ocr-") as temporary_name:
-        temporary = Path(temporary_name)
+
+    def render_and_ocr(temporary: Path) -> tuple[str, int]:
         prefix = temporary / "page"
-        cache = Path(tempfile.gettempdir()) / "rns-import-font-cache"
+        cache = temporary / "cache" if native_workspace is not None else Path(tempfile.gettempdir()) / "rns-import-font-cache"
         cache.mkdir(exist_ok=True)
-        environment = dict(os.environ, XDG_CACHE_HOME=str(cache))
+        environment = _native_environment(native_workspace) or dict(os.environ)
+        environment["XDG_CACHE_HOME"] = _native_relative_path(cache, native_workspace)
         parts: list[str] = []
         for first_page in range(1, last_page + 1, OCR_PAGE_BATCH_SIZE):
             final_page = min(first_page + OCR_PAGE_BATCH_SIZE - 1, last_page)
             try:
                 try:
                     rendered = _run(
-                        [
+                        _native_argv(
                             renderer,
-                            "-png",
-                            "-r",
-                            str(dpi),
-                            "-f",
-                            str(first_page),
-                            "-l",
-                            str(final_page),
-                            str(pdf),
-                            str(prefix),
-                        ],
+                            [
+                                "-png",
+                                "-r",
+                                str(dpi),
+                                "-f",
+                                str(first_page),
+                                "-l",
+                                str(final_page),
+                                str(pdf),
+                                str(prefix),
+                            ],
+                            native_workspace,
+                        ),
                         timeout=600,
                         env=environment,
+                        cwd=native_workspace,
                     )
                 except subprocess.TimeoutExpired as error:
                     raise RuntimeError("pdf_render_timeout") from error
@@ -211,8 +279,28 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
                     raise RuntimeError("pdf_render_failed")
                 workers = min(2, len(images))
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    parts.extend(executor.map(lambda item: _ocr_image(item, tesseract), images))
+                    parts.extend(
+                        executor.map(
+                            lambda item: _ocr_image(item, tesseract, native_workspace=native_workspace), images
+                        )
+                    )
             finally:
                 for image in temporary.glob("page-*.png"):
                     image.unlink()
-    return "\n".join(_captured_text(part) for part in parts), total
+        return "\n".join(_captured_text(part) for part in parts), total
+
+    if native_workspace is not None:
+        return render_and_ocr(native_workspace)
+    with tempfile.TemporaryDirectory(prefix="rns-ocr-") as temporary_name:
+        return render_and_ocr(Path(temporary_name))
+
+
+def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
+    """Prefer the PDF text layer, then render and OCR bounded page batches."""
+    if not _is_windows():
+        return _read(pdf, dpi, max_pages)
+    with tempfile.TemporaryDirectory(prefix=".rns-ocr-", dir=PROJECT_ROOT) as temporary_name:
+        workspace = Path(temporary_name)
+        staged_pdf = workspace / "input.pdf"
+        shutil.copyfile(pdf, staged_pdf)
+        return _read(staged_pdf, dpi, max_pages, native_workspace=workspace)

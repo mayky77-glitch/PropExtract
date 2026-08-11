@@ -5,9 +5,27 @@ import json
 import subprocess
 
 try:
-    from rns_import_server.ocr import bundled_language_status, find_tool, tesseract_environment
+    from rns_import_server.ocr import (
+        PROJECT_ROOT,
+        _is_windows,
+        _native_argv,
+        _native_environment,
+        _run,
+        bundled_language_status,
+        find_tool,
+        tesseract_environment,
+    )
 except ModuleNotFoundError:
-    from ocr import bundled_language_status, find_tool, tesseract_environment
+    from ocr import (
+        PROJECT_ROOT,
+        _is_windows,
+        _native_argv,
+        _native_environment,
+        _run,
+        bundled_language_status,
+        find_tool,
+        tesseract_environment,
+    )
 
 
 def _is_supported_tesseract_version(version: str | None) -> bool:
@@ -21,22 +39,24 @@ def runtime_status() -> dict[str, object]:
     languages: list[str] = []
     version = None
     if paths["tesseract"]:
+        native_workspace = PROJECT_ROOT if _is_windows() else None
         try:
-            version_result = subprocess.run(
-                [str(paths["tesseract"]), "--version"],
-                capture_output=True,
-                text=True,
+            version_result = _run(
+                _native_argv(str(paths["tesseract"]), ["--version"], native_workspace),
                 timeout=10,
-                check=False,
+                env=_native_environment(native_workspace),
+                cwd=native_workspace,
             )
             version = (version_result.stdout or version_result.stderr).splitlines()[0].strip()
-            language_result = subprocess.run(
-                [str(paths["tesseract"]), "--list-langs"],
-                capture_output=True,
-                text=True,
+            language_result = _run(
+                _native_argv(str(paths["tesseract"]), ["--list-langs"], native_workspace),
                 timeout=10,
-                check=False,
-                env=tesseract_environment(),
+                env=(
+                    tesseract_environment(native_workspace)
+                    if native_workspace is not None
+                    else tesseract_environment()
+                ),
+                cwd=native_workspace,
             )
             languages = [line.strip() for line in language_result.stdout.splitlines()[1:] if line.strip()]
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
