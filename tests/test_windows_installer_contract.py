@@ -143,21 +143,34 @@ def test_windows_installer_keeps_offline_no_uac_and_russian_failure_contract():
 
 
 def test_windows_cmd_launcher_survives_shell_execute_from_paths_with_cmd_metacharacters():
-    command_path = ROOT / "install_windows.cmd"
-    command = command_path.read_bytes()
-    text = command.decode("ascii")
+    launchers = {
+        "install_windows.cmd": ' -File ".\\install_windows.ps1" %*',
+        "start_windows.cmd": ' -File ".\\start_windows.ps1" %*',
+        "stop_windows.cmd": ' -File ".\\stop_windows.ps1"',
+        "Запустить PropExtract.cmd": 'call ".\\start_windows.cmd" %*',
+        "Остановить PropExtract.cmd": 'call ".\\stop_windows.cmd"',
+    }
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
 
-    assert command.isascii()
-    assert b"\r\n" in command
-    assert b"\n" not in command.replace(b"\r\n", b"")
-    assert "setlocal DisableDelayedExpansion" in text
-    assert 'pushd "%~dp0" || exit /b 1' in text
-    assert ' -File ".\\install_windows.ps1" %*' in text
-    assert "%~dp0install_windows.ps1" not in text
-    assert 'set "PROPEXTRACT_EXIT=%ERRORLEVEL%"' in text
-    assert "popd" in text
-    assert "endlocal & exit /b %PROPEXTRACT_EXIT%" in text
-    assert "-Verb RunAs" not in text
+    for name, invocation in launchers.items():
+        command = (ROOT / name).read_bytes()
+        text = command.decode("ascii")
+
+        assert command.isascii()
+        assert b"\r\n" in command
+        assert b"\n" not in command.replace(b"\r\n", b"")
+        attribute_pattern = name.replace(" ", "?")
+        assert f"{attribute_pattern} -text" in attributes
+        assert "setlocal DisableDelayedExpansion" in text
+        assert 'pushd "%~dp0" || exit /b 1' in text
+        assert invocation in text
+        assert "%~dp0install_windows.ps1" not in text
+        assert "%~dp0start_windows.ps1" not in text
+        assert "%~dp0stop_windows.ps1" not in text
+        assert 'set "PROPEXTRACT_EXIT=%ERRORLEVEL%"' in text
+        assert "popd" in text
+        assert "endlocal & exit /b %PROPEXTRACT_EXIT%" in text
+        assert "-Verb RunAs" not in text
 
 
 def test_windows_installer_preserves_preflight_failure_for_console_and_transcript():

@@ -1,2 +1,7 @@
 @echo off
-call "%~dp0start_windows.cmd"
+setlocal DisableDelayedExpansion
+pushd "%~dp0" || exit /b 1
+call ".\start_windows.cmd" %*
+set "PROPEXTRACT_EXIT=%ERRORLEVEL%"
+popd
+endlocal & exit /b %PROPEXTRACT_EXIT%
