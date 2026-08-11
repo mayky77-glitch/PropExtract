@@ -115,6 +115,25 @@ def test_windows_ocr_stages_unicode_source_with_ascii_native_process_data(monkey
             assert environment["XDG_CACHE_HOME"] == "cache"
 
 
+def test_windows_native_argv_preserves_unicode_absolute_command(monkeypatch, tmp_path: Path):
+    workspace = tmp_path / "native-workspace"
+    workspace.mkdir()
+    command = str(tmp_path / "проверенная команда" / "tesseract.exe")
+    arguments = [
+        str(workspace / "input.pdf"),
+        str(workspace / "tessdata" / "rus.traineddata"),
+        "--version",
+    ]
+
+    monkeypatch.setattr(ocr, "_is_windows", lambda: True)
+
+    argv = ocr._native_argv(command, arguments, workspace)
+
+    assert argv[0] == command
+    assert argv[1:] == ["input.pdf", "tessdata/rus.traineddata", "--version"]
+    assert all(argument.isascii() for argument in argv[1:])
+
+
 def test_ocr_empty_native_stdout_is_preserved_as_empty_page(monkeypatch, tmp_path: Path):
     pdf = tmp_path / "blank.pdf"
     pdf.write_bytes(b"pdf")
