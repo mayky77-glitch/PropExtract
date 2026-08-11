@@ -62,7 +62,7 @@ jobs:
           $env:CI = "true"
           $archiveId = [Guid]::NewGuid().ToString("N")
           $archive = Join-Path $env:RUNNER_TEMP ("propextract-codeload-" + $archiveId + ".zip")
-          $unicodeFolder = "Архив & установка (15) " + $archiveId
+          $unicodeFolder = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JDRgNGF0LjQsiAmINGD0YHRgtCw0L3QvtCy0LrQsCAoMTUp")) + " " + $archiveId
           $destination = Join-Path $env:RUNNER_TEMP $unicodeFolder
           $sourceArchiveUrl = "https://codeload.github.com/$env:GITHUB_REPOSITORY/zip/$env:GITHUB_SHA"
           Invoke-WebRequest -UseBasicParsing -Uri $sourceArchiveUrl -OutFile $archive
@@ -111,14 +111,17 @@ jobs:
             throw "ShellExecute codeload CMD installer failed with exit code $($shellExecute.ExitCode). Installer log tail:`n$tail"
           }
           if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw "ShellExecute installer returned success without install-windows.log" }
-          $installLogText = Get-Content -LiteralPath $installLog -Raw
-          if ($installLogText -notmatch 'PropExtract готов к работе\.') { throw "ShellExecute installer log lacks its success marker" }
           $archiveRuntimeRoot = Join-Path $root ".runtime\windows"
-          $pythonRuntime = Join-Path (Join-Path $archiveRuntimeRoot ("python-" + $lock.artifacts.python.version)) "python.exe"
+          $pythonRoot = Join-Path $archiveRuntimeRoot ("python-" + $lock.artifacts.python.version)
+          $pythonRuntime = Join-Path $pythonRoot "python.exe"
           $nativeRoot = Join-Path $archiveRuntimeRoot ("native-" + $lock.runtime)
           $nativeRuntime = Join-Path (Join-Path $nativeRoot $lock.nativeTree.popplerBinPath) "pdfinfo.exe"
           if (-not (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
             throw "ShellExecute installer returned success without the expected portable runtimes"
+          }
+          . (Join-Path $root "windows_runtime_helpers.ps1")
+          if (-not (Test-PropExtractPythonTree $pythonRoot $lock) -or -not (Test-PropExtractNativeTree $nativeRoot $lock)) {
+            throw "ShellExecute installer returned success without verified portable runtime trees"
           }
 
           $transcript = Join-Path $destination "absolute-cmd-install-transcript.log"
