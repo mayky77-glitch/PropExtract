@@ -18,7 +18,12 @@ on:
       - "rns_import_server/**"
       - "scripts/build_windows_*"
       - "scripts/windows_ocr_stdio_probe.py"
+      - "scripts/windows_end_to_end_smoke.py"
       - "tests/test_admin_server.py"
+      - "tests/test_ocr_resource_limits.py"
+      - "tests/test_windows_installer_contract.py"
+      - "tests/test_lifecycle_contract.py"
+      - "README.md"
   pull_request:
     paths:
       - ".github/workflows/windows-smoke.yml"
@@ -33,7 +38,12 @@ on:
       - "rns_import_server/**"
       - "scripts/build_windows_*"
       - "scripts/windows_ocr_stdio_probe.py"
+      - "scripts/windows_end_to_end_smoke.py"
       - "tests/test_admin_server.py"
+      - "tests/test_ocr_resource_limits.py"
+      - "tests/test_windows_installer_contract.py"
+      - "tests/test_lifecycle_contract.py"
+      - "README.md"
   workflow_dispatch:
 
 permissions:
@@ -95,6 +105,13 @@ jobs:
               throw "missing app-local VC runtime file: $name"
             }
           }
+          $stale = @(
+            Get-ChildItem -LiteralPath (Join-Path $PWD ".runtime\windows") -Directory -Force |
+              Where-Object { $_.Name -match '^.+\.invalid\.\d{8}-\d{6}\.[0-9a-f]{32}$' }
+          )
+          if ($stale.Count -ne 0) {
+            throw "repair left stale invalid runtime backup(s): $($stale.Name -join ', ')"
+          }
       - name: Check the normal CMD launcher without opening a browser
         shell: powershell
         run: |
@@ -127,6 +144,41 @@ jobs:
           $env:PYTHONDONTWRITEBYTECODE = "1"
           & $python -B -S -m scripts.windows_ocr_stdio_probe
           if ($LASTEXITCODE -ne 0) { throw "Tesseract stdout probe failed" }
+      - name: Exercise real portable PDF-to-XLSX publication and no-op
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          & $python -B -S scripts\windows_end_to_end_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw "portable PDF-to-XLSX smoke failed" }
+      - name: Verify installer preflight and same-project mutex
+        shell: powershell
+        run: |
+          . .\windows_runtime_helpers.ps1
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $root = (Get-Location).Path
+          $runtimeRoot = Join-Path $root ".runtime\windows"
+          $pythonRoot = Join-Path $runtimeRoot ("python-" + $lock.artifacts.python.version)
+          $nativeRoot = Join-Path $runtimeRoot ("native-" + $lock.runtime)
+          Assert-PropExtractInstallerPreflight $root $runtimeRoot $pythonRoot $nativeRoot $lock
+          $mutex = Get-PropExtractInstallerMutex $root
+          $held = $false
+          try {
+            $held = Enter-PropExtractInstallerMutex $mutex
+            $oldErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $output = & "$env:ComSpec" /d /c "call install_windows.cmd -NoStart" 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+            $ErrorActionPreference = $oldErrorActionPreference
+            Write-Host $output
+            if ($exitCode -eq 0 -or $output -notmatch "Установка уже выполняется") {
+              throw "installer mutex did not reject a concurrent install"
+            }
+          } finally {
+            if ($held) { try { $mutex.ReleaseMutex() } catch { } }
+            $mutex.Dispose()
+          }
       - name: Parse both Windows picker dialogs with PowerShell 5.1
         shell: powershell
         run: |
@@ -145,24 +197,47 @@ jobs:
               throw
             }
           }
-      - name: Check visible start and safe stop lifecycle
+      - name: Check same-instance start, double-start, stop, and immediate restart
         shell: powershell
         run: |
           $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
           $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
-          $server = Start-Process -FilePath $python -ArgumentList @("-B", "-S", "-m", "rns_import_server.app", "serve", "--host", "127.0.0.1", "--port", "8775") -PassThru -WindowStyle Hidden
+          $expectedInstance = (& $python -B -S -c "from rns_import_server.server import project_instance_id; print(project_instance_id())" | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $expectedInstance -notmatch '^[0-9a-f]{64}$') { throw "could not determine instance identity" }
+          $server = Start-Process -FilePath $env:ComSpec -ArgumentList @("/d", "/c", "call start_windows.cmd -NoBrowser") -PassThru -WindowStyle Hidden
           try {
             $ready = $false
             foreach ($attempt in 1..30) {
               try {
-                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
-                if ($health.status -eq "ok") { $ready = $true; break }
+                $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+                $health = $response.Content | ConvertFrom-Json
+                if ($health.status -eq "ok" -and $health.service -eq "rns-import" -and $response.Headers["X-PropExtract-Instance"] -eq $expectedInstance) { $ready = $true; break }
               } catch { Start-Sleep -Milliseconds 300 }
             }
             if (-not $ready) { throw "server did not become ready" }
+            if ($server.HasExited) { throw "initial start exited before lifecycle stop" }
+            & "$env:ComSpec" /d /c "call start_windows.cmd -NoBrowser"
+            if ($LASTEXITCODE -ne 0) { throw "same-instance second start failed" }
             & .\stop_windows.cmd
             if ($LASTEXITCODE -ne 0) { throw "stop_windows.cmd failed" }
-            if (-not $server.WaitForExit(10000)) { throw "server did not stop" }
+            if (-not $server.WaitForExit(15000)) { throw "server did not stop" }
+            $restart = Start-Process -FilePath $env:ComSpec -ArgumentList @("/d", "/c", "call start_windows.cmd -NoBrowser") -PassThru -WindowStyle Hidden
+            try {
+              $restarted = $false
+              foreach ($attempt in 1..30) {
+                try {
+                  $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+                  $health = $response.Content | ConvertFrom-Json
+                  if ($health.status -eq "ok" -and $health.service -eq "rns-import" -and $response.Headers["X-PropExtract-Instance"] -eq $expectedInstance) { $restarted = $true; break }
+                } catch { Start-Sleep -Milliseconds 300 }
+              }
+              if (-not $restarted -or $restart.HasExited) { throw "immediate restart did not become healthy" }
+              & .\stop_windows.cmd
+              if ($LASTEXITCODE -ne 0) { throw "stop after immediate restart failed" }
+              if (-not $restart.WaitForExit(15000)) { throw "restarted server did not stop" }
+            } finally {
+              if (-not $restart.HasExited) { Stop-Process -Id $restart.Id -Force }
+            }
           } finally {
             if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
           }
