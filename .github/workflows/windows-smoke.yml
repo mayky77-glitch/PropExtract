@@ -162,7 +162,11 @@ jobs:
           if ($currentCrlfCount -eq 0 -or $currentLoneLfCount -ne 0) { throw "current codeload install_windows.cmd is not CRLF-only" }
           Write-Host "current codeload install_windows.cmd CRLF=$currentCrlfCount loneLF=$currentLoneLfCount"
 
-          $legacyProbe = Join-Path $root "legacy-crlf-only-install.cmd"
+          $legacyRoot = Join-Path $root "legacy-crlf-probe"
+          New-Item -ItemType Directory -Path $legacyRoot -Force | Out-Null
+          $legacyProbe = Join-Path $legacyRoot "install_windows.cmd"
+          $legacyStub = Join-Path $legacyRoot "install_windows.ps1"
+          $legacyMarker = Join-Path $probeRoot "legacy-crlf.marker"
           $legacyBytes = [Convert]::FromBase64String("QGVjaG8gb2ZmCnNldGxvY2FsCmNoY3AgNjUwMDEgPm51bApjZCAvZCAiJX5kcDAiCiIlU3lzdGVtUm9vdCVcU3lzdGVtMzJcV2luZG93c1Bvd2VyU2hlbGxcdjEuMFxwb3dlcnNoZWxsLmV4ZSIgLU5vTG9nbyAtTm9Qcm9maWxlIC1FeGVjdXRpb25Qb2xpY3kgQnlwYXNzIC1GaWxlICIlfmRwMGluc3RhbGxfd2luZG93cy5wczEiICUqCmlmIGVycm9ybGV2ZWwgMSAoCiAgZWNoby4KICBlY2hvINCj0YHRgtCw0L3QvtCy0LrQsCDQt9Cw0LLQtdGA0YjQuNC70LDRgdGMINGBINC+0YjQuNCx0LrQvtC5LiDQodC8LiDRgdC+0L7QsdGJ0LXQvdC40LUg0LLRi9GI0LUuCiAgaWYgbm90IGRlZmluZWQgQ0kgcGF1c2UKICBleGl0IC9iIDEKKQplbmRsb2NhbAo=")
           $legacyCrlfBytes = New-Object 'System.Collections.Generic.List[byte]'
           foreach ($legacyByte in $legacyBytes) {
@@ -170,41 +174,24 @@ jobs:
             [void]$legacyCrlfBytes.Add($legacyByte)
           }
           [IO.File]::WriteAllBytes($legacyProbe, $legacyCrlfBytes.ToArray())
-          $legacyLogObserved = $false
-          $legacyRuntimeObserved = $false
-          $legacyHealthObserved = $false
-          $legacyOutcome = "failed"
-          $legacyDetails = "not started"
-          $legacyProcess = $null
+          [IO.File]::WriteAllBytes($legacyStub, [Convert]::FromBase64String("77u/JG1hcmtlciA9IFtFbnZpcm9ubWVudF06OkdldEVudmlyb25tZW50VmFyaWFibGUoIlBST1BFWFRSQUNUX0xFR0FDWV9NQVJLRVIiLCAiUHJvY2VzcyIpDQpbSU8uRmlsZV06OldyaXRlQWxsVGV4dCgkbWFya2VyLCAibGVnYWN5LWNybGYtb2siLCBbVGV4dC5FbmNvZGluZ106OkFTQ0lJKQ0KZXhpdCAwDQo="))
+          Remove-Item -LiteralPath $legacyMarker -Force -ErrorAction SilentlyContinue
+          $previousLegacyMarker = [Environment]::GetEnvironmentVariable("PROPEXTRACT_LEGACY_MARKER", "Process")
+          [Environment]::SetEnvironmentVariable("PROPEXTRACT_LEGACY_MARKER", $legacyMarker, "Process")
           try {
             $legacyProcess = Start-Process -FilePath $legacyProbe -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
-            $legacyDeadline = [DateTime]::UtcNow.AddSeconds(30)
-            while ([DateTime]::UtcNow -lt $legacyDeadline) {
-              $legacyLogObserved = $legacyLogObserved -or (Test-Path -LiteralPath $installLog -PathType Leaf)
-              $legacyRuntimeObserved = $legacyRuntimeObserved -or ((Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -and (Test-Path -LiteralPath $nativeRuntime -PathType Leaf))
-              if ($legacyLogObserved) { break }
-              if ($legacyProcess.HasExited) { break }
-              Start-Sleep -Milliseconds 500
+            $legacyDeadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (-not $legacyProcess.HasExited -and [DateTime]::UtcNow -lt $legacyDeadline) { Start-Sleep -Milliseconds 100 }
+            if (-not $legacyProcess.HasExited) {
+              Stop-Process -Id $legacyProcess.Id -Force
+              throw "legacy CRLF-only probe did not exit within 15 seconds"
             }
-            if ($legacyLogObserved) {
-              $legacyOutcome = "passed"
-            }
-          } catch {
-            $legacyExit = if ($legacyProcess -and $legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "unavailable" }
-            $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeObserved health=$legacyHealthObserved exit=$legacyExit error=$($_.Exception.Message)"
-          }
-          if ($legacyProcess -and -not $legacyProcess.HasExited) {
-            try { Stop-Process -Id $legacyProcess.Id -Force } catch { }
-            $legacyExitDeadline = [DateTime]::UtcNow.AddSeconds(10)
-            while (-not $legacyProcess.HasExited -and [DateTime]::UtcNow -lt $legacyExitDeadline) { Start-Sleep -Milliseconds 100 }
-          }
-          $legacyExit = if ($legacyProcess -and $legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "unavailable" }
-          $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeObserved health=$legacyHealthObserved exit=$legacyExit"
-          Write-Host "legacy CRLF-only ${legacyOutcome}: $legacyDetails"
-          Remove-Item -LiteralPath $installLog -Force -ErrorAction SilentlyContinue
-          if (Test-Path -LiteralPath $archiveRuntimeRoot) {
-            if (-not (Test-PropExtractPathIsInside $root $archiveRuntimeRoot)) { throw "legacy runtime cleanup escaped the codeload root" }
-            Remove-Item -LiteralPath $archiveRuntimeRoot -Recurse -Force
+            if ($legacyProcess.ExitCode -ne 0) { throw "legacy CRLF-only probe exited $($legacyProcess.ExitCode)" }
+            if (-not (Test-Path -LiteralPath $legacyMarker -PathType Leaf)) { throw "legacy CRLF-only probe did not create its marker" }
+            if ((Get-Content -LiteralPath $legacyMarker -Raw).Trim() -ne "legacy-crlf-ok") { throw "legacy CRLF-only probe marker is invalid" }
+            Write-Host "legacy CRLF-only passed"
+          } finally {
+            [Environment]::SetEnvironmentVariable("PROPEXTRACT_LEGACY_MARKER", $previousLegacyMarker, "Process")
           }
           Assert-PropExtractInstallerPreflight $root $archiveRuntimeRoot $pythonRoot $nativeRoot $lock
           Write-Host "short codeload root passed installer preflight"
