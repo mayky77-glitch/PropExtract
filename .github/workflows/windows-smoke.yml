@@ -55,6 +55,31 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Reproduce installation from a source archive
+        shell: powershell
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "propextract-source.zip"
+          $unicodeFolder = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JDRgNGF0LjQsiAmINGD0YHRgtCw0L3QvtCy0LrQsCAoMTUp"))
+          $destination = Join-Path $env:RUNNER_TEMP $unicodeFolder
+          git archive --format=zip --prefix=PropExtract-main/ --output=$archive HEAD
+          if ($LASTEXITCODE -ne 0) { throw "source archive creation failed" }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $root = Join-Path $destination "PropExtract-main"
+          $installer = Join-Path $root "install_windows.cmd"
+          $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($installer))
+          Write-Host "archive launcher CRLF=$(([regex]::Matches($text, "`r`n")).Count) LF=$(([regex]::Matches($text, "(?<!`r)`n")).Count)"
+          Push-Location $root
+          try {
+            $oldErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $output = & "$env:ComSpec" /d /c "call install_windows.cmd -NoStart" 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+            $ErrorActionPreference = $oldErrorActionPreference
+            Write-Host $output
+            if ($exitCode -ne 0) { throw "source-archive installer failed with exit code $exitCode" }
+          } finally {
+            Pop-Location
+          }
       - name: Run the one-click installer without WinGet or network downloads
         shell: powershell
         run: |
