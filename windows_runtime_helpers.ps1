@@ -1,4 +1,4 @@
-Set-StrictMode -Version 2.0
+﻿Set-StrictMode -Version 2.0
 
 function Get-PropExtractInstallerMutex([string]$ProjectRoot) {
     $ResolvedRoot = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd("\")

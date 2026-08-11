@@ -4,6 +4,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_windows_powershell_51_reads_russian_scripts_as_utf8():
+    bom = b"\xef\xbb\xbf"
+
+    assert (ROOT / "install_windows.ps1").read_bytes().startswith(bom)
+    assert (ROOT / "windows_runtime_helpers.ps1").read_bytes().startswith(bom)
+
+
 def test_windows_installer_serializes_runs_and_releases_mutex_in_finally():
     installer = (ROOT / "install_windows.ps1").read_text(encoding="utf-8")
     helpers = (ROOT / "windows_runtime_helpers.ps1").read_text(encoding="utf-8")
