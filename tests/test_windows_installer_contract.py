@@ -136,13 +136,28 @@ def test_windows_installer_rolls_back_failed_publication_and_cleans_only_verifie
 
 def test_windows_installer_keeps_offline_no_uac_and_russian_failure_contract():
     installer = (ROOT / "install_windows.ps1").read_text(encoding="utf-8")
-    command = (ROOT / "install_windows.cmd").read_text(encoding="utf-8")
 
     for forbidden in ("Invoke-WebRequest", "WebClient", "Start-BitsTransfer", "winget source reset", "winget install"):
         assert forbidden.lower() not in installer.lower()
-    assert "-Verb RunAs" not in command
     assert "ОШИБКА УСТАНОВКИ" in installer
-    assert "Установка завершилась с ошибкой" in command
+
+
+def test_windows_cmd_launcher_survives_shell_execute_from_paths_with_cmd_metacharacters():
+    command_path = ROOT / "install_windows.cmd"
+    command = command_path.read_bytes()
+    text = command.decode("ascii")
+
+    assert command.isascii()
+    assert b"\r\n" in command
+    assert b"\n" not in command.replace(b"\r\n", b"")
+    assert "setlocal DisableDelayedExpansion" in text
+    assert 'pushd "%~dp0" || exit /b 1' in text
+    assert ' -File ".\\install_windows.ps1" %*' in text
+    assert "%~dp0install_windows.ps1" not in text
+    assert 'set "PROPEXTRACT_EXIT=%ERRORLEVEL%"' in text
+    assert "popd" in text
+    assert "endlocal & exit /b %PROPEXTRACT_EXIT%" in text
+    assert "-Verb RunAs" not in text
 
 
 def test_windows_installer_preserves_preflight_failure_for_console_and_transcript():
