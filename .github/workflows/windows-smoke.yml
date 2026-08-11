@@ -213,7 +213,7 @@ jobs:
             $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$legacyExit error=$($_.Exception.Message)"
             if ($legacyProcess -and -not $legacyProcess.HasExited) { Stop-Process -Id $legacyProcess.Id -Force }
           }
-          Write-Host "legacy CRLF-only $legacyOutcome: $legacyDetails"
+          Write-Host "legacy CRLF-only ${legacyOutcome}: $legacyDetails"
           Remove-Item -LiteralPath $installLog -Force -ErrorAction SilentlyContinue
 
           # The explicit Open verb uses Windows ShellExecute file association, matching
