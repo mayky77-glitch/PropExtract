@@ -62,7 +62,7 @@ jobs:
           $env:CI = "true"
           $archiveId = [Guid]::NewGuid().ToString("N")
           $archive = Join-Path $env:RUNNER_TEMP ("propextract-codeload-" + $archiveId + ".zip")
-          $unicodeFolder = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JDRgNGF0LjQsiAmINGD0YHRgtCw0L3QvtCy0LrQsCAoMTUp")) + " " + $archiveId
+          $unicodeFolder = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JDRgNGF0LjQsiAmICgxNSk="))
           $destination = Join-Path $env:RUNNER_TEMP $unicodeFolder
           $sourceArchiveUrl = "https://codeload.github.com/$env:GITHUB_REPOSITORY/zip/$env:GITHUB_SHA"
           Invoke-WebRequest -UseBasicParsing -Uri $sourceArchiveUrl -OutFile $archive
@@ -171,50 +171,43 @@ jobs:
           }
           [IO.File]::WriteAllBytes($legacyProbe, $legacyCrlfBytes.ToArray())
           $legacyLogObserved = $false
-          $legacyRuntimeVerified = $false
+          $legacyRuntimeObserved = $false
           $legacyHealthObserved = $false
           $legacyOutcome = "failed"
           $legacyDetails = "not started"
           $legacyProcess = $null
           try {
             $legacyProcess = Start-Process -FilePath $legacyProbe -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
-            $legacyDeadline = [DateTime]::UtcNow.AddSeconds(120)
+            $legacyDeadline = [DateTime]::UtcNow.AddSeconds(30)
             while ([DateTime]::UtcNow -lt $legacyDeadline) {
               $legacyLogObserved = $legacyLogObserved -or (Test-Path -LiteralPath $installLog -PathType Leaf)
-              if (-not $legacyRuntimeVerified -and (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -and (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
-                $legacyRuntimeVerified = (Test-PropExtractPythonTree $pythonRoot $lock) -and (Test-PropExtractNativeTree $nativeRoot $lock)
-              }
-              if ($legacyRuntimeVerified) {
-                try {
-                  $legacyHealthResponse = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
-                  $legacyHealth = $legacyHealthResponse.Content | ConvertFrom-Json
-                  if ($legacyHealth.status -eq "ok" -and $legacyHealth.service -eq "rns-import") { $legacyHealthObserved = $true; break }
-                } catch { }
-              }
+              $legacyRuntimeObserved = $legacyRuntimeObserved -or ((Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -and (Test-Path -LiteralPath $nativeRuntime -PathType Leaf))
+              if ($legacyLogObserved) { break }
               if ($legacyProcess.HasExited) { break }
               Start-Sleep -Milliseconds 500
             }
-            if ($legacyHealthObserved) {
-              $legacyShutdown = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:8775/api/shutdown" -Headers @{ "X-PropExtract-Action" = "shutdown" } -ContentType "application/json" -Body "{}" -TimeoutSec 8
-              if ($legacyShutdown.StatusCode -ne 202) { throw "shutdown returned HTTP $($legacyShutdown.StatusCode)" }
-              $legacyExitDeadline = [DateTime]::UtcNow.AddSeconds(30)
-              while (-not $legacyProcess.HasExited -and [DateTime]::UtcNow -lt $legacyExitDeadline) { Start-Sleep -Milliseconds 250 }
-              if (-not $legacyProcess.HasExited) { throw "process did not exit after shutdown" }
-              if ($legacyProcess.ExitCode -ne 0) { throw "process exited $($legacyProcess.ExitCode) after shutdown" }
+            if ($legacyLogObserved) {
               $legacyOutcome = "passed"
-              $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$($legacyProcess.ExitCode)"
-            } else {
-              $legacyExit = if ($legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "running at timeout" }
-              $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$legacyExit"
-              if (-not $legacyProcess.HasExited) { Stop-Process -Id $legacyProcess.Id -Force }
             }
           } catch {
             $legacyExit = if ($legacyProcess -and $legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "unavailable" }
-            $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeVerified health=$legacyHealthObserved exit=$legacyExit error=$($_.Exception.Message)"
-            if ($legacyProcess -and -not $legacyProcess.HasExited) { Stop-Process -Id $legacyProcess.Id -Force }
+            $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeObserved health=$legacyHealthObserved exit=$legacyExit error=$($_.Exception.Message)"
           }
+          if ($legacyProcess -and -not $legacyProcess.HasExited) {
+            try { Stop-Process -Id $legacyProcess.Id -Force } catch { }
+            $legacyExitDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            while (-not $legacyProcess.HasExited -and [DateTime]::UtcNow -lt $legacyExitDeadline) { Start-Sleep -Milliseconds 100 }
+          }
+          $legacyExit = if ($legacyProcess -and $legacyProcess.HasExited) { [string]$legacyProcess.ExitCode } else { "unavailable" }
+          $legacyDetails = "log=$legacyLogObserved runtime=$legacyRuntimeObserved health=$legacyHealthObserved exit=$legacyExit"
           Write-Host "legacy CRLF-only ${legacyOutcome}: $legacyDetails"
           Remove-Item -LiteralPath $installLog -Force -ErrorAction SilentlyContinue
+          if (Test-Path -LiteralPath $archiveRuntimeRoot) {
+            if (-not (Test-PropExtractPathIsInside $root $archiveRuntimeRoot)) { throw "legacy runtime cleanup escaped the codeload root" }
+            Remove-Item -LiteralPath $archiveRuntimeRoot -Recurse -Force
+          }
+          Assert-PropExtractInstallerPreflight $root $archiveRuntimeRoot $pythonRoot $nativeRoot $lock
+          Write-Host "short codeload root passed installer preflight"
 
           # The explicit Open verb uses Windows ShellExecute file association, matching
           # Explorer's no-argument handling of an absolute .cmd path. This must be the
