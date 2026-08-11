@@ -20,6 +20,9 @@ on:
       - "scripts/windows_ocr_stdio_probe.py"
       - "scripts/windows_end_to_end_smoke.py"
       - "tests/test_admin_server.py"
+      - "tests/test_ocr_resource_limits.py"
+      - "tests/test_windows_installer_contract.py"
+      - "tests/test_lifecycle_contract.py"
       - "README.md"
   pull_request:
     paths:
@@ -37,6 +40,9 @@ on:
       - "scripts/windows_ocr_stdio_probe.py"
       - "scripts/windows_end_to_end_smoke.py"
       - "tests/test_admin_server.py"
+      - "tests/test_ocr_resource_limits.py"
+      - "tests/test_windows_installer_contract.py"
+      - "tests/test_lifecycle_contract.py"
       - "README.md"
   workflow_dispatch:
 
@@ -98,6 +104,13 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $poppler $name) -PathType Leaf)) {
               throw "missing app-local VC runtime file: $name"
             }
+          }
+          $stale = @(
+            Get-ChildItem -LiteralPath (Join-Path $PWD ".runtime\windows") -Directory -Force |
+              Where-Object { $_.Name -match '^.+\.invalid\.\d{8}-\d{6}\.[0-9a-f]{32}$' }
+          )
+          if ($stale.Count -ne 0) {
+            throw "repair left stale invalid runtime backup(s): $($stale.Name -join ', ')"
           }
       - name: Check the normal CMD launcher without opening a browser
         shell: powershell
