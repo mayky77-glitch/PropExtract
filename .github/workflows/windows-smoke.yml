@@ -94,13 +94,42 @@ jobs:
             throw "installer contains a legacy VC extraction token"
           }
 
+          $assocOutput = & "$env:ComSpec" /d /c "assoc .cmd" 2>&1 | Out-String
+          $assocExitCode = $LASTEXITCODE
+          Write-Host "cmd /d /c assoc .cmd (exit $assocExitCode):`n$assocOutput"
+          $ftypeOutput = & "$env:ComSpec" /d /c "ftype cmdfile" 2>&1 | Out-String
+          $ftypeExitCode = $LASTEXITCODE
+          Write-Host "cmd /d /c ftype cmdfile (exit $ftypeExitCode):`n$ftypeOutput"
+
+          # The explicit Open verb uses Windows ShellExecute file association, matching
+          # Explorer's handling of an absolute .cmd path. This must be the first launch
+          # against the clean archive root.
+          $shellExecute = Start-Process -FilePath $installer -ArgumentList @("-NoStart") -Verb Open -WorkingDirectory $env:RUNNER_TEMP -Wait -PassThru
+          $installLog = Join-Path $root "install-windows.log"
+          if ($shellExecute.ExitCode -ne 0) {
+            $tail = if (Test-Path -LiteralPath $installLog -PathType Leaf) { Get-Content -LiteralPath $installLog -Tail 150 | Out-String } else { "install-windows.log was not created" }
+            throw "ShellExecute codeload CMD installer failed with exit code $($shellExecute.ExitCode). Installer log tail:`n$tail"
+          }
+          if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw "ShellExecute installer returned success without install-windows.log" }
+          $installLogText = Get-Content -LiteralPath $installLog -Raw
+          if ($installLogText -notmatch 'PropExtract готов к работе\.') { throw "ShellExecute installer log lacks its success marker" }
+          $archiveRuntimeRoot = Join-Path $root ".runtime\windows"
+          $pythonRuntime = Join-Path (Join-Path $archiveRuntimeRoot ("python-" + $lock.artifacts.python.version)) "python.exe"
+          $nativeRoot = Join-Path $archiveRuntimeRoot ("native-" + $lock.runtime)
+          $nativeRuntime = Join-Path (Join-Path $nativeRoot $lock.nativeTree.popplerBinPath) "pdfinfo.exe"
+          if (-not (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
+            throw "ShellExecute installer returned success without the expected portable runtimes"
+          }
+
           $transcript = Join-Path $destination "absolute-cmd-install-transcript.log"
+          $installerEnvName = "PROPEXTRACT_ABSOLUTE_INSTALLER"
+          $previousInstallerEnv = [Environment]::GetEnvironmentVariable($installerEnvName, "Process")
+          [Environment]::SetEnvironmentVariable($installerEnvName, $installer, "Process")
           Push-Location $env:RUNNER_TEMP
           try {
             $oldErrorActionPreference = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
-            $cmdLine = 'call "{0}" -NoStart' -f $installer
-            $output = & "$env:ComSpec" /d /s /c $cmdLine 2>&1 | Out-String
+            $output = & "$env:ComSpec" /d /s /c 'call "%PROPEXTRACT_ABSOLUTE_INSTALLER%" -NoStart' 2>&1 | Out-String
             $exitCode = $LASTEXITCODE
             $ErrorActionPreference = $oldErrorActionPreference
             Set-Content -LiteralPath $transcript -Value $output -Encoding utf8
@@ -111,14 +140,7 @@ jobs:
             }
           } finally {
             Pop-Location
-          }
-
-          # The explicit Open verb retains Windows ShellExecute file-association behavior,
-          # matching Explorer's handling of an absolute .cmd path.
-          $shellExecute = Start-Process -FilePath $installer -ArgumentList @("-NoStart") -Verb Open -WorkingDirectory $env:RUNNER_TEMP -Wait -PassThru
-          if ($shellExecute.ExitCode -ne 0) {
-            $tail = Get-Content -LiteralPath $transcript -Tail 150 | Out-String
-            throw "ShellExecute codeload CMD installer failed with exit code $($shellExecute.ExitCode). Prior CMD transcript tail:`n$tail"
+            [Environment]::SetEnvironmentVariable($installerEnvName, $previousInstallerEnv, "Process")
           }
       - name: Run the one-click installer without WinGet or network downloads
         shell: powershell
