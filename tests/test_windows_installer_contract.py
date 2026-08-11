@@ -160,7 +160,7 @@ def test_windows_cmd_launcher_survives_shell_execute_from_paths_with_cmd_metacha
         assert b"\r\n" in command
         assert b"\n" not in command.replace(b"\r\n", b"")
         attribute_pattern = name.replace(" ", "?")
-        assert f"{attribute_pattern} -text" in attributes
+        assert f"{attribute_pattern} -text whitespace=cr-at-eol" in attributes
         assert "setlocal DisableDelayedExpansion" in text
         assert 'pushd "%~dp0" || exit /b 1' in text
         assert invocation in text

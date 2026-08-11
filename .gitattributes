@@ -4,8 +4,8 @@
 *.whl binary
 *.zip binary
 packages/windows/python312._pth text eol=lf
-install_windows.cmd -text
-start_windows.cmd -text
-stop_windows.cmd -text
-Запустить?PropExtract.cmd -text
-Остановить?PropExtract.cmd -text
+install_windows.cmd -text whitespace=cr-at-eol
+start_windows.cmd -text whitespace=cr-at-eol
+stop_windows.cmd -text whitespace=cr-at-eol
+Запустить?PropExtract.cmd -text whitespace=cr-at-eol
+Остановить?PropExtract.cmd -text whitespace=cr-at-eol
