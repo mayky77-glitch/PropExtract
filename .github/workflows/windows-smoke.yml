@@ -6,6 +6,7 @@ on:
       - main
       - codex/admin-ui
     paths:
+      - ".gitattributes"
       - ".github/workflows/windows-smoke.yml"
       - "install_windows.*"
       - "start_windows.*"
@@ -26,6 +27,7 @@ on:
       - "README.md"
   pull_request:
     paths:
+      - ".gitattributes"
       - ".github/workflows/windows-smoke.yml"
       - "install_windows.*"
       - "start_windows.*"
