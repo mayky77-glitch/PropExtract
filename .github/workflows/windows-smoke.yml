@@ -101,27 +101,60 @@ jobs:
           $ftypeExitCode = $LASTEXITCODE
           Write-Host "cmd /d /c ftype cmdfile (exit $ftypeExitCode):`n$ftypeOutput"
 
-          # The explicit Open verb uses Windows ShellExecute file association, matching
-          # Explorer's handling of an absolute .cmd path. This must be the first launch
-          # against the clean archive root.
-          $shellExecute = Start-Process -FilePath $installer -ArgumentList @("-NoStart") -Verb Open -WorkingDirectory $env:RUNNER_TEMP -Wait -PassThru
-          $installLog = Join-Path $root "install-windows.log"
-          if ($shellExecute.ExitCode -ne 0) {
-            $tail = if (Test-Path -LiteralPath $installLog -PathType Leaf) { Get-Content -LiteralPath $installLog -Tail 150 | Out-String } else { "install-windows.log was not created" }
-            throw "ShellExecute codeload CMD installer failed with exit code $($shellExecute.ExitCode). Installer log tail:`n$tail"
+          function Get-ArchiveInstallerLogTail([string]$Path) {
+            if (Test-Path -LiteralPath $Path -PathType Leaf) {
+              return Get-Content -LiteralPath $Path -Tail 150 | Out-String
+            }
+            return "install-windows.log was not created"
           }
-          if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw "ShellExecute installer returned success without install-windows.log" }
+
+          # The explicit Open verb uses Windows ShellExecute file association, matching
+          # Explorer's no-argument handling of an absolute .cmd path. This must be the
+          # first launch against the clean archive root.
+          $shellExecute = Start-Process -FilePath $installer -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
+          $installLog = Join-Path $root "install-windows.log"
           $archiveRuntimeRoot = Join-Path $root ".runtime\windows"
           $pythonRoot = Join-Path $archiveRuntimeRoot ("python-" + $lock.artifacts.python.version)
           $pythonRuntime = Join-Path $pythonRoot "python.exe"
           $nativeRoot = Join-Path $archiveRuntimeRoot ("native-" + $lock.runtime)
           $nativeRuntime = Join-Path (Join-Path $nativeRoot $lock.nativeTree.popplerBinPath) "pdfinfo.exe"
-          if (-not (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
-            throw "ShellExecute installer returned success without the expected portable runtimes"
-          }
           . (Join-Path $root "windows_runtime_helpers.ps1")
-          if (-not (Test-PropExtractPythonTree $pythonRoot $lock) -or -not (Test-PropExtractNativeTree $nativeRoot $lock)) {
-            throw "ShellExecute installer returned success without verified portable runtime trees"
+          $runtimeVerified = $false
+          $healthReady = $false
+          $healthDeadline = [DateTime]::UtcNow.AddSeconds(180)
+          while ([DateTime]::UtcNow -lt $healthDeadline) {
+            if ($shellExecute.HasExited) { break }
+            if (-not $runtimeVerified -and (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -and (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
+              $runtimeVerified = (Test-PropExtractPythonTree $pythonRoot $lock) -and (Test-PropExtractNativeTree $nativeRoot $lock)
+            }
+            if ($runtimeVerified) {
+              try {
+                $healthResponse = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+                $health = $healthResponse.Content | ConvertFrom-Json
+                if ($health.status -eq "ok" -and $health.service -eq "rns-import") {
+                  $healthReady = $true
+                  break
+                }
+              } catch { }
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $healthReady) {
+            $processExit = if ($shellExecute.HasExited) { [string]$shellExecute.ExitCode } else { "still running after health timeout" }
+            throw "ShellExecute no-argument installer did not become healthy (process exit: $processExit). Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
+          }
+          if (-not (Test-Path -LiteralPath $installLog -PathType Leaf)) { throw "ShellExecute installer became healthy without install-windows.log" }
+          $shutdownResponse = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:8775/api/shutdown" -Headers @{ "X-PropExtract-Action" = "shutdown" } -ContentType "application/json" -Body "{}" -TimeoutSec 8
+          if ($shutdownResponse.StatusCode -ne 202) { throw "ShellExecute server shutdown returned HTTP $($shutdownResponse.StatusCode)" }
+          $exitDeadline = [DateTime]::UtcNow.AddSeconds(30)
+          while (-not $shellExecute.HasExited -and [DateTime]::UtcNow -lt $exitDeadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $shellExecute.HasExited) {
+            throw "ShellExecute no-argument installer did not exit after shutdown. Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
+          }
+          if ($shellExecute.ExitCode -ne 0) {
+            throw "ShellExecute no-argument installer failed with exit code $($shellExecute.ExitCode). Installer log tail:`n$(Get-ArchiveInstallerLogTail $installLog)"
           }
 
           $transcript = Join-Path $destination "absolute-cmd-install-transcript.log"
