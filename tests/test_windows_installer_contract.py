@@ -172,6 +172,15 @@ def test_windows_cmd_launcher_survives_shell_execute_from_paths_with_cmd_metacha
         assert "endlocal & exit /b %PROPEXTRACT_EXIT%" in text
         assert "-Verb RunAs" not in text
 
+    for name in ("install_windows.cmd", "start_windows.cmd"):
+        text = (ROOT / name).read_text(encoding="ascii")
+        assert 'if not "%PROPEXTRACT_EXIT%"=="0" if not defined CI pause' in text
+
+    stop = (ROOT / "stop_windows.cmd").read_text(encoding="ascii")
+    assert "if not defined CI pause" in stop
+    for name in ("Запустить PropExtract.cmd", "Остановить PropExtract.cmd"):
+        assert "pause" not in (ROOT / name).read_text(encoding="ascii")
+
 
 def test_windows_installer_preserves_preflight_failure_for_console_and_transcript():
     installer = (ROOT / "install_windows.ps1").read_text(encoding="utf-8")
