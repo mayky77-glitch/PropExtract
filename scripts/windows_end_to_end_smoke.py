@@ -227,7 +227,10 @@ def main() -> None:
     parser.add_argument("--self-test", action="store_true", help="validate the dependency-free fixture generator only")
     options = parser.parse_args()
     result = self_test() if options.self_test else run()
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    # Windows PowerShell 5.1 can give a redirected portable Python process a
+    # legacy console encoding. JSON escapes keep the complete Unicode payload
+    # representable without depending on that code page.
+    print(json.dumps(result, ensure_ascii=True, sort_keys=True))
 
 
 if __name__ == "__main__":

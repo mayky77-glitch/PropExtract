@@ -11,6 +11,12 @@ def test_windows_powershell_51_reads_russian_scripts_as_utf8():
     assert (ROOT / "windows_runtime_helpers.ps1").read_bytes().startswith(bom)
 
 
+def test_windows_end_to_end_result_is_safe_for_legacy_console_codepages():
+    smoke = (ROOT / "scripts" / "windows_end_to_end_smoke.py").read_text(encoding="utf-8")
+
+    assert "print(json.dumps(result, ensure_ascii=True, sort_keys=True))" in smoke
+
+
 def test_windows_installer_serializes_runs_and_releases_mutex_in_finally():
     installer = (ROOT / "install_windows.ps1").read_text(encoding="utf-8")
     helpers = (ROOT / "windows_runtime_helpers.ps1").read_text(encoding="utf-8")
