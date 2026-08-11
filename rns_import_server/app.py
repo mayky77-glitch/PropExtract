@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -166,7 +168,7 @@ def main() -> None:
     process.add_argument("--pdf-dir", required=True, type=Path); process.add_argument("--xlsx", required=True, type=Path)
     process.add_argument("--output", required=True, type=Path); process.add_argument("--report", type=Path)
     process.add_argument("--dpi", type=int, default=180); process.add_argument("--max-pages", type=int, default=0)
-    serve = commands.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8775)
+    serve = commands.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=8775); serve.add_argument("--open-browser", action="store_true")
     options = parser.parse_args()
     if options.command == "serve":
         if options.host not in {"127.0.0.1", "localhost", "::1"}:
@@ -175,8 +177,15 @@ def main() -> None:
             from rns_import_server.server import create_server
         except ModuleNotFoundError:
             from server import create_server
+        try:
+            server = create_server(options.host, options.port, run)
+        except OSError as error:
+            print(f"Не удалось запустить PropExtract на порту {options.port}: {error}", file=sys.stderr)
+            raise SystemExit(1) from error
         print(f"http://{options.host}:{options.port}")
-        create_server(options.host, options.port, run).serve_forever()
+        if options.open_browser:
+            webbrowser.open(f"http://{options.host}:{options.port}")
+        server.serve_forever()
         return
     report = options.report or options.output.with_suffix(".json")
     if report.resolve() in {options.xlsx.resolve(), options.output.resolve()}:
