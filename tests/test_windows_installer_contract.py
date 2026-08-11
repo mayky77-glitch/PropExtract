@@ -35,6 +35,8 @@ def test_windows_installer_serializes_runs_and_releases_mutex_in_finally():
     assert "$exitCode -eq 0 -or $elapsed -gt 10" in workflow
     assert '$output -notmatch "Установка уже выполняется"' not in workflow
     assert "$global:LASTEXITCODE = 0" in workflow
+    assert "Test-PropExtractTreeContainsReparsePoint $junction" in workflow
+    assert '$_.Exception.Message -match "точка повторной обработки"' not in workflow
 
 
 def test_windows_installer_preflight_rejects_unsafe_unwritable_low_space_and_long_paths():

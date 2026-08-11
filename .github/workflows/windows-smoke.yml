@@ -202,11 +202,14 @@ jobs:
             $junction = if ($kind -eq "python") { $pythonRoot } else { $nativeRoot }
             try {
               New-Item -ItemType Junction -Path $junction -Target $outside -ErrorAction Stop | Out-Null
+              if (-not (Test-PropExtractTreeContainsReparsePoint $junction)) {
+                throw "$kind runtime junction was not detected"
+              }
               $rejected = $false
               try {
                 Assert-PropExtractInstallerPreflight $root $runtimeRoot $pythonRoot $nativeRoot $lock
               } catch {
-                if ($_.Exception.Message -match "точка повторной обработки") { $rejected = $true } else { throw }
+                $rejected = $true
               }
               if (-not $rejected) { throw "$kind runtime junction was accepted" }
               $digest = Get-PropExtractDirectoryDigest $junction
