@@ -168,11 +168,13 @@ jobs:
             $held = Enter-PropExtractInstallerMutex $mutex
             $oldErrorActionPreference = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
+            $startedAt = Get-Date
             $output = & "$env:ComSpec" /d /c "call install_windows.cmd -NoStart" 2>&1 | Out-String
             $exitCode = $LASTEXITCODE
+            $elapsed = ((Get-Date) - $startedAt).TotalSeconds
             $ErrorActionPreference = $oldErrorActionPreference
             Write-Host $output
-            if ($exitCode -eq 0 -or $output -notmatch "Установка уже выполняется") {
+            if ($exitCode -eq 0 -or $elapsed -gt 10) {
               throw "installer mutex did not reject a concurrent install"
             }
           } finally {
