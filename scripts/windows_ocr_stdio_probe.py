@@ -38,11 +38,20 @@ def write_pgm(path: Path, text: str, scale: int = 12, margin: int = 40) -> None:
     path.write_bytes(f"P5\n{width} {height}\n255\n".encode("ascii") + pixels)
 
 
-def invoke(image: Path, tesseract: str, psm: int) -> object:
+def invoke(image: Path, tesseract: str, psm: int, native_workspace: Path | None = None) -> object:
     return ocr._run(
-        [tesseract, str(image), "stdout", "-l", "eng", "--oem", "1", "--psm", str(psm)],
+        ocr._native_argv(
+            tesseract,
+            [str(image), "stdout", "-l", "eng", "--oem", "1", "--psm", str(psm)],
+            native_workspace,
+        ),
         timeout=60,
-        env=ocr.tesseract_environment(),
+        env=(
+            ocr.tesseract_environment(native_workspace)
+            if native_workspace is not None
+            else ocr.tesseract_environment()
+        ),
+        cwd=native_workspace,
     )
 
 
@@ -50,14 +59,22 @@ def main() -> None:
     tesseract = ocr.find_tool("tesseract")
     if not tesseract:
         raise RuntimeError("tesseract_unavailable")
-    with tempfile.TemporaryDirectory(prefix="propextract-ocr-stdio-") as temporary_name:
+    temporary_directory = {"prefix": "propextract-ocr-stdio-"}
+    if ocr._is_windows():
+        job_root = ocr._windows_ocr_job_root()
+        job_root.mkdir(parents=True, exist_ok=True)
+        temporary_directory["dir"] = job_root
+    with tempfile.TemporaryDirectory(**temporary_directory) as temporary_name:
         temporary = Path(temporary_name)
+        native_workspace = temporary if ocr._is_windows() else None
+        if native_workspace is not None:
+            (native_workspace / "cache").mkdir()
         blank, text_image = temporary / "blank.pgm", temporary / "text.pgm"
         write_pgm(blank, " " * 8)
         write_pgm(text_image, "TEST 123")
-        blank_result = invoke(blank, tesseract, 6)
-        text_result = invoke(text_image, tesseract, 7)
-        app_blank = ocr._ocr_image(blank, tesseract)
+        blank_result = invoke(blank, tesseract, 6, native_workspace)
+        text_result = invoke(text_image, tesseract, 7, native_workspace)
+        app_blank = ocr._ocr_image(blank, tesseract, native_workspace=native_workspace)
 
     if blank_result.returncode != 0:
         raise RuntimeError(f"blank_tesseract_failed:{blank_result.returncode}")
