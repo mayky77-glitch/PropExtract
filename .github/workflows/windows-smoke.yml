@@ -108,6 +108,42 @@ jobs:
             return "install-windows.log was not created"
           }
 
+          function Invoke-ShellExecuteCmdProbe([string]$Name, [string]$Path, [string]$MarkerPath) {
+            Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+            $previousMarker = [Environment]::GetEnvironmentVariable("PROPEXTRACT_SHELLEXEC_MARKER", "Process")
+            [Environment]::SetEnvironmentVariable("PROPEXTRACT_SHELLEXEC_MARKER", $MarkerPath, "Process")
+            try {
+              $probeProcess = Start-Process -FilePath $Path -Verb Open -WorkingDirectory $env:RUNNER_TEMP -PassThru
+              $deadline = [DateTime]::UtcNow.AddSeconds(15)
+              while (-not $probeProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 100
+              }
+              if (-not $probeProcess.HasExited) {
+                Stop-Process -Id $probeProcess.Id -Force
+                throw "$Name ShellExecute probe did not exit within 15 seconds"
+              }
+              if ($probeProcess.ExitCode -ne 0) { throw "$Name ShellExecute probe exited $($probeProcess.ExitCode)" }
+              if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) { throw "$Name ShellExecute probe did not create its marker" }
+              if ((Get-Content -LiteralPath $MarkerPath -Raw).Trim() -ne "shell-execute-ok") { throw "$Name ShellExecute probe marker is invalid" }
+              Write-Host "$Name ShellExecute probe passed"
+            } finally {
+              [Environment]::SetEnvironmentVariable("PROPEXTRACT_SHELLEXEC_MARKER", $previousMarker, "Process")
+            }
+          }
+
+          $probeRoot = Join-Path $env:RUNNER_TEMP ("propextract-shell-probe-" + [Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+          $asciiProbe = Join-Path $probeRoot "shell-open-probe.cmd"
+          $complexProbe = Join-Path $root "shell-open-probe.cmd"
+          $probeBytes = [Convert]::FromBase64String("QGVjaG8gb2ZmDQo+ICIlUFJPUEVYVFJBQ1RfU0hFTExFWEVDX01BUktFUiUiIGVjaG8gc2hlbGwtZXhlY3V0ZS1vaw0KZXhpdCAvYiAwDQo=")
+          [IO.File]::WriteAllBytes($asciiProbe, $probeBytes)
+          [IO.File]::WriteAllBytes($complexProbe, $probeBytes)
+          if ((Get-FileHash -LiteralPath $asciiProbe -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $complexProbe -Algorithm SHA256).Hash) {
+            throw "ShellExecute probe batches are not byte-identical"
+          }
+          Invoke-ShellExecuteCmdProbe "ASCII path" $asciiProbe (Join-Path $probeRoot "ascii-probe.marker")
+          Invoke-ShellExecuteCmdProbe "complex codeload path" $complexProbe (Join-Path $probeRoot "complex-probe.marker")
+
           # The explicit Open verb uses Windows ShellExecute file association, matching
           # Explorer's no-argument handling of an absolute .cmd path. This must be the
           # first launch against the clean archive root.
