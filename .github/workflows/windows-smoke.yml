@@ -79,6 +79,12 @@ jobs:
             $exitCode = $LASTEXITCODE
             Write-Host "CAB source case=[$name] exit=$exitCode output=[$output]"
           }
+          $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+          $tarSource = Join-Path (Join-Path $env:RUNNER_TEMP $unicode) "runtime.cab"
+          $tarDestination = Join-Path (Join-Path $env:RUNNER_TEMP $unicode) "tar-output"
+          New-Item -ItemType Directory -Path $tarDestination -Force | Out-Null
+          $output = & $tar "-xf" $tarSource "-C" $tarDestination 2>&1 | Out-String
+          Write-Host "CAB tar Unicode case exit=$LASTEXITCODE files=$(@(Get-ChildItem -LiteralPath $tarDestination -File).Count) output=[$output]"
           $global:LASTEXITCODE = 0
       - name: Reproduce installation from a source archive
         shell: powershell
