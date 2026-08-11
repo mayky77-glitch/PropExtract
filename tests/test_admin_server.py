@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,47 @@ def _wait(manager: JobManager, job_id: str) -> dict:
             return job
         time.sleep(0.02)
     raise AssertionError("job did not finish")
+
+
+def _proposal_job(tmp_path: Path, values: dict[str, str]) -> tuple[JobManager, dict, Path, Path]:
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "sample.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "38-1-1-2026"
+    sheet["D4"] = "Старый объект"
+    sheet["H4"] = datetime(2025, 12, 31)
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    sheet["Z4"] = '=IF(F4<>"",ROW(),"")'
+    book.save(target)
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        record = _synthetic_record("38-1-1-2026", pdf)
+        record.update(values)
+        result = apply({"38-1-1-2026": record}, xlsx, output, sha256(xlsx))
+        result.update({
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "selected_records": {
+                "38-1-1-2026": {
+                    **values,
+                    "filename": pdf.name,
+                    "field_sources": {field: pdf.name for field in values},
+                }
+            },
+        })
+        return result
+
+    manager = JobManager(runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    assert finished["status"] == "done"
+    return manager, finished, target, pdf
 
 
 def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
@@ -361,6 +403,9 @@ def test_collect_enriches_permit_only_with_same_explicit_id(monkeypatch, tmp_pat
     assert selected["RU-12345678-09-2026"]["changed"] == "06.02.2026"
     assert selected["RU-12345678-09-2026"]["end"] == "05.01.2027"
     assert selected["RU-12345678-09-2026"]["source_files"] == ["permit.pdf", "изменение.pdf"]
+    assert selected["RU-12345678-09-2026"]["field_sources"]["object"] == str(permit)
+    assert selected["RU-12345678-09-2026"]["field_sources"]["changed"] == str(amendment)
+    assert selected["RU-12345678-09-2026"]["field_sources"]["end"] == str(amendment)
 
 
 def test_collect_keeps_idless_directive_unlinked_with_diagnostic(monkeypatch, tmp_path: Path):
@@ -593,6 +638,129 @@ def test_error_hint_mentions_excel_only_for_access_errors():
     assert "Проверьте пути, закройте Excel" not in javascript
 
 
+def test_public_failed_job_redacts_absolute_pdf_path_but_keeps_traceback_in_technical_log(tmp_path: Path):
+    """Operator JSON must not disclose a local path or a raw internal exception."""
+    pdf_dir = tmp_path / "секретные PDF"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "внутренний.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+    secret = "internal_parser_token"
+
+    def fail(*args, **kwargs):
+        progress = args[5]
+        progress(30, "Распознаём PDF", str(pdf))
+        raise RuntimeError(secret)
+
+    log = tmp_path / "technical.log"
+    manager = JobManager(fail, error_log=log)
+    job = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    public = manager.public(str(job["id"]))
+
+    assert public is not None
+    assert str(pdf_dir) not in json.dumps(public, ensure_ascii=False)
+    assert secret not in json.dumps(public, ensure_ascii=False)
+    assert str(pdf) in log.read_text(encoding="utf-8")
+    assert secret in log.read_text(encoding="utf-8")
+
+
+def test_apply_preserves_exact_native_cf_bytes_and_loadability_after_openpyxl_rewrite(tmp_path: Path):
+    source, output, pdf = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "38-1-1-2026"
+    sheet["Y4"] = '=IF(A4<>"",ROW(),"")'
+    book.save(source)
+    sheet_path = "xl/worksheets/sheet1.xml"
+    cf = b'<conditionalFormatting sqref="A4"><cfRule type="expression" priority="1"><formula>A4=1</formula></cfRule></conditionalFormatting>'
+    with zipfile.ZipFile(source) as archive:
+        payload = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+    payload[sheet_path] = payload[sheet_path].replace(b"</worksheet>", cf + b"</worksheet>")
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in payload.items():
+            archive.writestr(name, data)
+
+    record = _synthetic_record("38-2-2-2026", pdf)
+    record["stage"] = "1"
+    result = apply({"38-2-2-2026": record}, source, output, sha256(source))
+    with zipfile.ZipFile(output) as archive:
+        saved_xml = archive.read(sheet_path)
+
+    assert result["verification"]["native_cf_preserved"] is True
+    assert cf in saved_xml
+    assert load_workbook(output)[SHEET]["F5"].value == "38-2-2-2026"
+
+
+def test_approved_date_proposal_updates_exact_row_link_and_verified_backup(tmp_path: Path):
+    manager, job, target, pdf = _proposal_job(tmp_path, {"end": "31.12.2026"})
+    proposal = job["proposals"][0]
+    before_approval = sha256(target)
+
+    with pytest.raises(ValueError):
+        manager.approve(str(job["id"]), str(proposal["id"]), "поддельное-разрешение")
+    assert sha256(target) == before_approval
+
+    approved = manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
+    saved = load_workbook(target)[SHEET]
+    backup = target.parent / "Резервные копии PropExtract" / str(approved["backup"])
+    backed_up = load_workbook(backup)[SHEET]
+
+    assert saved["H4"].value == datetime(2026, 12, 31)
+    assert saved["W4"].hyperlink.target == pdf.as_uri()
+    assert saved["Y4"].value == '=IF(A4<>"",ROW(),"")'
+    assert saved["AA4"].value is None
+    assert backed_up["H4"].value == datetime(2025, 12, 31)
+    assert manager.public(str(job["id"]))["proposals"][0]["status"] == "approved"
+
+
+def test_distinct_proposals_are_serialized_without_lost_update(tmp_path: Path):
+    manager, job, target, _ = _proposal_job(
+        tmp_path,
+        {"object": "Новый объект", "end": "31.12.2026"},
+    )
+    proposals = list(job["proposals"])
+    errors: list[Exception] = []
+
+    def approve(proposal: dict) -> None:
+        try:
+            manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
+        except Exception as error:  # Captured for the assertion in the parent thread.
+            errors.append(error)
+
+    threads = [threading.Thread(target=approve, args=(proposal,)) for proposal in proposals]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    saved = load_workbook(target)[SHEET]
+    assert errors == []
+    assert len(proposals) == 2
+    assert saved["D4"].value == "Новый объект"
+    assert saved["H4"].value == datetime(2026, 12, 31)
+    assert saved["AA4"].value is None
+    assert all(item["status"] == "approved" for item in manager.public(str(job["id"]))["proposals"])
+
+
+def test_stale_target_rejects_proposal_without_overwriting_user_change(tmp_path: Path):
+    manager, job, target, _ = _proposal_job(tmp_path, {"object": "Новый объект"})
+    proposal = job["proposals"][0]
+    changed = load_workbook(target)
+    changed[SHEET]["J4"] = "Изменено пользователем"
+    changed.save(target)
+
+    with pytest.raises(RuntimeError, match="proposal_target_stale"):
+        manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
+
+    saved = load_workbook(target)[SHEET]
+    assert saved["D4"].value == "Старый объект"
+    assert saved["J4"].value == "Изменено пользователем"
+
+
 def _unused_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -632,6 +800,10 @@ def test_http_serves_admin_help_health_and_security_headers():
         assert status == 200 and json.loads(body) == {"status": "ok", "service": "rns-import"}
         status, body, _ = _get(f"http://127.0.0.1:{port}/api/system")
         assert status == 200 and "commands" in json.loads(body)
+        with pytest.raises(urllib.error.HTTPError) as removed:
+            _post(f"http://127.0.0.1:{port}/process", {"pdf_dir": "x", "xlsx": "y"})
+        assert removed.value.code == 404
+        assert "Метод не найден" in removed.value.read().decode("utf-8")
     finally:
         server.shutdown()
         server.server_close()

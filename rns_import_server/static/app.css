@@ -149,6 +149,16 @@ h1 { max-width: 920px; margin: 0 0 30px; font-family: "Aptos Display", "Segoe UI
 .result-files ul { margin: 8px 0; padding-left: 20px; }
 .result-files li { margin: 4px 0; overflow-wrap: anywhere; }
 .result-files p { color: var(--muted); }
+.result-rows { display: grid; gap: 10px; margin-top: 18px; }
+.result-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 15px 16px; background: var(--canvas); border: 1px solid var(--line); border-left: 4px solid var(--lake); border-radius: 10px; }
+.result-row.conflict { border-left-color: var(--signal); }
+.result-row h3 { margin: 0; font: 700 14px/1.35 "Trebuchet MS", sans-serif; }
+.result-row p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.row-actions { display: flex; align-items: start; gap: 8px; flex-wrap: wrap; }
+.row-action { min-height: 34px; padding: 7px 10px; color: var(--lake-strong); background: transparent; border: 1px solid currentColor; border-radius: 7px; font: 700 12px/1.1 "Trebuchet MS", sans-serif; cursor: pointer; }
+.row-action:hover { color: var(--paper); background: var(--lake-strong); }
+.row-action:focus-visible { outline: 3px solid color-mix(in srgb, var(--lake) 35%, transparent); outline-offset: 2px; }
+.row-action:disabled { opacity: .55; cursor: wait; }
 
 .help-shell { padding-top: 78px; }
 .help-title { max-width: 840px; }
@@ -202,6 +212,7 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .guide-grid article:nth-child(2) { border-right: 0; }
   .guide-grid article:nth-child(3), .guide-grid article:nth-child(4) { border-bottom: 0; }
   .result-stats { grid-template-columns: 1fr 1fr; }
+  .result-row { grid-template-columns: 1fr; }
   .lifecycle-state { display: none; }
 }
 

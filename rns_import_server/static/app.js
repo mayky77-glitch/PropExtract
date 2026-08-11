@@ -34,6 +34,14 @@
     toastTimer = window.setTimeout(() => { toast.hidden = true; }, duration);
   }
 
+  async function responseJson(response) {
+    try {
+      return await response.json();
+    } catch (_) {
+      throw new Error("Сервер вернул некорректный ответ.");
+    }
+  }
+
   document.querySelectorAll("[data-shutdown]").forEach(button => {
     button.addEventListener("click", async () => {
       if (!window.confirm("Остановить PropExtract? Во время следующего запуска нужно будет открыть файл «Запустить PropExtract.cmd».")) return;
@@ -44,12 +52,12 @@
           headers: {"Content-Type": "application/json", "X-PropExtract-Action": "shutdown"},
           body: "{}"
         });
-        const payload = await response.json();
+        const payload = await responseJson(response);
         if (!response.ok) throw new Error(payload.error || "Не удалось остановить программу");
         if (shutdownScreen) shutdownScreen.hidden = false;
       } catch (error) {
         button.disabled = false;
-        showToast(error.message, 6000);
+        showToast("Не удалось остановить PropExtract. Повторите попытку.", 6000);
       }
     });
   });
@@ -70,6 +78,7 @@
   const resultBadge = document.querySelector("#result-badge");
   const resultStats = document.querySelector("#result-stats");
   const resultPaths = document.querySelector("#result-paths");
+  const resultRows = document.querySelector("#result-rows");
   const rulerSteps = [...document.querySelectorAll(".process-ruler li")];
   let pollTimer = null;
 
@@ -93,14 +102,14 @@
           body: JSON.stringify({kind: button.dataset.pickerKind}),
           signal: controller.signal
         });
-        const payload = await response.json();
+        const payload = await responseJson(response);
         if (!response.ok) throw new Error(payload.error || "Не удалось открыть окно выбора");
         if (payload.path) {
           target.value = payload.path;
           target.focus();
         }
       } catch (error) {
-        showToast(error.name === "AbortError" ? "Окно выбора не ответило. Проверьте панель задач или вставьте путь вручную." : error.message, 7000);
+        showToast(error.name === "AbortError" ? "Окно выбора не ответило. Проверьте панель задач или вставьте путь вручную." : "Не удалось открыть окно выбора. Вставьте путь вручную или повторите попытку.", 7000);
       } finally {
         window.clearTimeout(pickerTimeout);
         button.disabled = false;
@@ -132,8 +141,9 @@
       resultStats.innerHTML = "";
       const phase = job.error_phase ? `<p><strong>Этап:</strong> ${escapeText(job.error_phase)}</p>` : "";
       const file = job.error_file ? `<p><strong>PDF:</strong> ${escapeText(job.error_file)}</p>` : "";
-      const log = job.error_log ? `<p><strong>Технический журнал:</strong> ${escapeText(job.error_log)}</p>` : "";
-      resultPaths.innerHTML = `<p><strong>Причина:</strong> ${escapeText(job.error || "Неизвестная ошибка")}</p><p>${escapeText(job.error_hint || "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён.")}</p>${phase}${file}${log}`;
+      const log = job.technical_log ? "<p>Технический журнал сохранён рядом с программой.</p>" : "";
+      resultRows.innerHTML = "";
+      resultPaths.innerHTML = `<p><strong>Причина:</strong> ${escapeText(job.error || "Не удалось завершить операцию.")}</p><p>${escapeText(job.error_hint || "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён.")}</p>${phase}${file}${log}`;
       return;
     }
     const stats = job.summary || {};
@@ -154,19 +164,53 @@
     const rows = (stats.row_numbers || []).join(", ") || "нет";
     const newRows = (stats.new_row_numbers || []).join(", ") || "нет";
     const issueRows = (stats.rows_with_issues || []).join(", ") || "нет";
-    const alreadyPresentFiles = stats.already_present_files || [];
-    const alreadyPresent = alreadyPresentFiles.length
-      ? `<div class="result-files"><strong>Уже внесены, данные PDF совпадают:</strong><ul>${alreadyPresentFiles.map(file => `<li>${escapeText(file)}</li>`).join("")}</ul><p>Для этих строк при открытии Excel обновятся только цветовые маркеры сроков.</p></div>`
-      : "";
-    resultPaths.innerHTML = `${alreadyPresent}<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p><p><strong>Резервная копия:</strong> ${escapeText(job.backup)}</p>${job.report ? `<p><strong>Отчёт:</strong> ${escapeText(job.report)}</p>` : ""}${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
+    resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p>${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
+    const documents = Object.fromEntries((job.documents || []).map(item => [item.id, item]));
+    const cards = [];
+    const proposalRows = new Set((job.proposals || []).map(item => `${item.row ?? ""}::${item.number || ""}`));
+    (job.proposals || []).forEach(item => {
+      const document = documents[item.document_id] || {};
+      const difference = item.status === "approved"
+        ? `Перенесено «${escapeText(item.field)}»: «${escapeText(item.proposed)}».`
+        : `${escapeText(item.field)}: в Excel «${escapeText(item.existing)}», в PDF «${escapeText(item.proposed)}».`;
+      cards.push(`<article class="result-row ${item.status === "approved" ? "" : "conflict"}"><div><h3>Строка Excel ${escapeText(item.row ?? "не определена")} · РНС ${escapeText(item.number)}</h3><p>${escapeText(item.object || "Данные документа отличаются от таблицы.")}</p><p>${difference}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}<button class="row-action" type="button" data-approve-proposal="${escapeText(item.id)}" ${item.status === "approved" ? "disabled" : ""}>${item.status === "approved" ? "Перенесено" : "Перенести изменения"}</button></div></article>`);
+    });
+    (job.row_cards || []).filter(item => item.outcome !== "already_present" && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`)).forEach(item => {
+      const document = documents[item.document_id] || {};
+      cards.push(`<article class="result-row"><div><h3>Строка Excel ${escapeText(item.row ?? "не определена")} · РНС ${escapeText(item.number)}</h3><p>${escapeText(item.object || item.details || "Данные обработаны.")}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}</div></article>`);
+    });
+    (job.row_cards || []).filter(item => item.outcome === "already_present").forEach(item => {
+      const document = documents[item.document_id] || {};
+      cards.push(`<article class="result-row"><div><h3>Строка Excel ${escapeText(item.row)} · РНС ${escapeText(item.number)}</h3><p>Строка не изменена: данные уже есть в таблице.</p><p>${escapeText(item.object || "")}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}</div></article>`);
+    });
+    resultRows.innerHTML = cards.join("");
   }
+
+  resultRows?.addEventListener("click", async event => {
+    const button = event.target.closest("button");
+    if (!button || !window.currentPropExtractJob) return;
+    const job = window.currentPropExtractJob;
+    const documentId = button.dataset.openDocument;
+    const proposalId = button.dataset.approveProposal;
+    if (!documentId && !proposalId) return;
+    button.disabled = true;
+    try {
+      const suffix = documentId ? `/documents/${encodeURIComponent(documentId)}/open` : `/proposals/${encodeURIComponent(proposalId)}/approve`;
+      const response = await fetch(`/api/jobs/${encodeURIComponent(job.id)}${suffix}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({capability: job.capability})});
+      const payload = await responseJson(response);
+      if (!response.ok) throw new Error(payload.error || "Не удалось выполнить действие");
+      if (proposalId) { showToast("Изменение перенесено. Резервная копия создана."); poll(job.id); }
+      else showToast("Открываем исходный PDF.");
+    } catch (error) { button.disabled = false; showToast("Не удалось выполнить действие. Обновите результат и повторите попытку.", 6000); }
+  });
 
   async function poll(jobId) {
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {cache: "no-store"});
-      const job = await response.json();
+      const job = await responseJson(response);
       if (!response.ok) throw new Error(job.error || "Не удалось получить состояние");
       setProgress(job);
+      window.currentPropExtractJob = job;
       if (job.status === "done" || job.status === "error") {
         startButton.disabled = false;
         renderResult(job);
@@ -175,7 +219,7 @@
       pollTimer = window.setTimeout(() => poll(jobId), 700);
     } catch (error) {
       startButton.disabled = false;
-      renderResult({status: "error", error: error.message});
+      renderResult({status: "error", error: "Не удалось получить состояние операции.", error_hint: "Проверьте подключение к PropExtract и повторите запуск."});
     }
   }
 
@@ -194,20 +238,18 @@
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
       });
-      const job = await response.json();
+      const job = await responseJson(response);
       if (!response.ok) throw new Error(job.error || "Не удалось запустить импорт");
-      if (job.pdf_dir) document.querySelector("#pdf-dir").value = job.pdf_dir;
-      if (job.xlsx) document.querySelector("#xlsx-path").value = job.xlsx;
       poll(job.id);
     } catch (error) {
       startButton.disabled = false;
       setProgress({progress: 0, stage: "Запуск остановлен", status: "error"});
-      renderResult({status: "error", error: error.message});
+      renderResult({status: "error", error: "Не удалось запустить импорт.", error_hint: "Проверьте подключение к PropExtract и параметры запуска."});
     }
   });
 
   fetch("/api/system", {cache: "no-store"})
-    .then(response => response.json())
+    .then(responseJson)
     .then(state => {
       systemState.className = `system-state ${state.ready ? "ready" : "error"}`;
       systemState.querySelector("span:last-child").textContent = state.ready

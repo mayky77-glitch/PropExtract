@@ -71,8 +71,15 @@ with sync_playwright() as playwright:
                     "new_row_numbers": [],
                     "rows_with_issues": [],
                 },
-                "backup": "C:\\Реестр\\Резервная копия.xlsx",
-                "report": "C:\\Реестр\\Отчёт.json",
+                "documents": [
+                    {"id": "doc-1", "filename": "Разрешение ВЛ 110кВ.pdf"},
+                    {"id": "doc-2", "filename": "Продление до 28.11.2026.pdf"},
+                ],
+                "row_cards": [
+                    {"row": 584, "number": "38-1-1-2026", "object": "Линейный объект", "outcome": "already_present", "filename": "Разрешение ВЛ 110кВ.pdf", "document_id": "doc-1"},
+                    {"row": 585, "number": "38-2-2-2026", "object": "Продление разрешения", "outcome": "already_present", "filename": "Продление до 28.11.2026.pdf", "document_id": "doc-2"},
+                ],
+                "proposals": [],
             }, ensure_ascii=False),
         )
 
@@ -84,8 +91,9 @@ with sync_playwright() as playwright:
     result_text = page.locator("#result").inner_text()
     assert "Разрешение ВЛ 110кВ.pdf" in result_text
     assert "Продление до 28.11.2026.pdf" in result_text
-    assert "Для этих строк" in result_text
-    assert "обновятся только цветовые маркеры сроков" in result_text
+    assert "Строка Excel 584" in result_text
+    assert "Строка не изменена: данные уже есть в таблице." in result_text
+    assert page.get_by_role("button", name="Открыть PDF").count() == 2
     page.screenshot(path=SCREENSHOTS / "already-present-dark.png", full_page=True)
     page.unroute("**/api/jobs**", mock_job)
 
@@ -93,7 +101,9 @@ with sync_playwright() as playwright:
     page.get_by_label("Целевой файл Excel").fill("/path/that/does/not/exist.xlsx")
     page.get_by_role("button", name="Перенести данные").click()
     page.get_by_role("heading", name="Реестр не изменён").wait_for(timeout=5000)
-    assert "Папка с PDF не найдена: /path/that/does/not/exist" in page.locator("#result-paths").inner_text()
+    error_text = page.locator("#result-paths").inner_text()
+    assert "Проверьте папку с PDF, файл Excel и параметры операции." in error_text
+    assert "/path/that/does/not/exist" not in error_text
     assert page.get_by_role("button", name="Перенести данные").is_enabled()
 
     page.goto(f"{BASE}/help")

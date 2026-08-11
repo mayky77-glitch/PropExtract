@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import errno
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -20,10 +21,12 @@ from urllib.parse import unquote, urlparse
 
 try:
     from rns_import_server.audit import atomic_json, sha256
+    from rns_import_server.workbook import apply_proposal, iso_date
     from rns_import_server.files import discover_pdfs
     from rns_import_server.runtime import runtime_status
 except ModuleNotFoundError:
     from audit import atomic_json, sha256
+    from workbook import apply_proposal, iso_date
     from files import discover_pdfs
     from runtime import runtime_status
 
@@ -145,6 +148,51 @@ def error_hint(error: Exception) -> str:
     return "Исправьте указанную причину и повторите запуск. Исходный Excel не изменён."
 
 
+def public_error(error: Exception) -> tuple[str, str]:
+    """Translate all public failures; preserve diagnostics only in the local log."""
+    code = str(error)
+    if "native_conditional_formatting" in code:
+        return (
+            "Не удалось сохранить исходные правила цветовой подсветки Excel. Реестр не изменён.",
+            "Обновите PropExtract и повторите перенос. Если ошибка повторится, передайте разработчику технический журнал.",
+        )
+    if "proposal_" in code or "source_inputs_changed" in code or "Целевой Excel изменился" in code:
+        return ("Данные изменились после запуска. Реестр не изменён.", "Запустите проверку заново и подтвердите изменение ещё раз.")
+    if isinstance(error, BusyError):
+        return (str(error), "Дождитесь завершения текущей операции.")
+    if isinstance(error, (ValueError, TypeError)):
+        return ("Проверьте папку с PDF, файл Excel и параметры операции.", "Исправьте данные и повторите действие.")
+    if isinstance(error, PermissionError):
+        return ("Не удалось получить доступ к файлу.", error_hint(error))
+    return ("Не удалось завершить операцию. Реестр не изменён.", error_hint(error))
+
+
+def _display_filename(value: object) -> str | None:
+    """Return a filename suitable for the operator UI, never a local path."""
+    if value in (None, ""):
+        return None
+    return str(value).replace("\\", "/").rsplit("/", 1)[-1] or None
+
+
+def _public_issue(value: object) -> str:
+    """Keep internal diagnostic codes out of operator-facing row cards."""
+    text = str(value or "").strip()
+    if text == "no_transferable_evidence":
+        return "В PDF недостаточно подтверждённых данных для переноса."
+    if text and " " not in text and "_" in text:
+        return "Строка требует ручной проверки."
+    return text
+
+
+def _capability_matches(expected: object, candidate: object) -> bool:
+    """Compare opaque ASCII capabilities without leaking TypeError for Unicode input."""
+    return (
+        isinstance(candidate, str)
+        and candidate.isascii()
+        and secrets.compare_digest(str(expected), candidate)
+    )
+
+
 def retry_file_operation(operation: Callable[[], object], attempts: int = 6) -> object:
     """Retry only transient Windows/share locks for a few bounded seconds."""
     for attempt in range(attempts):
@@ -171,6 +219,7 @@ class JobManager:
         self.error_log = error_log
         self._jobs: dict[str, dict[str, object]] = {}
         self._lock = threading.Lock()
+        self._publish_lock = threading.Lock()
 
     def start(self, pdf_dir: str, xlsx: str, dpi: int = 180) -> dict[str, object]:
         pdf_path, xlsx_path = validated_job_paths(pdf_dir, xlsx)
@@ -192,6 +241,7 @@ class JobManager:
                 "updated_at": now,
                 "pdf_dir": pdf_value,
                 "xlsx": xlsx_value,
+                "capability": secrets.token_urlsafe(32),
             }
             self._jobs[job_id] = job
             self._trim_locked()
@@ -202,6 +252,18 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             return dict(job) if job else None
+
+    def public(self, job_id: str) -> dict[str, object] | None:
+        job = self.get(job_id)
+        if not job:
+            return None
+        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal"}
+        value = {key: item for key, item in job.items() if key not in hidden}
+        for key in ("current_file", "error_file"):
+            if key in value:
+                value[key] = _display_filename(value[key])
+        # Capability is an opaque per-job authorization value, not a filesystem path.
+        return value
 
     def has_active_job(self) -> bool:
         with self._lock:
@@ -279,6 +341,67 @@ class JobManager:
             documents = result.get("documents", [])
             failed_documents = [item for item in documents if item.get("error")]
             changes = result.get("changes", [])
+            input_hashes = result.get("input_hashes", {})
+            pdf_hashes = dict(input_hashes.get("pdfs", {})) if isinstance(input_hashes, dict) else {}
+            documents_internal: dict[str, dict[str, object]] = {}
+            public_documents: list[dict[str, object]] = []
+            for item in documents:
+                raw = Path(str(item.get("file", "")))
+                document_id = uuid.uuid4().hex
+                try:
+                    relative = str(raw.relative_to(pdf_dir))
+                    file_hash = pdf_hashes.get(relative)
+                except ValueError:
+                    file_hash = None
+                documents_internal[document_id] = {"path": raw, "hash": file_hash}
+                public_documents.append({"id": document_id, "filename": raw.name, "error": "PDF не обработан." if item.get("error") else None})
+
+            def document_reference(source: object) -> tuple[str | None, str | None]:
+                candidate = Path(str(source or ""))
+                if not candidate.is_absolute():
+                    candidate = pdf_dir / candidate
+                try:
+                    identity = candidate.resolve()
+                except OSError:
+                    return None, None
+                for public_document in public_documents:
+                    internal = documents_internal[str(public_document["id"])]
+                    path = internal.get("path")
+                    try:
+                        if isinstance(path, Path) and path.resolve() == identity:
+                            return str(public_document["id"]), str(public_document["filename"])
+                    except OSError:
+                        continue
+                return None, None
+
+            proposals_internal: dict[str, dict[str, object]] = {}
+            public_proposals: list[dict[str, object]] = []
+            records = result.get("selected_records", {})
+            for conflict in result.get("conflicts", []):
+                if conflict.get("action") != "Перенести изменения":
+                    continue
+                number, field = str(conflict["number"]), str(conflict["field"])
+                record = records.get(number, {}) if isinstance(records, dict) else {}
+                field_key = {
+                    "Номер этапа": "stage", "Наименование объекта": "object", "Дата выдачи": "issue",
+                    "Срок действия": "end", "Дата последн. измен.": "changed", "Орган выдачи": "issuer",
+                    "Застройщик": "builder", "Субъект РФ": "region", "Муниципальный р-н": "district",
+                    "Разработчик ПД": "developer",
+                }.get(field)
+                source = record.get("field_sources", {}).get(field_key, "") if field_key else ""
+                document_id, source_name = document_reference(source)
+                if not document_id or not source_name:
+                    continue
+                proposal_id = uuid.uuid4().hex
+                proposals_internal[proposal_id] = {"number": number, "field": field, "value": conflict["pdf"], "document_id": document_id, "status": "pending"}
+                public_proposals.append({"id": proposal_id, "number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
+            row_cards = []
+            for change in changes:
+                number = str(change.get("number", ""))
+                record = records.get(number, {}) if isinstance(records, dict) else {}
+                filename = str(change.get("document") or record.get("filename") or "PDF")
+                document_id, source_name = document_reference(record.get("pdf") or filename)
+                row_cards.append({"row": change.get("row"), "number": number, "object": record.get("object"), "details": "; ".join(filter(None, (_public_issue(issue) for issue in change.get("issues", [])))), "outcome": change.get("outcome"), "filename": source_name or Path(filename).name, "document_id": document_id})
             already_present = [item for item in changes if item.get("outcome") == "already_present"]
             summary = {
                 "pdf_count": len(documents) - len(failed_documents),
@@ -299,7 +422,7 @@ class JobManager:
             if failed_documents:
                 warnings.append(f"PDF пропущено: {len(failed_documents)}. Причины сохранены в отчёте.")
             if report_error:
-                warnings.append(f"Excel обновлён, но отчёт не записан: {report_error}")
+                warnings.append("Excel обновлён, но отчёт не записан.")
             self._update(
                 job_id,
                 status="done",
@@ -309,6 +432,13 @@ class JobManager:
                 backup=str(backup),
                 report=str(report) if report_error is None else None,
                 warning=" ".join(warnings) or None,
+                documents=public_documents,
+                documents_internal=documents_internal,
+                proposals=public_proposals,
+                proposals_internal=proposals_internal,
+                row_cards=row_cards,
+                target_hash=sha256(target),
+                pdf_hashes=pdf_hashes,
             )
         except Exception as error:
             failed_job = self.get(job_id) or {}
@@ -317,16 +447,121 @@ class JobManager:
                 job_id,
                 status="error",
                 stage="Обработка остановлена",
-                error=str(error),
-                error_hint=error_hint(error),
+                error=public_error(error)[0],
+                error_hint=public_error(error)[1],
                 error_phase=failed_job.get("stage"),
                 error_file=failed_job.get("current_file"),
+                technical_log=bool(error_log),
                 error_log=error_log,
                 current_file=None,
             )
         finally:
             if temporary:
                 temporary.unlink(missing_ok=True)
+
+    def _authorized(self, job_id: str, capability: object) -> dict[str, object]:
+        job = self.get(job_id)
+        if not job or not _capability_matches(job.get("capability", ""), capability):
+            raise ValueError("Действие недоступно. Запустите перенос заново.")
+        return job
+
+    def open_document(self, job_id: str, document_id: str, capability: object) -> None:
+        job = self._authorized(job_id, capability)
+        if job.get("status") != "done":
+            raise ValueError("Документ доступен только после завершения переноса.")
+        item = dict(job.get("documents_internal", {}).get(document_id, {}))
+        path = item.get("path")
+        try:
+            if isinstance(path, Path):
+                path.resolve().relative_to(Path(str(job["pdf_dir"])).resolve())
+            else:
+                raise ValueError
+        except ValueError:
+            raise RuntimeError("document_unavailable")
+        if not isinstance(path, Path) or not path.is_file() or path.is_symlink() or item.get("hash") != sha256(path):
+            raise RuntimeError("document_unavailable")
+        if os.name != "nt" or not hasattr(os, "startfile"):
+            raise RuntimeError("document_open_unavailable")
+        os.startfile(str(path))  # type: ignore[attr-defined]  # Windows API; no shell.
+
+    def approve(self, job_id: str, proposal_id: str, capability: object) -> dict[str, object]:
+        # Reserve this proposal under the manager lock before staging any file.
+        # Do not call _update while holding it: _update deliberately takes it too.
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or not _capability_matches(job.get("capability", ""), capability):
+                raise ValueError("Действие недоступно. Запустите перенос заново.")
+            if job.get("status") != "done":
+                raise ValueError("Подтверждение доступно только после завершения переноса.")
+            proposals = dict(job.get("proposals_internal", {}))
+            proposal = dict(proposals.get(proposal_id, {}))
+            if not proposal or proposal.get("status") != "pending":
+                raise ValueError("Предложение недоступно или уже обработано.")
+            proposal["status"] = "approving"
+            proposals[proposal_id] = proposal
+            job["proposals_internal"] = proposals
+            job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        staged: Path | None = None
+        self._publish_lock.acquire()
+        try:
+            target = Path(str(job["xlsx"]))
+            expected = str(job.get("target_hash", ""))
+            doc = dict(job.get("documents_internal", {}).get(proposal.get("document_id"), {}))
+            pdf = doc.get("path")
+            if isinstance(pdf, Path):
+                pdf.resolve().relative_to(Path(str(job["pdf_dir"])).resolve())
+            else:
+                raise ValueError
+            if (not expected or not target.is_file() or target.is_symlink() or not isinstance(pdf, Path)
+                    or pdf.suffix.lower() != ".pdf" or not pdf.is_file() or pdf.is_symlink()
+                    or doc.get("hash") != sha256(pdf)):
+                raise RuntimeError("proposal_source_unavailable")
+            if sha256(target) != expected:
+                raise RuntimeError("proposal_target_stale")
+            descriptor, name = tempfile.mkstemp(prefix=f".{target.stem}.proposal-", suffix=".xlsx", dir=target.parent)
+            os.close(descriptor)
+            staged = Path(name)
+            staged.unlink(missing_ok=True)
+            value: object = proposal["value"]
+            if proposal["field"] in {"Дата выдачи", "Срок действия", "Дата последн. измен."}:
+                value = iso_date(str(value))
+            apply_proposal(target, staged, expected, str(proposal["number"]), str(proposal["field"]), value, pdf)
+            backup_dir = target.parent / "Резервные копии PropExtract"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup = backup_dir / f"{target.stem} — до подтверждения {datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')}.xlsx"
+            retry_file_operation(lambda: shutil.copy2(target, backup))
+            if sha256(backup) != expected:
+                backup.unlink(missing_ok=True)
+                raise RuntimeError("proposal_backup_invalid")
+            if sha256(target) != expected:
+                raise RuntimeError("proposal_target_stale")
+            retry_file_operation(lambda: os.replace(staged, target))
+            proposal["status"] = "approved"
+            with self._lock:
+                current = self._jobs[job_id]
+                proposals = dict(current.get("proposals_internal", {}))
+                proposals[proposal_id] = proposal
+                public = list(current.get("proposals", []))
+                for item in public:
+                    if item.get("id") == proposal_id:
+                        item["status"] = "approved"
+                current.update(proposals_internal=proposals, proposals=public, target_hash=sha256(target), updated_at=datetime.now().isoformat(timespec="seconds"))
+            return {"status": "approved", "backup": backup.name}
+        except Exception:
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current:
+                    proposals = dict(current.get("proposals_internal", {}))
+                    pending = dict(proposals.get(proposal_id, {}))
+                    if pending.get("status") == "approving":
+                        pending["status"] = "pending"
+                        proposals[proposal_id] = pending
+                        current["proposals_internal"] = proposals
+            raise
+        finally:
+            if staged:
+                staged.unlink(missing_ok=True)
+            self._publish_lock.release()
 
 
 def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
@@ -376,7 +611,7 @@ def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
             elif path == "/api/system":
                 self.send_json(200, _tool_status())
             elif path.startswith("/api/jobs/"):
-                job = manager.get(path.removeprefix("/api/jobs/"))
+                job = manager.public(path.removeprefix("/api/jobs/"))
                 self.send_json(200, job) if job else self.send_json(404, {"error": "Задача не найдена"})
             else:
                 self.send_json(404, {"error": "Страница не найдена"})
@@ -387,7 +622,7 @@ def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
                 payload = self.body_json()
                 if path == "/api/jobs":
                     job = manager.start(str(payload.get("pdf_dir", "")), str(payload.get("xlsx", "")), int(payload.get("dpi", 180)))
-                    self.send_json(202, job)
+                    self.send_json(202, manager.public(str(job["id"])) or {})
                 elif path == "/api/picker":
                     selected = select_path(str(payload.get("kind", "")))
                     self.send_json(200, {"path": selected, "cancelled": selected is None})
@@ -398,20 +633,25 @@ def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
                         raise BusyError("Сейчас идёт перенос данных. Дождитесь завершения, затем остановите программу.")
                     self.send_json(202, {"status": "stopping"})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
-                elif path == "/process":
-                    for key in ("pdf_dir", "xlsx", "output"):
-                        if key not in payload:
-                            raise ValueError(f"missing {key}")
-                    result = runner(Path(str(payload["pdf_dir"])), Path(str(payload["xlsx"])), Path(str(payload["output"])), int(payload.get("dpi", 180)), int(payload.get("max_pages", 0)))
-                    self.send_json(200, result)
+                elif path.startswith("/api/jobs/") and path.endswith("/approve"):
+                    parts = path.split("/")
+                    if len(parts) != 7 or parts[4] != "proposals":
+                        raise ValueError("Метод не найден")
+                    self.send_json(200, manager.approve(parts[3], parts[5], payload.get("capability")))
+                elif path.startswith("/api/jobs/") and path.endswith("/open"):
+                    parts = path.split("/")
+                    if len(parts) != 7 or parts[4] != "documents":
+                        raise ValueError("Метод не найден")
+                    manager.open_document(parts[3], parts[5], payload.get("capability"))
+                    self.send_json(202, {"status": "opening"})
                 else:
                     self.send_json(404, {"error": "Метод не найден"})
             except BusyError as error:
-                self.send_json(409, {"error": str(error)})
+                message, hint = public_error(error); self.send_json(409, {"error": message, "hint": hint})
             except (ValueError, TypeError, json.JSONDecodeError) as error:
-                self.send_json(400, {"error": str(error)})
+                message, hint = public_error(error); self.send_json(400, {"error": message, "hint": hint})
             except Exception as error:
-                self.send_json(500, {"error": str(error)})
+                message, hint = public_error(error); self.send_json(500, {"error": message, "hint": hint})
 
         def log_message(self, format: str, *args: object) -> None:
             print("HTTP", format % args)

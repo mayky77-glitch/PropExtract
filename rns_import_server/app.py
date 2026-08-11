@@ -45,10 +45,12 @@ def _merge_group(number: str, versions: list[dict], documents: list[dict]) -> di
         existing_only = dict(selected)
         existing_only["existing_only"] = True
         existing_only["source_files"] = [record["filename"] for record in directives]
+        existing_only["field_sources"] = {field: str(selected["pdf"]) for field in EVIDENCE_FIELDS if selected.get(field) is not None}
         return existing_only
     selected = max(permits, key=lambda item: (_evidence_count(item), date(item.get("changed")) or datetime.min, str(item["filename"])))
     merged = dict(selected)
     merged["field_provenance"] = dict(selected.get("field_provenance", {}))
+    merged["field_sources"] = {field: str(selected["pdf"]) for field in EVIDENCE_FIELDS if selected.get(field) is not None}
     merged["source_files"] = [selected["filename"]]
     for directive in directives:
         # Explicit canonical ID is supplied by the parser; evidence must be
@@ -65,9 +67,11 @@ def _merge_group(number: str, versions: list[dict], documents: list[dict]) -> di
                 if current is None or (date(proposed) and date(proposed) > (date(current) or datetime.min)):
                     merged[field] = proposed
                     merged["field_provenance"][field] = "ocr"
+                    merged["field_sources"][field] = str(directive["pdf"])
             elif merged.get(field) is None:
                 merged[field] = proposed
                 merged["field_provenance"][field] = "ocr"
+                merged["field_sources"][field] = str(directive["pdf"])
         merged["source_files"].append(directive["filename"])
     merged["warnings"] = [field for field in merged.get("warnings", []) if merged.get(field) is None]
     return merged
@@ -146,7 +150,7 @@ def run(
         output.unlink(missing_ok=True)
         raise RuntimeError("source_inputs_changed")
     selected = {
-        number: {key: record.get(key) for key in ("filename", "issue", "end", "changed", "warnings")}
+        number: {key: record.get(key) for key in ("filename", "pdf", "issue", "end", "changed", "warnings", "stage", "object", "issuer", "builder", "region", "district", "developer", "source_files", "field_sources")}
         for number, record in records.items()
     }
     result.update({"contract_version": "rns-import-2", "input_hashes": before, "input_digest": digest(before), "documents": documents, "logical_records": sorted(records), "selected_records": selected, "output": str(output)})

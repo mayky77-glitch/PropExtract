@@ -36,7 +36,14 @@ _STANDARD_CF = re.compile(rb"<conditionalFormatting\b.*?</conditionalFormatting>
 
 
 def iso_date(value: object) -> datetime | None:
-    return datetime.strptime(value, "%d.%m.%Y") if isinstance(value, str) and value else None
+    if not isinstance(value, str) or not value:
+        return None
+    for pattern in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, pattern)
+        except ValueError:
+            continue
+    raise ValueError("invalid_date")
 
 
 def _value_text(value: object) -> str:
@@ -102,6 +109,48 @@ def _standard_cf_blocks(book: Path, sheet_path: str) -> tuple[bytes, ...]:
     """Return native worksheet CF blocks, excluding x14 rules in ``extLst``."""
     with zipfile.ZipFile(book) as archive:
         return tuple(_STANDARD_CF.findall(archive.read(sheet_path)))
+
+
+def _reinject_native_conditional_formatting(source: Path, staged: Path) -> None:
+    """Restore native CF bytes at a valid worksheet position after openpyxl saves."""
+    sheet_path = _sheet_xml_path(source, SHEET)
+    with zipfile.ZipFile(source) as archive:
+        source_sheet = archive.read(sheet_path)
+    source_blocks = _STANDARD_CF.findall(source_sheet)
+    if not source_blocks:
+        return
+    with zipfile.ZipFile(staged) as archive:
+        payload = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+    sheet = _STANDARD_CF.sub(b"", payload[sheet_path])
+    last = None
+    for last in _STANDARD_CF.finditer(source_sheet):
+        pass
+    assert last is not None
+    # Find the first schema-valid sibling that followed source CF, then restore
+    # immediately before its equivalent in staged XML. This retains the proper
+    # location after sheetProtection/autoFilter/mergeCells when they precede CF.
+    following = (
+        b"<dataValidations", b"<hyperlinks", b"<printOptions", b"<pageMargins", b"<pageSetup",
+        b"<headerFooter", b"<rowBreaks", b"<colBreaks", b"<customProperties", b"<cellWatches",
+        b"<ignoredErrors", b"<smartTags", b"<drawing", b"<legacyDrawing", b"<legacyDrawingHF",
+        b"<picture", b"<oleObjects", b"<controls", b"<webPublishItems", b"<tableParts", b"<extLst",
+        b"</worksheet>",
+    )
+    anchor = next((marker for marker in following if source_sheet.find(marker, last.end()) >= 0), None)
+    position = sheet.find(anchor) if anchor else -1
+    if position < 0:
+        raise RuntimeError("native_conditional_formatting_position_missing")
+    payload[sheet_path] = sheet[:position] + b"".join(source_blocks) + sheet[position:]
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".rns-native-cf-", suffix=".xlsx", dir=staged.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in payload.items():
+                archive.writestr(name, data)
+        os.replace(temporary, staged)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _reinject_extensions(source: Path, staged: Path) -> None:
@@ -183,11 +232,13 @@ def _put(cell, value: object, label: str, number: str, conflicts: list[dict[str,
         return False
     if cell.value in (None, ""):
         cell.value = value
+        if isinstance(value, str):
+            cell.data_type = "s"  # OCR text must never become an Excel formula.
         return True
     previous = cell.value.date() if isinstance(cell.value, datetime) else str(cell.value).strip()
     proposed = value.date() if isinstance(value, datetime) else str(value).strip()
-    if previous != proposed and label == "Срок действия":
-        conflicts.append({"number": number, "cell": cell.coordinate, "field": label, "existing": str(previous), "pdf": str(proposed), "action": "kept_existing"})
+    if previous != proposed:
+        conflicts.append({"number": number, "cell": cell.coordinate, "field": label, "existing": str(previous), "pdf": str(proposed), "action": "Перенести изменения"})
     return False
 
 
@@ -381,11 +432,61 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 "issues": issues,
             })
         workbook.save(staged)
+        _reinject_native_conditional_formatting(source, staged)
         _reinject_extensions(source, staged)
         if sha256(source) != source_hash:
             raise RuntimeError("source_xlsx_changed")
         verification = _validate(source, staged, records, statuses, outcomes)
         os.replace(staged, output)
         return {"changes": changes, "conflicts": conflicts, "verification": verification}
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def apply_proposal(source: Path, output: Path, source_hash: str, number: str, field: str, value: object, pdf: Path) -> None:
+    """Stage exactly one approved existing-row value without weakening validation."""
+    if field not in HEADERS:
+        raise RuntimeError("proposal_field_invalid")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.stem}.", suffix=".staged.xlsx", dir=output.parent)
+    os.close(descriptor)
+    staged = Path(temporary_name)
+    try:
+        workbook = load_workbook(source)
+        sheet = workbook[SHEET]
+        rows = _rows_by_number(sheet, number)
+        if len(rows) != 1:
+            raise RuntimeError("proposal_row_unavailable")
+        row = rows[0]
+        cell = sheet.cell(row, HEADERS[field])
+        cell.value = value
+        if isinstance(value, str):
+            cell.data_type = "s"
+        link = sheet.cell(row, HEADERS["Ссылка на документ"])
+        link.value, link.hyperlink, link.style = pdf.name, pdf.as_uri(), "Hyperlink"
+        status = sheet.cell(row, STATUS_COLUMN)
+        if isinstance(status.value, str):
+            marker = f"Не перенесено «{field}»:"
+            status.value = "\n".join(line for line in status.value.splitlines() if not line.startswith(marker)) or None
+        workbook.save(staged)
+        _reinject_native_conditional_formatting(source, staged)
+        _reinject_extensions(source, staged)
+        if sha256(source) != source_hash:
+            raise RuntimeError("proposal_target_stale")
+        source_book, staged_book = load_workbook(source, data_only=False), load_workbook(staged, data_only=False)
+        source_sheet, staged_sheet = source_book[SHEET], staged_book[SHEET]
+        for current_row in range(4, source_sheet.max_row + 1):
+            for column in range(1, source_sheet.max_column + 1):
+                old, new = source_sheet.cell(current_row, column), staged_sheet.cell(current_row, column)
+                allowed = current_row == row and old.coordinate in {cell.coordinate, link.coordinate, status.coordinate}
+                old_link = old.hyperlink.target if old.hyperlink else None
+                new_link = new.hyperlink.target if new.hyperlink else None
+                if not allowed and (old.value != new.value or old._style != new._style or old_link != new_link):
+                    raise RuntimeError(f"proposal_changed:{old.coordinate}")
+        sheet_path = _sheet_xml_path(source, SHEET)
+        if _extension_block(source, sheet_path) != _extension_block(staged, sheet_path):
+            raise RuntimeError("x14_extensions_changed")
+        if _standard_cf_blocks(source, sheet_path) != _standard_cf_blocks(staged, sheet_path):
+            raise RuntimeError("native_conditional_formatting_changed")
+        os.replace(staged, output)
     finally:
         staged.unlink(missing_ok=True)
