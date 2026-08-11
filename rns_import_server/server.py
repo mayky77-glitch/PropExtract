@@ -299,6 +299,7 @@ class JobManager:
 
     def _execute(self, job_id: str, pdf_dir: Path, target: Path, dpi: int) -> None:
         temporary: Path | None = None
+        backup: Path | None = None
         try:
             self._update(job_id, status="running", progress=1, stage="Начинаем обработку")
             if not target.parent.is_dir():
@@ -320,18 +321,24 @@ class JobManager:
             expected_hash = str(result["input_hashes"]["xlsx"])
             if sha256(target) != expected_hash:
                 raise RuntimeError("Целевой Excel изменился во время обработки")
-            backup_dir = target.parent / "Резервные копии PropExtract"
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-            backup = backup_dir / f"{target.stem} — до импорта {stamp}.xlsx"
-            retry_file_operation(lambda: shutil.copy2(target, backup))
-            if sha256(backup) != expected_hash:
-                backup.unlink(missing_ok=True)
-                raise RuntimeError("Не удалось проверить резервную копию")
-            retry_file_operation(lambda: os.replace(temporary, target))
-            temporary = None
+            changes = result.get("changes", [])
+            is_noop = all(item.get("outcome") == "already_present" for item in changes)
+            if is_noop:
+                temporary.unlink(missing_ok=True)
+                temporary = None
+            else:
+                backup_dir = target.parent / "Резервные копии PropExtract"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+                backup = backup_dir / f"{target.stem} — до импорта {stamp}.xlsx"
+                retry_file_operation(lambda: shutil.copy2(target, backup))
+                if sha256(backup) != expected_hash:
+                    backup.unlink(missing_ok=True)
+                    raise RuntimeError("Не удалось проверить резервную копию")
+                retry_file_operation(lambda: os.replace(temporary, target))
+                temporary = None
             result["output"] = str(target)
-            result["backup"] = str(backup)
+            result["backup"] = str(backup) if backup else None
             report = target.with_name(f"{target.stem} — отчет PropExtract.json")
             report_error = None
             try:
@@ -340,7 +347,6 @@ class JobManager:
                 report_error = str(error)
             documents = result.get("documents", [])
             failed_documents = [item for item in documents if item.get("error")]
-            changes = result.get("changes", [])
             input_hashes = result.get("input_hashes", {})
             pdf_hashes = dict(input_hashes.get("pdfs", {})) if isinstance(input_hashes, dict) else {}
             documents_internal: dict[str, dict[str, object]] = {}
@@ -429,7 +435,7 @@ class JobManager:
                 progress=100,
                 stage="Готово",
                 summary=summary,
-                backup=str(backup),
+                backup=str(backup) if backup else None,
                 report=str(report) if report_error is None else None,
                 warning=" ".join(warnings) or None,
                 documents=public_documents,

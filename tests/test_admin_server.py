@@ -45,7 +45,7 @@ def _fake_runner(pdf_dir: Path, xlsx: Path, output: Path, dpi: int, max_pages: i
             "new": False,
             "row": 42,
             "issues": [],
-            "outcome": "already_present",
+            "outcome": "added",
             "document": "sample.pdf",
         }],
         "conflicts": [],
@@ -121,17 +121,62 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "pdf_count": 1,
         "failed_pdf_count": 0,
         "record_count": 1,
-        "changed_rows": 0,
+        "changed_rows": 1,
         "new_rows": 0,
-        "already_present_count": 1,
-        "already_present_files": ["sample.pdf"],
-        "already_present_rows": [42],
+        "already_present_count": 0,
+        "already_present_files": [],
+        "already_present_rows": [],
         "conflicts": 0,
         "issue_count": 0,
         "rows_with_issues": [],
         "row_numbers": [42],
         "new_row_numbers": [],
     }
+
+
+def test_job_with_only_already_present_changes_keeps_workbook_unchanged(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+    source_hash = sha256(target)
+    source_mtime_ns = target.stat().st_mtime_ns
+
+    def noop_runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        output.write_bytes(b"would-have-been-published")
+        return {
+            "input_hashes": {"xlsx": sha256(xlsx)},
+            "documents": [{"file": str(pdf_root / "sample.pdf")}],
+            "logical_records": ["00-00-00-0000"],
+            "changes": [{
+                "new": False,
+                "row": 42,
+                "issues": [],
+                "outcome": "already_present",
+                "document": "sample.pdf",
+            }],
+            "conflicts": [],
+        }
+
+    manager = JobManager(noop_runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    assert finished["status"] == "done"
+    assert finished["target_hash"] == source_hash
+    assert target.read_bytes() == b"original"
+    assert sha256(target) == source_hash
+    assert target.stat().st_mtime_ns == source_mtime_ns
+    backup_dir = target.parent / "Резервные копии PropExtract"
+    assert not backup_dir.exists()
+    assert list(backup_dir.glob("*.xlsx")) == []
+    assert not list(target.parent.glob(f".{target.stem}.propextract-*.xlsx"))
+    assert report.exists()
+    report_data = json.loads(report.read_text(encoding="utf-8"))
+    assert report_data["input_hashes"]["xlsx"] == source_hash
+    assert report_data["backup"] is None
+    assert finished["backup"] is None
 
 
 def test_partial_pdf_failure_is_reported_without_stopping_valid_records(tmp_path: Path):
