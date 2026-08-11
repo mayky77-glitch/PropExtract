@@ -1,7 +1,28 @@
+import json
 from pathlib import Path
+from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_vc_runtime_uses_unicode_safe_verified_zip():
+    installer = (ROOT / "install_windows.ps1").read_text(encoding="utf-8")
+    helpers = (ROOT / "windows_runtime_helpers.ps1").read_text(encoding="utf-8")
+    lock = json.loads((ROOT / "windows-runtime.lock.json").read_text(encoding="utf-8"))
+    artifact = lock["artifacts"]["vcruntime"]
+    archive = ROOT / artifact["path"]
+
+    assert archive.suffix == ".zip"
+    with ZipFile(archive) as package:
+        names = package.namelist()
+    assert len(names) == artifact["files"] == 12
+    assert "vcruntime140.dll" in names
+    assert "msvcp140.dll" in names
+    assert all(name.endswith(".dll") and "_amd64" not in name for name in names)
+    assert "Expand-Archive -LiteralPath $VcRuntimeArchive -DestinationPath $PopplerBin -Force" in installer
+    assert "expand.exe" not in installer.lower()
+    assert "$VcRuntimeEntry" in helpers
 
 
 def test_windows_powershell_51_reads_russian_scripts_as_utf8():
@@ -67,6 +88,7 @@ def test_windows_installer_preflight_rejects_unsafe_unwritable_low_space_and_lon
     assert "$PythonEntry" in helpers
     assert "$TesseractEntry" in helpers
     assert "$PopplerEntry" in helpers
+    assert "$VcRuntimeEntry" in helpers
     assert "foreach ($Entry in $Archive.Entries)" in helpers
     assert "Test-PropExtractPathIsInside $DestinationRoot $Destination" in helpers
     assert "Небезопасный путь внутри архива runtime" in helpers

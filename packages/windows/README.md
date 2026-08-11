@@ -12,9 +12,13 @@ tree digests before first execution.
   artifact and retaining `tesseract.exe`, its adjacent DLLs and upstream license
   files. The OCR engine is Apache-2.0; bundled third-party libraries retain
   their upstream licenses.
-- `vc_runtimeMinimum_x64.cab` is the unmodified x64 minimum-runtime payload from
-  Microsoft Visual C++ Redistributable 14.51.36247.0. It is deployed app-local
-  beside Poppler, so no machine-level installation is needed.
+- `vc_runtimeMinimum_x64.zip` contains the 12 app-local DLL payloads extracted
+  without modification from Microsoft's x64 minimum-runtime CAB for Visual C++
+  Redistributable 14.51.36247.0. ZIP avoids the legacy native CAB extractor,
+  which cannot receive Cyrillic project paths from Windows PowerShell 5.1.
+  The ZIP SHA-256, source CAB SHA-256 and upstream redistributable SHA-256 are
+  pinned in the lock file; the DLLs are deployed beside Poppler without a
+  machine-level installation.
 
 Exact upstream URLs and hashes are recorded in `windows-runtime.lock.json`.
 `scripts/build_windows_python_runtime.py` and

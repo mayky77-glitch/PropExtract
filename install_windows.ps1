@@ -270,7 +270,7 @@ function Install-NativeRuntime {
     Write-Step "Подготовка portable Tesseract и Poppler (без установщика и UAC)"
     $TesseractArchive = Get-VerifiedArtifact "tesseract"
     $PopplerArchive = Get-VerifiedArtifact "poppler"
-    $VcRuntimeCab = Get-VerifiedArtifact "vcruntime"
+    $VcRuntimeArchive = Get-VerifiedArtifact "vcruntime"
     New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
     $Staging = Join-Path $RuntimeRoot ("native-staging-" + [Guid]::NewGuid().ToString("N"))
     $PopplerPath = Join-Path $Staging "poppler"
@@ -284,16 +284,11 @@ function Install-NativeRuntime {
         throw "Закреплённый архив Poppler имеет непредвиденную структуру."
     }
 
-    $VcStaging = Join-Path $Staging "vcruntime"
-    New-Item -ItemType Directory -Path $VcStaging -Force | Out-Null
-    $ExpandExe = Join-Path $env:SystemRoot "System32\expand.exe"
-    & $ExpandExe "-F:*" $VcRuntimeCab $VcStaging | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Не удалось распаковать CAB-файл Microsoft VC runtime." }
-    foreach ($File in Get-ChildItem -LiteralPath $VcStaging -File) {
-        $TargetName = $File.Name -replace "_amd64$", ""
-        Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $PopplerBin $TargetName) -Force
+    try {
+        Expand-Archive -LiteralPath $VcRuntimeArchive -DestinationPath $PopplerBin -Force
+    } catch {
+        throw [InvalidOperationException]::new("Не удалось распаковать встроенный архив Microsoft VC runtime.", $_.Exception)
     }
-    Remove-Item -LiteralPath $VcStaging -Recurse -Force
 
     if (-not (Test-NativeRuntime $Staging)) {
         throw "Проверка целостности или работоспособности portable OCR runtime не пройдена. Временное дерево сохранено для диагностики: $Staging"

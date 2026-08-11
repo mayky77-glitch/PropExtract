@@ -129,11 +129,7 @@ function Get-PropExtractRequiredStagingBytes([string]$ProjectRoot, [object]$Runt
 
     [int64]$NativeBytes = Get-PropExtractArchiveExpandedBytes (Join-Path $ProjectRoot ([string]$RuntimeLock.artifacts.tesseract.path))
     $NativeBytes += Get-PropExtractArchiveExpandedBytes (Join-Path $ProjectRoot ([string]$RuntimeLock.artifacts.poppler.path))
-    $VcRuntimeCab = Join-Path $ProjectRoot ([string]$RuntimeLock.artifacts.vcruntime.path)
-    if (-not (Test-Path -LiteralPath $VcRuntimeCab -PathType Leaf)) {
-        throw "Не найден CAB-файл, необходимый для расчёта свободного места: $VcRuntimeCab"
-    }
-    $NativeBytes += (Get-Item -LiteralPath $VcRuntimeCab).Length
+    $NativeBytes += Get-PropExtractArchiveExpandedBytes (Join-Path $ProjectRoot ([string]$RuntimeLock.artifacts.vcruntime.path))
 
     # Reserve covers metadata, the temporary VC extraction and filesystem allocation overhead.
     [int64]$SafetyReserveBytes = 64MB
@@ -184,6 +180,8 @@ function Assert-PropExtractInstallerPreflight(
     }
     $TesseractEntry = (Get-PropExtractArchiveMetadata (Join-Path $ResolvedRoot ([string]$RuntimeLock.artifacts.tesseract.path)) $NativeStaging).LongestEntry.Replace("/", "\")
     $PopplerEntry = (Get-PropExtractArchiveMetadata (Join-Path $ResolvedRoot ([string]$RuntimeLock.artifacts.poppler.path)) (Join-Path $NativeStaging "poppler")).LongestEntry.Replace("/", "\")
+    $NativePopplerBin = Join-Path $NativeStaging ([string]$RuntimeLock.nativeTree.popplerBinPath)
+    $VcRuntimeEntry = (Get-PropExtractArchiveMetadata (Join-Path $ResolvedRoot ([string]$RuntimeLock.artifacts.vcruntime.path)) $NativePopplerBin).LongestEntry.Replace("/", "\")
     $ProjectedPaths = @(
         $RuntimeRoot,
         $PythonRoot,
@@ -192,6 +190,7 @@ function Assert-PropExtractInstallerPreflight(
         $NativeRoot,
         (Join-Path $NativeStaging $TesseractEntry),
         (Join-Path (Join-Path $NativeStaging "poppler") $PopplerEntry),
+        (Join-Path $NativePopplerBin $VcRuntimeEntry),
         (Join-Path $NativeRoot (([string]$RuntimeLock.nativeTree.popplerBinPath) + "\vcruntime140.dll"))
     )
     foreach ($ProjectedPath in $ProjectedPaths) {

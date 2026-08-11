@@ -55,37 +55,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Diagnose native CAB extraction paths
-        shell: powershell
-        run: |
-          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
-          $cab = Join-Path $PWD ([string]$lock.artifacts.vcruntime.path)
-          $expand = Join-Path $env:SystemRoot "System32\expand.exe"
-          $unicode = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JDRgNGF0LjQsiAmINGD0YHRgtCw0L3QvtCy0LrQsCAoMTUp"))
-          $cases = @("archive_ascii", "archive space", "archive (15)", "archive & install", $unicode)
-          $index = 0
-          foreach ($name in $cases) {
-            $index += 1
-            $destination = Join-Path $env:RUNNER_TEMP $name
-            New-Item -ItemType Directory -Path $destination -Force | Out-Null
-            $output = & $expand "-F:*" $cab $destination 2>&1 | Out-String
-            $exitCode = $LASTEXITCODE
-            Write-Host "CAB destination case=[$name] exit=$exitCode output=[$output]"
-            $source = Join-Path $destination "runtime.cab"
-            $asciiDestination = Join-Path $env:RUNNER_TEMP ("cab-output-" + $index)
-            Copy-Item -LiteralPath $cab -Destination $source -Force
-            New-Item -ItemType Directory -Path $asciiDestination -Force | Out-Null
-            $output = & $expand "-F:*" $source $asciiDestination 2>&1 | Out-String
-            $exitCode = $LASTEXITCODE
-            Write-Host "CAB source case=[$name] exit=$exitCode output=[$output]"
-          }
-          $tar = Join-Path $env:SystemRoot "System32\tar.exe"
-          $tarSource = Join-Path (Join-Path $env:RUNNER_TEMP $unicode) "runtime.cab"
-          $tarDestination = Join-Path (Join-Path $env:RUNNER_TEMP $unicode) "tar-output"
-          New-Item -ItemType Directory -Path $tarDestination -Force | Out-Null
-          $output = & $tar "-xf" $tarSource "-C" $tarDestination 2>&1 | Out-String
-          Write-Host "CAB tar Unicode case exit=$LASTEXITCODE files=$(@(Get-ChildItem -LiteralPath $tarDestination -File).Count) output=[$output]"
-          $global:LASTEXITCODE = 0
       - name: Reproduce installation from a source archive
         shell: powershell
         run: |
