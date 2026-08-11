@@ -44,14 +44,17 @@ def _native_argv(command: str, arguments: list[str], workspace: Path | None = No
 
 
 def _native_environment(workspace: Path | None = None) -> dict[str, str] | None:
-    """Keep inherited Unicode project paths out of Windows native environments."""
+    """Use relative scratch locations without altering unrelated process policy."""
     if not (_is_windows() and workspace is not None):
         return None
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if isinstance(key, str) and isinstance(value, str) and key.isascii() and value.isascii()
-    }
+    environment = dict(os.environ)
+    environment["TEMP"] = "."
+    environment["TMP"] = "."
+    return environment
+
+
+def _windows_ocr_job_root() -> Path:
+    return PROJECT_ROOT / ".runtime" / "windows" / "ocr-jobs"
 
 
 @lru_cache(maxsize=1)
@@ -299,8 +302,11 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
     """Prefer the PDF text layer, then render and OCR bounded page batches."""
     if not _is_windows():
         return _read(pdf, dpi, max_pages)
-    with tempfile.TemporaryDirectory(prefix=".rns-ocr-", dir=PROJECT_ROOT) as temporary_name:
+    job_root = _windows_ocr_job_root()
+    job_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="job-", dir=job_root) as temporary_name:
         workspace = Path(temporary_name)
+        (workspace / "cache").mkdir()
         staged_pdf = workspace / "input.pdf"
         shutil.copyfile(pdf, staged_pdf)
         return _read(staged_pdf, dpi, max_pages, native_workspace=workspace)

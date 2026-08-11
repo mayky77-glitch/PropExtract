@@ -69,7 +69,7 @@ def test_windows_ocr_stages_unicode_source_with_ascii_native_process_data(monkey
         "find_tool",
         lambda name: {"pdfinfo": "pdfinfo", "pdftotext": "pdftotext", "pdftoppm": "pdftoppm", "tesseract": "tesseract"}.get(name),
     )
-    monkeypatch.setenv("SOURCE_PDF", str(source))
+    monkeypatch.setenv("PROPEXTRACT_POLICY", "политика пользователя")
 
     def runner(argv, **kwargs):
         native_calls.append((argv, kwargs))
@@ -95,15 +95,24 @@ def test_windows_ocr_stages_unicode_source_with_ascii_native_process_data(monkey
     assert ocr.read(source) == ("1\n2\n3", 3)
     assert source.read_bytes() == source_hash
     assert source.stat().st_mtime_ns == source_mtime_ns
+    job_root = project / ".runtime" / "windows" / "ocr-jobs"
     assert staged_workspaces and all(not workspace.exists() for workspace in staged_workspaces)
+    assert all(workspace.parent == job_root for workspace in staged_workspaces)
+    assert not list(job_root.iterdir())
+    assert not (project / "input.pdf").exists()
     assert not list(project.glob(".rns-ocr-*"))
     for argv, kwargs in native_calls:
         assert all(argument.isascii() for argument in argv)
         environment = kwargs["env"]
         assert isinstance(environment, dict)
-        assert all(value.isascii() for value in environment.values())
+        assert environment["PROPEXTRACT_POLICY"] == "политика пользователя"
+        assert environment["TEMP"].isascii()
+        assert environment["TMP"].isascii()
         if argv[0] == "tesseract":
-            assert environment["TESSDATA_PREFIX"] == "../rns_import_server/tessdata"
+            assert environment["TESSDATA_PREFIX"].isascii()
+            assert environment["TESSDATA_PREFIX"].endswith("rns_import_server/tessdata")
+        if argv[0] == "pdftoppm":
+            assert environment["XDG_CACHE_HOME"] == "cache"
 
 
 def test_ocr_empty_native_stdout_is_preserved_as_empty_page(monkeypatch, tmp_path: Path):

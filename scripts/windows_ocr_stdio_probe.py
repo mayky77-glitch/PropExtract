@@ -61,10 +61,14 @@ def main() -> None:
         raise RuntimeError("tesseract_unavailable")
     temporary_directory = {"prefix": "propextract-ocr-stdio-"}
     if ocr._is_windows():
-        temporary_directory["dir"] = ocr.PROJECT_ROOT
+        job_root = ocr._windows_ocr_job_root()
+        job_root.mkdir(parents=True, exist_ok=True)
+        temporary_directory["dir"] = job_root
     with tempfile.TemporaryDirectory(**temporary_directory) as temporary_name:
         temporary = Path(temporary_name)
         native_workspace = temporary if ocr._is_windows() else None
+        if native_workspace is not None:
+            (native_workspace / "cache").mkdir()
         blank, text_image = temporary / "blank.pgm", temporary / "text.pgm"
         write_pgm(blank, " " * 8)
         write_pgm(text_image, "TEST 123")
