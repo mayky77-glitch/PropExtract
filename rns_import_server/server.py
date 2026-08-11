@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import errno
+import hashlib
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -32,6 +34,8 @@ except ModuleNotFoundError:
 
 Runner = Callable[..., dict]
 MAX_BODY = 64 * 1024
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_INSTANCE_ID = re.compile(r"^[0-9a-f]{64}$")
 STATIC = Path(__file__).with_name("static")
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -193,21 +197,51 @@ def _capability_matches(expected: object, candidate: object) -> bool:
     )
 
 
-def retry_file_operation(operation: Callable[[], object], attempts: int = 6) -> object:
-    """Retry only transient Windows/share locks for a few bounded seconds."""
+def project_instance_id(project_root: Path | None = None) -> str:
+    """Return a stable opaque identifier for one local project copy.
+
+    The source location intentionally affects the digest, so two unpacked
+    copies sharing port 8775 cannot authorize each other's lifecycle actions.
+    Only the digest is sent over HTTP; the path never leaves this process.
+    """
+    root = (project_root or Path(__file__).resolve().parents[1]).resolve()
+    value = f"propextract-instance-v1\0{root}".encode("utf-8", "surrogateescape")
+    return hashlib.sha256(value).hexdigest()
+
+
+def retry_file_operation(
+    operation: Callable[[], object],
+    attempts: int = 20,
+    deadline: float = 15.0,
+    initial_delay: float = 0.2,
+) -> object:
+    """Retry transient Excel/share locks with both an attempt and time bound."""
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+    if deadline < 0 or initial_delay < 0:
+        raise ValueError("retry deadline and delay must not be negative")
+    expires_at = time.monotonic() + deadline
+    last_error: OSError | None = None
     for attempt in range(attempts):
+        if last_error is not None and time.monotonic() >= expires_at:
+            raise last_error
         try:
             return operation()
         except OSError as error:
+            last_error = error
             transient = (
                 isinstance(error, PermissionError)
-                or error.errno in {errno.EACCES, errno.EBUSY, errno.EPERM}
+                or error.errno in {errno.EACCES, errno.EBUSY, errno.EPERM, errno.ETXTBSY}
                 or getattr(error, "winerror", None) in {5, 32, 33}
             )
             if not transient or attempt + 1 >= attempts:
-                raise
-            time.sleep(min(1.0, 0.2 * (2**attempt)))
-    raise RuntimeError("file_retry_exhausted")
+                raise last_error
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                raise last_error
+            time.sleep(min(1.0, initial_delay * (2**attempt), remaining))
+    assert last_error is not None
+    raise last_error
 
 
 class JobManager:
@@ -570,7 +604,13 @@ class JobManager:
             self._publish_lock.release()
 
 
-def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
+def create_server(host: str, port: int, runner: Runner, instance_id: str | None = None) -> ThreadingHTTPServer:
+    """Create a loopback server whose health response identifies this copy."""
+    if host not in LOOPBACK_HOSTS:
+        raise ValueError("Сервер PropExtract может слушать только loopback-адрес")
+    resolved_instance_id = instance_id or project_instance_id()
+    if not isinstance(resolved_instance_id, str) or not _INSTANCE_ID.fullmatch(resolved_instance_id):
+        raise ValueError("Некорректный идентификатор экземпляра PropExtract")
     manager = JobManager(runner)
 
     class Handler(BaseHTTPRequestHandler):
@@ -582,6 +622,7 @@ def create_server(host: str, port: int, runner: Runner) -> ThreadingHTTPServer:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-PropExtract-Instance", resolved_instance_id)
             self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
             self.end_headers()
 

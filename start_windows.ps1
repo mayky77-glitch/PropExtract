@@ -62,18 +62,47 @@ if ($LASTEXITCODE -ne 0) {
 if ($CheckOnly) { exit 0 }
 
 $Url = "http://127.0.0.1:8775"
-try {
-    $Health = Invoke-RestMethod -Uri "$Url/health" -TimeoutSec 2
-    if ($Health.status -eq "ok" -and $Health.service -eq "rns-import") {
+$InstanceId = (& $RuntimePython -B -S -c "from rns_import_server.server import project_instance_id; print(project_instance_id())" | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $InstanceId -notmatch '^[0-9a-f]{64}$') {
+    throw "Could not determine the PropExtract instance identifier. Verify the local installation."
+}
+
+function Get-PropExtractMessage([string]$Key) {
+    switch ($Key) {
+        "identity" { return [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("HQQ1BCAAQwQ0BDAEOwQ+BEEETAQgAD4EPwRABDUENAQ1BDsEOARCBEwEIAA4BDQENQQ9BEIEOAREBDgEOgQwBEIEPgRABCAATQQ6BDcENQQ8BD8EOwRPBEAEMAQgAFAAcgBvAHAARQB4AHQAcgBhAGMAdAAuACAAHwRABD4EMgQ1BEAETARCBDUEIABDBEEEQgQwBD0EPgQyBDoEQwQgAD8EQAQ+BDUEOgRCBDAELgA=")) }
+        "occupied" { return [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("HwQ+BEAEQgQgADgANwA3ADUAIAA3BDAEPQRPBEIEIAA0BEAEQwQzBD4EOQQgAEEEOwRDBDYEMQQ+BDkEIAA4BDsEOAQgADQEQARDBDMEPgQ5BCAAOgQ+BD8EOAQ1BDkEIABQAHIAbwBwAEUAeAB0AHIAYQBjAHQALgAgABcEMAQ/BEMEQQQ6BCAAPgRCBDwENQQ9BFEEPQQ7ACAAQgQ1BDoEQwRJBDgEOQQgAE0EOgQ3BDUEPAQ/BDsETwRABCAAPQQ1BCAAMQRDBDQENQRCBCAAOAQ3BDwENQQ9BFEEPQQuAA==")) }
+        "failed" { return [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("HQQ1BCAAQwQ0BDAEOwQ+BEEETAQgADcEMAQ/BEMEQQRCBDgEQgRMBCAAUAByAG8AcABFAHgAdAByAGEAYwB0ADoAIAA=")) }
+        "timeout" { return [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("HQQ1BCAAQwQ0BDAEOwQ+BEEETAQgADQEPgQ2BDQEMARCBEwEQQRPBCAAMwQ+BEIEPgQyBD0EPgRBBEIEOAQgAFAAcgBvAHAARQB4AHQAcgBhAGMAdAAgADcEMAQgADEAMgAgAEEENQQ6BEMEPQQ0BA==")) }
+        default { return "PropExtract lifecycle error" }
+    }
+}
+
+function Get-PropExtractHealth {
+    try {
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri "$Url/health" -TimeoutSec 2
+        $Health = $Response.Content | ConvertFrom-Json
+        $Health | Add-Member -NotePropertyName "instance_id" -NotePropertyValue ([string]$Response.Headers["X-PropExtract-Instance"]) -Force
+        return $Health
+    } catch {
+        return $null
+    }
+}
+
+function Test-ExpectedPropExtractHealth($Health) {
+    return $null -ne $Health -and $Health.status -eq "ok" -and $Health.service -eq "rns-import" -and $Health.instance_id -eq $InstanceId
+}
+
+$Health = Get-PropExtractHealth
+if ($null -ne $Health) {
+    if (Test-ExpectedPropExtractHealth $Health) {
         Write-Host "PropExtract is already running: $Url" -ForegroundColor Green
         if (-not $NoBrowser) { Start-Process $Url }
         exit 0
     }
-} catch { }
-
-if (-not $NoBrowser) {
-    Start-Process $Url
+    throw (Get-PropExtractMessage "occupied")
 }
-Write-Host "PropExtract is running. Use the Stop button in the browser or run stop_windows.cmd." -ForegroundColor Green
-& $RuntimePython -B -S -m rns_import_server.app serve --host 127.0.0.1 --port 8775
+
+$ServerArguments = @("-B", "-S", "-m", "rns_import_server.app", "serve", "--host", "127.0.0.1", "--port", "8775")
+if (-not $NoBrowser) { $ServerArguments += "--open-browser" }
+& $RuntimePython @ServerArguments
 exit $LASTEXITCODE
