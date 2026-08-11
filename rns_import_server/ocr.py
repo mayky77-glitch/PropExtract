@@ -17,6 +17,7 @@ LANGUAGE_HASHES = {
     "eng": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
     "rus": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225",
 }
+OCR_PAGE_BATCH_SIZE = 2
 
 
 @lru_cache(maxsize=1)
@@ -165,7 +166,7 @@ def _ocr_image(image: Path, tesseract: str) -> str:
 
 
 def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
-    """Prefer the PDF text layer, then render all requested pages once for OCR."""
+    """Prefer the PDF text layer, then render and OCR bounded page batches."""
     total = page_count(pdf)
     last_page = min(total, max_pages) if max_pages else total
     if text := _text_layer(pdf, last_page):
@@ -181,18 +182,37 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
         cache = Path(tempfile.gettempdir()) / "rns-import-font-cache"
         cache.mkdir(exist_ok=True)
         environment = dict(os.environ, XDG_CACHE_HOME=str(cache))
-        try:
-            rendered = _run(
-                [renderer, "-png", "-r", str(dpi), "-f", "1", "-l", str(last_page), str(pdf), str(prefix)],
-                timeout=600,
-                env=environment,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError("pdf_render_timeout") from error
-        images = sorted(temporary.glob("page-*.png"))
-        if rendered.returncode or len(images) != last_page:
-            raise RuntimeError("pdf_render_failed")
-        workers = min(2, len(images))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            parts = list(executor.map(lambda item: _ocr_image(item, tesseract), images))
+        parts: list[str] = []
+        for first_page in range(1, last_page + 1, OCR_PAGE_BATCH_SIZE):
+            final_page = min(first_page + OCR_PAGE_BATCH_SIZE - 1, last_page)
+            try:
+                try:
+                    rendered = _run(
+                        [
+                            renderer,
+                            "-png",
+                            "-r",
+                            str(dpi),
+                            "-f",
+                            str(first_page),
+                            "-l",
+                            str(final_page),
+                            str(pdf),
+                            str(prefix),
+                        ],
+                        timeout=600,
+                        env=environment,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError("pdf_render_timeout") from error
+                images = sorted(temporary.glob("page-*.png"))
+                expected_images = final_page - first_page + 1
+                if rendered.returncode or len(images) != expected_images:
+                    raise RuntimeError("pdf_render_failed")
+                workers = min(2, len(images))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    parts.extend(executor.map(lambda item: _ocr_image(item, tesseract), images))
+            finally:
+                for image in temporary.glob("page-*.png"):
+                    image.unlink()
     return "\n".join(_captured_text(part) for part in parts), total
