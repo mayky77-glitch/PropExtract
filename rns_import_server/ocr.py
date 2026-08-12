@@ -1,13 +1,16 @@
 """Bounded local OCR.  It never retains rendered pages or OCR text on disk."""
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,6 +20,43 @@ LANGUAGE_HASHES = {
     "eng": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
     "rus": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225",
 }
+
+
+@dataclass(frozen=True)
+class OCRWord:
+    text: str
+    left: int
+    top: int
+    width: int
+    height: int
+    confidence: float
+
+
+@dataclass(frozen=True)
+class OCRLine:
+    page: int
+    page_width: int
+    page_height: int
+    words: tuple[OCRWord, ...]
+
+    @property
+    def text(self) -> str:
+        return " ".join(word.text for word in self.words)
+
+    @property
+    def top(self) -> int:
+        return min(word.top for word in self.words)
+
+
+class OCRText(str):
+    """Plain OCR text carrying optional word geometry for table fields."""
+
+    lines: tuple[OCRLine, ...]
+
+    def __new__(cls, value: str, lines: tuple[OCRLine, ...] = ()) -> "OCRText":
+        instance = super().__new__(cls, value)
+        instance.lines = lines
+        return instance
 
 
 @lru_cache(maxsize=1)
@@ -38,7 +78,11 @@ def tesseract_environment() -> dict[str, str]:
     invalid = [language for language, item in bundled_language_status().items() if not item["valid"]]
     if invalid:
         raise RuntimeError(f"ocr_models_invalid:{','.join(invalid)}")
-    return dict(os.environ, TESSDATA_PREFIX=str(TESSDATA))
+    environment = dict(os.environ, TESSDATA_PREFIX=str(TESSDATA))
+    # The importer owns PDF-level parallelism; avoid nested OpenMP workers
+    # exhausting a low-resource workstation. Respect an operator override.
+    environment.setdefault("OMP_THREAD_LIMIT", "1")
+    return environment
 
 
 def _file_sha256(path: Path) -> str:
@@ -150,10 +194,66 @@ def _text_layer(pdf: Path, last_page: int) -> str | None:
     return output
 
 
-def _ocr_image(image: Path, tesseract: str) -> str:
+def _tsv_text(value: str) -> OCRText:
+    """Build normal line text and retain Tesseract word boxes."""
+    rows = csv.DictReader(io.StringIO(value), delimiter="\t", quoting=csv.QUOTE_NONE)
+    page_sizes: dict[int, tuple[int, int]] = {}
+    grouped: dict[tuple[int, int, int, int], list[OCRWord]] = {}
+    for row in rows:
+        try:
+            level = int(row["level"])
+            page = int(row["page_num"])
+            if level == 1:
+                page_sizes[page] = (int(row["width"]), int(row["height"]))
+                continue
+            text = (row.get("text") or "").strip()
+            if level != 5 or not text:
+                continue
+            key = (page, int(row["block_num"]), int(row["par_num"]), int(row["line_num"]))
+            grouped.setdefault(key, []).append(
+                OCRWord(
+                    text=text,
+                    left=int(row["left"]),
+                    top=int(row["top"]),
+                    width=int(row["width"]),
+                    height=int(row["height"]),
+                    confidence=float(row["conf"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    lines: list[OCRLine] = []
+    for key, words in grouped.items():
+        page = key[0]
+        page_width, page_height = page_sizes.get(page, (0, 0))
+        lines.append(
+            OCRLine(
+                page=page,
+                page_width=page_width,
+                page_height=page_height,
+                words=tuple(sorted(words, key=lambda word: word.left)),
+            )
+        )
+    lines.sort(key=lambda line: (line.page, line.top, line.words[0].left))
+    return OCRText("\n".join(line.text for line in lines), tuple(lines))
+
+
+def _ocr_image(image: Path, tesseract: str) -> OCRText:
     try:
         result = _run(
-            [tesseract, str(image), "stdout", "-l", "rus+eng", "--oem", "1", "--psm", "6"],
+            [
+                tesseract,
+                str(image),
+                "stdout",
+                "-l",
+                "rus+eng",
+                "--oem",
+                "1",
+                "--psm",
+                "6",
+                "-c",
+                "tessedit_create_tsv=1",
+            ],
             timeout=120,
             env=tesseract_environment(),
         )
@@ -161,7 +261,10 @@ def _ocr_image(image: Path, tesseract: str) -> str:
         raise RuntimeError(f"tesseract_timeout:{image.name}") from error
     if result.returncode:
         raise RuntimeError(f"tesseract_failed:{image.name}")
-    return _captured_text(result.stdout)
+    parsed = _tsv_text(_captured_text(result.stdout))
+    if not parsed.strip():
+        return OCRText("")
+    return parsed
 
 
 def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
@@ -183,7 +286,10 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
         environment = dict(os.environ, XDG_CACHE_HOME=str(cache))
         try:
             rendered = _run(
-                [renderer, "-png", "-r", str(dpi), "-f", "1", "-l", str(last_page), str(pdf), str(prefix)],
+                # Grayscale pages are one channel rather than RGB: lower
+                # temporary I/O and RAM, while preserving the input pixels
+                # relevant to Tesseract on monochrome scanned forms.
+                [renderer, "-png", "-gray", "-r", str(dpi), "-f", "1", "-l", str(last_page), str(pdf), str(prefix)],
                 timeout=600,
                 env=environment,
             )
@@ -195,4 +301,9 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
         workers = min(2, len(images))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             parts = list(executor.map(lambda item: _ocr_image(item, tesseract), images))
-    return "\n".join(_captured_text(part) for part in parts), total
+    lines = tuple(
+        replace(line, page=page)
+        for page, part in enumerate(parts, start=1)
+        for line in part.lines
+    )
+    return OCRText("\n".join(_captured_text(part) for part in parts), lines), total

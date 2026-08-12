@@ -16,7 +16,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
 
 from rns_import_server.audit import sha256
-from rns_import_server import app, ocr, picker, rns_adapter, server
+from rns_import_server import app, mapping, ocr, picker, rns_adapter, server
 from rns_import_server.normalization import canonical_rns_identities, normalize_text
 from rns_import_server.files import discover_pdfs
 from rns_import_server.ocr import (
@@ -111,6 +111,159 @@ def test_partial_pdf_failure_is_reported_without_stopping_valid_records(tmp_path
     assert finished["summary"]["pdf_count"] == 1
     assert finished["summary"]["failed_pdf_count"] == 1
     assert finished["warning"] == "PDF пропущено: 1. Причины сохранены в отчёте."
+
+
+def test_mapping_is_disabled_by_default_and_rejects_invalid_model_output(monkeypatch):
+    record = {"object": "Исходное значение", "mapping_candidates": [{"id": "candidate-1", "value": "Кандидат", "allowed_targets": ["object"]}]}
+
+    assert mapping.map_extracted_record(record) is record
+
+    monkeypatch.setenv("RNS_MAPPING_LLM_ENDPOINT", "http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("RNS_MAPPING_LLM_MODEL", "local-test")
+    monkeypatch.setattr(mapping, "_request", lambda *args: {"assignments": [{"candidate_id": "unknown", "target": "object"}]})
+
+    assert mapping.map_extracted_record(record) is record
+
+
+def test_mapping_accepts_only_existing_candidates_and_known_targets(monkeypatch):
+    record = {
+        "mapping_candidates": [
+            {"id": "candidate-a", "value": "Объект из PDF", "allowed_targets": ["object"]},
+            {"id": "candidate-b", "value": "Орган из PDF", "allowed_targets": ["issuer"]},
+        ],
+        "warnings": ["object", "issuer", "end"],
+    }
+    monkeypatch.setenv("RNS_MAPPING_LLM_ENDPOINT", "http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("RNS_MAPPING_LLM_MODEL", "local-test")
+    monkeypatch.setattr(mapping, "_request", lambda *args: {"assignments": [
+        {"candidate_id": "candidate-a", "target": "object"},
+        {"candidate_id": "candidate-b", "target": "issuer"},
+    ]})
+
+    assert mapping.map_extracted_record(record) == {
+        **record, "object": "Объект из PDF", "issuer": "Орган из PDF",
+        "field_provenance": {"object": "mapping_llm", "issuer": "mapping_llm"}, "warnings": ["end"],
+    }
+
+
+def test_mapping_rejects_overwrite_duplicate_or_disallowed_assignments(monkeypatch):
+    record = {
+        "object": "Детерминированное значение",
+        "mapping_candidates": [
+            {"id": "candidate-a", "value": "Новое", "allowed_targets": ["object", "issuer"]},
+            {"id": "candidate-b", "value": "Орган", "allowed_targets": ["issuer"]},
+        ],
+    }
+    monkeypatch.setenv("RNS_MAPPING_LLM_ENDPOINT", "http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("RNS_MAPPING_LLM_MODEL", "local-test")
+    monkeypatch.setattr(mapping, "_request", lambda *args: {"assignments": [
+        {"candidate_id": "candidate-a", "target": "issuer"},
+        {"candidate_id": "candidate-a", "target": "object"},
+    ]})
+
+    assert mapping.map_extracted_record(record) is record
+
+
+def test_mapping_request_is_bounded_and_endpoint_rejects_credentials(monkeypatch):
+    monkeypatch.setenv("RNS_MAPPING_LLM_ENDPOINT", "http://user:password@127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("RNS_MAPPING_LLM_MODEL", "local-test")
+    assert mapping._endpoint() is None
+
+    captured = {}
+    class Response:
+        headers = {"Content-Length": "2"}
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def read(self, size):
+            captured["read_size"] = size
+            return b"{}"
+    def open_request(request, timeout):
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+    assert isinstance(mapping._LOOPBACK_PROXY_HANDLER, urllib.request.ProxyHandler)
+    assert mapping._LOOPBACK_PROXY_HANDLER.proxies == {}
+    assert not any(
+        isinstance(handler, urllib.request.ProxyHandler)
+        for handler in mapping._LOOPBACK_OPENER.handlers
+    )
+    monkeypatch.setattr(mapping._LOOPBACK_OPENER, "open", open_request)
+
+    assert mapping._request("http://127.0.0.1:11434/api/chat", "local-test", [{"id": "a", "value": "x", "allowed_targets": ["object"]}]) is None
+    assert captured["timeout"] == 3 and captured["read_size"] == 65537
+    assert captured["payload"]["options"] == {"temperature": 0, "num_ctx": 1024, "num_predict": 128}
+    assert captured["payload"]["keep_alive"] == "0" and captured["payload"]["think"] is False
+
+
+def test_mapping_candidate_limits_and_invalid_target_types_fail_closed(monkeypatch):
+    def candidate(*, candidate_id: str = "candidate", value: str = "value", targets=None):
+        return {"id": candidate_id, "value": value, "allowed_targets": ["object"] if targets is None else targets}
+
+    exact_count = [candidate(candidate_id=f"candidate-{index}") for index in range(mapping._MAX_CANDIDATES)]
+    assert len(mapping._candidates({"mapping_candidates": exact_count})) == mapping._MAX_CANDIDATES
+    assert mapping._candidates({"mapping_candidates": exact_count + [candidate(candidate_id="candidate-extra")]}) == []
+
+    exact_id = "i" * mapping._MAX_CANDIDATE_ID_CHARS
+    assert mapping._candidates({"mapping_candidates": [candidate(candidate_id=exact_id)]})
+    assert mapping._candidates({"mapping_candidates": [candidate(candidate_id="i" * (mapping._MAX_CANDIDATE_ID_CHARS + 1))]}) == []
+
+    exact_value = "v" * mapping._MAX_CANDIDATE_VALUE_CHARS
+    assert mapping._candidates({"mapping_candidates": [candidate(value=exact_value)]})
+    assert mapping._candidates({"mapping_candidates": [candidate(value="v" * (mapping._MAX_CANDIDATE_VALUE_CHARS + 1))]}) == []
+
+    all_targets = sorted(mapping.TARGET_FIELDS)
+    assert mapping._candidates({"mapping_candidates": [candidate(targets=all_targets)]})
+    assert mapping._candidates({"mapping_candidates": [candidate(targets=all_targets + ["object"])]}) == []
+    assert mapping._candidates({"mapping_candidates": [candidate(targets=[[]])]}) == []
+    assert mapping._candidates({"mapping_candidates": [candidate(targets=[{"target": "object"}])]}) == []
+
+    record = {"mapping_candidates": [candidate()]}
+    accepted = mapping._candidates(record)
+    serialized_size = len(json.dumps(accepted, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    monkeypatch.setattr(mapping, "_MAX_CANDIDATES_BYTES", serialized_size)
+    assert mapping._candidates(record)
+    monkeypatch.setattr(mapping, "_MAX_CANDIDATES_BYTES", serialized_size - 1)
+    assert mapping._candidates(record) == []
+
+
+@pytest.mark.parametrize("body", [b"[]", b'{"message":[]}', b'{"message":{"content":"[]"}}', b'{"message":{"content":"null"}}'])
+def test_mapping_request_rejects_valid_json_with_wrong_top_level_or_message_shape(monkeypatch, body):
+    class Response:
+        headers = {"Content-Length": str(len(body))}
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def read(self, size): return body
+
+    monkeypatch.setattr(mapping._LOOPBACK_OPENER, "open", lambda *args, **kwargs: Response())
+    assert mapping._request("http://127.0.0.1:11434/api/chat", "local-test", [{"id": "a", "value": "x", "allowed_targets": ["object"]}]) is None
+
+
+def test_mapping_request_payload_limit_rejects_before_network(monkeypatch):
+    captured = {"calls": 0}
+
+    class Response:
+        headers = {"Content-Length": "2"}
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def read(self, size): return b"{}"
+
+    def open_request(request, timeout):
+        captured["calls"] += 1
+        captured["payload"] = request.data
+        return Response()
+
+    candidates = [{"id": "a", "value": "x", "allowed_targets": ["object"]}]
+    monkeypatch.setattr(mapping._LOOPBACK_OPENER, "open", open_request)
+    assert mapping._request("http://127.0.0.1:11434/api/chat", "local-test", candidates) is None
+    payload_size = len(captured["payload"])
+    monkeypatch.setattr(mapping, "_MAX_REQUEST_BYTES", payload_size)
+    assert mapping._request("http://127.0.0.1:11434/api/chat", "local-test", candidates) is None
+    assert captured["calls"] == 2
+    monkeypatch.setattr(mapping, "_MAX_REQUEST_BYTES", payload_size - 1)
+    assert mapping._request("http://127.0.0.1:11434/api/chat", "local-test", candidates) is None
+    assert captured["calls"] == 2
 
 
 def test_failed_job_leaves_target_unchanged(tmp_path: Path):
