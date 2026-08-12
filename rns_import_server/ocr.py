@@ -1,13 +1,16 @@
 """Bounded local OCR.  It never retains rendered pages or OCR text on disk."""
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -57,6 +60,43 @@ def _windows_ocr_job_root() -> Path:
     return PROJECT_ROOT / ".runtime" / "windows" / "ocr-jobs"
 
 
+@dataclass(frozen=True)
+class OCRWord:
+    text: str
+    left: int
+    top: int
+    width: int
+    height: int
+    confidence: float
+
+
+@dataclass(frozen=True)
+class OCRLine:
+    page: int
+    page_width: int
+    page_height: int
+    words: tuple[OCRWord, ...]
+
+    @property
+    def text(self) -> str:
+        return " ".join(word.text for word in self.words)
+
+    @property
+    def top(self) -> int:
+        return min(word.top for word in self.words)
+
+
+class OCRText(str):
+    """Plain OCR text carrying optional word geometry for table fields."""
+
+    lines: tuple[OCRLine, ...]
+
+    def __new__(cls, value: str, lines: tuple[OCRLine, ...] = ()) -> "OCRText":
+        instance = super().__new__(cls, value)
+        instance.lines = lines
+        return instance
+
+
 @lru_cache(maxsize=1)
 def bundled_language_status() -> dict[str, dict[str, object]]:
     """Verify bundled OCR models once per process."""
@@ -80,6 +120,9 @@ def tesseract_environment(workspace: Path | None = None) -> dict[str, str]:
     if environment is None:
         environment = dict(os.environ)
     environment["TESSDATA_PREFIX"] = _native_relative_path(TESSDATA, workspace)
+    # The importer owns PDF-level parallelism; avoid nested OpenMP workers
+    # exhausting a low-resource workstation. Respect an operator override.
+    environment.setdefault("OMP_THREAD_LIMIT", "1")
     return environment
 
 
@@ -205,7 +248,51 @@ def _text_layer(pdf: Path, last_page: int, *, native_workspace: Path | None = No
     return output
 
 
-def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = None) -> str:
+def _tsv_text(value: str) -> OCRText:
+    """Build normal line text and retain Tesseract word boxes."""
+    rows = csv.DictReader(io.StringIO(value), delimiter="\t", quoting=csv.QUOTE_NONE)
+    page_sizes: dict[int, tuple[int, int]] = {}
+    grouped: dict[tuple[int, int, int, int], list[OCRWord]] = {}
+    for row in rows:
+        try:
+            level = int(row["level"])
+            page = int(row["page_num"])
+            if level == 1:
+                page_sizes[page] = (int(row["width"]), int(row["height"]))
+                continue
+            text = (row.get("text") or "").strip()
+            if level != 5 or not text:
+                continue
+            key = (page, int(row["block_num"]), int(row["par_num"]), int(row["line_num"]))
+            grouped.setdefault(key, []).append(
+                OCRWord(
+                    text=text,
+                    left=int(row["left"]),
+                    top=int(row["top"]),
+                    width=int(row["width"]),
+                    height=int(row["height"]),
+                    confidence=float(row["conf"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    lines: list[OCRLine] = []
+    for key, words in grouped.items():
+        page = key[0]
+        page_width, page_height = page_sizes.get(page, (0, 0))
+        lines.append(
+            OCRLine(
+                page=page,
+                page_width=page_width,
+                page_height=page_height,
+                words=tuple(sorted(words, key=lambda word: word.left)),
+            )
+        )
+    lines.sort(key=lambda line: (line.page, line.top, line.words[0].left))
+    return OCRText("\n".join(line.text for line in lines), tuple(lines))
+
+
+def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = None) -> OCRText:
     try:
         environment = (
             tesseract_environment(native_workspace) if native_workspace is not None else tesseract_environment()
@@ -213,7 +300,10 @@ def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = N
         result = _run(
             _native_argv(
                 tesseract,
-                [str(image), "stdout", "-l", "rus+eng", "--oem", "1", "--psm", "6"],
+                [
+                    str(image), "stdout", "-l", "rus+eng", "--oem", "1", "--psm", "6",
+                    "-c", "tessedit_create_tsv=1",
+                ],
                 native_workspace,
             ),
             timeout=120,
@@ -224,7 +314,13 @@ def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = N
         raise RuntimeError(f"tesseract_timeout:{image.name}") from error
     if result.returncode:
         raise RuntimeError(f"tesseract_failed:{image.name}")
-    return _captured_text(result.stdout)
+    raw = _captured_text(result.stdout)
+    parsed = _tsv_text(raw)
+    if not parsed.strip():
+        # Preserve compatible plain output from older/probed native runtimes;
+        # geometry remains empty and the deterministic text parser still works.
+        return OCRText(raw)
+    return parsed
 
 
 def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = None) -> tuple[str, int]:
@@ -249,7 +345,7 @@ def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = N
         cache.mkdir(exist_ok=True)
         environment = _native_environment(native_workspace) or dict(os.environ)
         environment["XDG_CACHE_HOME"] = _native_relative_path(cache, native_workspace)
-        parts: list[str] = []
+        parts: list[tuple[int, OCRText]] = []
         for first_page in range(1, last_page + 1, OCR_PAGE_BATCH_SIZE):
             final_page = min(first_page + OCR_PAGE_BATCH_SIZE - 1, last_page)
             try:
@@ -259,6 +355,7 @@ def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = N
                             renderer,
                             [
                                 "-png",
+                                "-gray",
                                 "-r",
                                 str(dpi),
                                 "-f",
@@ -282,15 +379,22 @@ def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = N
                     raise RuntimeError("pdf_render_failed")
                 workers = min(2, len(images))
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    parts.extend(
+                    batch_parts = list(
                         executor.map(
-                            lambda item: _ocr_image(item, tesseract, native_workspace=native_workspace), images
+                            lambda item: _ocr_image(item, tesseract, native_workspace=native_workspace),
+                            images,
                         )
                     )
+                parts.extend(zip(range(first_page, final_page + 1), batch_parts))
             finally:
                 for image in temporary.glob("page-*.png"):
                     image.unlink()
-        return "\n".join(_captured_text(part) for part in parts), total
+        lines = tuple(
+            replace(line, page=page)
+            for page, part in parts
+            for line in part.lines
+        )
+        return OCRText("\n".join(_captured_text(part) for _, part in parts), lines), total
 
     if native_workspace is not None:
         return render_and_ocr(native_workspace)

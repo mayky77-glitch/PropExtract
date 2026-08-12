@@ -13,12 +13,14 @@ from typing import Callable
 try:
     from rns_import_server.audit import atomic_json, digest, sha256
     from rns_import_server.files import discover_pdfs
+    from rns_import_server.mapping import map_extracted_record
     from rns_import_server.ocr import read as read_ocr
     from rns_import_server.rns_adapter import date, extract
     from rns_import_server.workbook import apply
 except ModuleNotFoundError:  # Direct ``python rns_import_server/app.py`` invocation.
     from audit import atomic_json, digest, sha256
     from files import discover_pdfs
+    from mapping import map_extracted_record
     from ocr import read as read_ocr
     from rns_adapter import date, extract
     from workbook import apply
@@ -94,7 +96,10 @@ def collect(
             progress(8 + int((index - 1) / len(pdfs) * 68), "Распознаём PDF", pdf.name)
         try:
             text, pages = read_ocr(pdf, dpi, max_pages)
-            record = extract(pdf, text)
+            extracted = extract(pdf, text)
+            # Dormant unless an owner-approved future extractor emits candidates.
+            # Without candidates/configuration this preserves prior behavior.
+            record = map_extracted_record(extracted) if extracted else None
             document = {"file": str(pdf), "pages": pages, "ocr_characters": len(text), "number": record.get("number") if record else None, "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {}, "warnings": record.get("warnings", []) if record else ["unidentified"]}
             if record and record.get("number"):
                 record["pages"] = pages
