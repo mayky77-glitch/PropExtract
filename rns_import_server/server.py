@@ -441,16 +441,27 @@ class JobManager:
                 document_id, source_name = document_reference(source)
                 if not document_id or not source_name:
                     continue
+                merge_review_details = "; ".join(
+                    filter(
+                        None,
+                        (
+                            _public_issue(issue.get("message"))
+                            for issue in record.get("merge_issues", [])
+                            if isinstance(issue, dict)
+                        ),
+                    )
+                )
                 proposal_id = uuid.uuid4().hex
                 proposals_internal[proposal_id] = {"number": number, "field": field, "value": conflict["pdf"], "document_id": document_id, "status": "pending"}
-                public_proposals.append({"id": proposal_id, "number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
+                public_proposals.append({"id": proposal_id, "number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "review_details": merge_review_details or None, "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
             row_cards = []
             for change in changes:
                 number = str(change.get("number", ""))
                 record = records.get(number, {}) if isinstance(records, dict) else {}
                 filename = str(change.get("document") or record.get("filename") or "PDF")
                 document_id, source_name = document_reference(record.get("pdf") or filename)
-                row_cards.append({"row": change.get("row"), "number": number, "object": record.get("object"), "details": "; ".join(filter(None, (_public_issue(issue) for issue in change.get("issues", [])))), "outcome": change.get("outcome"), "filename": source_name or Path(filename).name, "document_id": document_id})
+                outcome = str(change.get("outcome") or "")
+                row_cards.append({"row": change.get("row"), "number": number, "object": record.get("object"), "details": "; ".join(filter(None, (_public_issue(issue) for issue in change.get("issues", [])))), "outcome": outcome, "needs_review": outcome in {"review", "review_conflict"}, "filename": source_name or Path(filename).name, "document_id": document_id})
             already_present = [item for item in changes if item.get("outcome") == "already_present"]
             summary = {
                 "pdf_count": len(documents) - len(failed_documents),

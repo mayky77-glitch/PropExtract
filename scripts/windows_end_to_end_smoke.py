@@ -125,6 +125,39 @@ def _make_register(path: Path) -> None:
     book.save(path)
 
 
+def _assert_published_workbook(register: Path, permit: Path, report: dict[str, object]) -> None:
+    """Assert the observable Excel publication contract, not just HTTP success."""
+    from openpyxl import load_workbook
+    from rns_import_server.workbook import HEADERS, SHEET, STATUS_COLUMN, STATUS_HEADER
+
+    changes = report.get("changes")
+    verification = report.get("verification")
+    if not isinstance(changes, list) or len(changes) != 1:
+        raise RuntimeError("synthetic publication did not report exactly one row")
+    change = changes[0]
+    if not isinstance(change, dict) or change.get("number") != PERMIT_NUMBER or change.get("outcome") != "added":
+        raise RuntimeError("synthetic publication did not classify its inserted row")
+    if change.get("written") != ["F4", "G4"] or change.get("status") is not None:
+        raise RuntimeError("synthetic publication wrote unexpected fields or review status")
+    if not isinstance(verification, dict) or verification.get("x14_preserved") is not True or verification.get("native_cf_preserved") is not True:
+        raise RuntimeError("synthetic publication did not verify native Excel conditional formatting")
+
+    book = load_workbook(register, data_only=False)
+    sheet = book[SHEET]
+    if (
+        sheet["F4"].value != PERMIT_NUMBER
+        or sheet["G4"].value.strftime("%d.%m.%Y") != "01.02.2026"
+        or sheet["Y4"].value != '=IF(A4<>"",ROW(),"")'
+        or sheet["Z4"].value != '=IF(F4<>"",ROW(),"")'
+    ):
+        raise RuntimeError("synthetic publication changed data or Y/Z formulas")
+    link = sheet.cell(4, HEADERS["Ссылка на документ"])
+    if link.value != permit.name or not link.hyperlink or link.hyperlink.target != permit.resolve().as_uri():
+        raise RuntimeError("synthetic publication did not write the source PDF hyperlink")
+    if sheet.cell(3, STATUS_COLUMN).value != STATUS_HEADER or sheet.cell(4, STATUS_COLUMN).value is not None:
+        raise RuntimeError("synthetic publication did not preserve the status/review contract")
+
+
 def run() -> dict[str, object]:
     _require_portable_windows_runtime()
     from rns_import_server.app import run as import_run
@@ -134,6 +167,7 @@ def run() -> dict[str, object]:
     runtime = runtime_status()
     if not runtime.get("ready") or not all(runtime.get("commands", {}).values()):
         raise RuntimeError("portable Poppler/Tesseract runtime is not ready")
+    field_contracts = _verify_field_contracts()
 
     with tempfile.TemporaryDirectory(prefix="propextract-e2e-") as temporary_name:
         temporary = Path(temporary_name) / "Проверка_Юникод"
@@ -172,10 +206,13 @@ def run() -> dict[str, object]:
                 "pdfs": {permit.name: original_pdf_hash},
             }:
                 raise RuntimeError("first publication did not preserve its source hashes")
+            _assert_published_workbook(register, permit, first_report)
             backups = register.parent / "Резервные копии PropExtract"
             first_backups = sorted(item.name for item in backups.glob("*.xlsx")) if backups.is_dir() else []
             if not first_backups:
                 raise RuntimeError("published XLSX did not create a verified backup")
+            if any(_sha256(backups / name) != original_register_hash for name in first_backups):
+                raise RuntimeError("Excel backup is not byte-identical to the pre-publication source")
 
             status, started, _ = _request(port, "POST", "/api/jobs", {"pdf_dir": str(pdf_dir), "xlsx": str(register), "dpi": 180})
             if status != 202 or not isinstance(started.get("id"), str):
@@ -196,6 +233,7 @@ def run() -> dict[str, object]:
                 raise RuntimeError("identical no-op created another Excel backup")
             if _sha256(permit) != original_pdf_hash:
                 raise RuntimeError("source PDF hash changed during no-op")
+            verification = first_report.get("verification")
             return {
                 "status": "ok",
                 "portable_python": str(Path(sys.executable).resolve()),
@@ -203,6 +241,9 @@ def run() -> dict[str, object]:
                 "first_backup_count": len(first_backups),
                 "no_op_backup_count": len(second_backups),
                 "runtime_commands": runtime["commands"],
+                "x14_preserved": isinstance(verification, dict) and verification.get("x14_preserved") is True,
+                "native_cf_preserved": isinstance(verification, dict) and verification.get("native_cf_preserved") is True,
+                "field_contracts": field_contracts,
             }
         finally:
             server.shutdown()
@@ -212,14 +253,155 @@ def run() -> dict[str, object]:
                 raise RuntimeError("synthetic server did not stop")
 
 
+def _verify_field_contracts() -> str:
+    # Keep these checks direct and dependency-free beyond the app's portable
+    # runtime: they exercise regression contracts before the full HTTP smoke.
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from rns_import_server import app
+    from rns_import_server.normalization import field_comparison_equal
+    from rns_import_server.rns_adapter import extract, norm
+    from rns_import_server.workbook import _change_outcome
+
+    number = "38-03-06-2025"
+
+    def record(filename: str, *, end: str, changed: str) -> dict[str, object]:
+        return {
+            "number": number,
+            "filename": filename,
+            "pdf": filename,
+            "end": end,
+            "changed": changed,
+            "field_provenance": {"end": "ocr", "changed": "ocr"},
+            "warnings": [],
+        }
+
+    permit = record("permit.pdf", end="16.12.2026", changed="01.01.2026")
+    change = record("amendment-a.pdf", end="16.12.2026", changed="03.01.2026")
+    extension = record("extension-b.pdf", end="17.12.2026", changed="02.01.2026")
+    forwards = app._merge_group(number, [permit, change, extension], [])
+    backwards = app._merge_group(number, [permit, extension, change], [])
+    if (
+        forwards is None
+        or backwards is None
+        or forwards["end"] != "17.12.2026"
+        or forwards["filename"] != "amendment-a.pdf"
+        or (forwards["filename"], forwards["pdf"])
+        != (backwards["filename"], backwards["pdf"])
+    ):
+        raise RuntimeError("amendment merge is not later-date or order deterministic")
+
+    directive_only = app._merge_group(number, [change, extension], [])
+    if directive_only is None or not directive_only.get("existing_only") or directive_only.get("end") != "17.12.2026":
+        raise RuntimeError("directive-only merge did not keep its newest deadline")
+    if (
+        app._identity_retry_page_limit(100, 14) != 10
+        or app._identity_retry_page_limit(4, 14) != 4
+    ):
+        raise RuntimeError("identity retry page limit is not bounded")
+    try:
+        app.collect(Path("."), 180, -4, pdfs=[])
+    except ValueError as error:
+        if "отрицательным" not in str(error):
+            raise RuntimeError("negative page limit did not keep its Russian diagnostic") from error
+    else:
+        raise RuntimeError("negative page limit reached the OCR pipeline")
+    issuer_a = record("amendment-issuer-a.pdf", end="16.12.2026", changed="03.01.2026")
+    issuer_b = record("amendment-issuer-b.pdf", end="16.12.2026", changed="03.01.2026")
+    issuer_a["issuer"], issuer_b["issuer"] = "Орган А", "Орган Б"
+    quarantined = app._merge_group(number, [issuer_a, issuer_b], [])
+    if (
+        quarantined is None
+        or quarantined.get("issuer") is not None
+        or not any(issue.get("field") == "issuer" for issue in quarantined.get("merge_issues", []))
+    ):
+        raise RuntimeError("conflicting directive issuer was not quarantined for review")
+    if _change_outcome(True, ["D4"], ["спор документов"]) != "review":
+        raise RuntimeError("new row with merge issues is not classified for review")
+    javascript = (PROJECT_ROOT / "rns_import_server" / "static" / "app.js").read_text(encoding="utf-8")
+    if not all(
+        marker in javascript
+        for marker in (
+            "function renderReviewCard",
+            ".filter(item => item.needs_review",
+            "item.details ||",
+            "item.review_details",
+            "item.status !== \"approved\" || item.review_details",
+            "item.status === \"approved\" && !item.review_details",
+            "Строки для проверки",
+        )
+    ):
+        raise RuntimeError("admin UI no longer renders non-proposal review rows in the decision group")
+
+    quote_equal = field_comparison_equal("Застройщик", 'ПАО "Тест"', "ПАО «Тест»")
+    prefix_equal = field_comparison_equal(
+        "Наименование объекта", "ПС Северная. Этап 1", "ПС Южная. Этап 1"
+    )
+    if quote_equal is not True or prefix_equal is not False:
+        raise RuntimeError("field comparison lost quote or meaningful-prefix distinction")
+
+    labeled = (
+        f"Номер разрешения на строительство: {number}\n"
+        "Дата выдачи: 01.02.2025\nСправочный номер: RU-99999999-99-2026"
+    )
+    ambiguous = (
+        f"Номер разрешения на строительство: {number}\n"
+        "Номер разрешения на строительство: RU-99999999-99-2026"
+    )
+    if (
+        norm(Path("synthetic.pdf"), labeled) != number
+        or norm(Path("synthetic.pdf"), ambiguous) is not None
+    ):
+        raise RuntimeError("labeled permit identity selection is invalid")
+
+    reordered = f"|-2. строительство: Номер разрешения на [{number}"
+    narrative_reference = (
+        f"Для справки указан номер разрешения прежнего строительства: {number}.\n"
+        "Основной реквизит документа: RU-99999999-99-2026."
+    )
+    repeated_reordered = f"{reordered}\n2. строительство: Номер разрешения на [{number}"
+    if (
+        norm(Path("synthetic.pdf"), reordered) != number
+        or norm(Path("synthetic.pdf"), narrative_reference) is not None
+        or norm(Path("synthetic.pdf"), repeated_reordered) is not None
+    ):
+        raise RuntimeError("reordered identity grammar accepted a narrative reference or repeated form label")
+
+    terminal = extract(
+        Path("synthetic.pdf"),
+        f"Номер разрешения на строительство: {number}\nМуниципальный район: Тестовый район составе",
+    )
+    retained = extract(
+        Path("synthetic.pdf"),
+        f"Номер разрешения на строительство: {number}\n"
+        "Муниципальный район: Тестовый район в составе муниципального образования",
+    )
+    if (
+        terminal is None
+        or retained is None
+        or terminal.get("district") != "Тестовый район"
+        or retained.get("district") != "Тестовый район в составе муниципального образования"
+    ):
+        raise RuntimeError("district cleanup does not preserve intended boundaries")
+
+    return "merge,comparison,identity,district,review"
+
+
 def self_test() -> dict[str, object]:
+    field_contracts = _verify_field_contracts()
+
     with tempfile.TemporaryDirectory(prefix="propextract-e2e-self-test-") as temporary_name:
         fixture = Path(temporary_name) / "fixture.pdf"
         _write_text_pdf(fixture, [PERMIT_NUMBER, "1.1: 01.02.2026"])
         payload = fixture.read_bytes()
         if not payload.startswith(b"%PDF-1.4\n") or b"xref\n0 6\n" not in payload or not payload.endswith(b"%%EOF\n"):
             raise RuntimeError("synthetic PDF structure is invalid")
-        return {"status": "ok", "fixture_sha256": _sha256(fixture), "temporary_fixture_deleted": True}
+        return {
+            "status": "ok",
+            "fixture_sha256": _sha256(fixture),
+            "temporary_fixture_deleted": True,
+            "field_contracts": field_contracts,
+        }
 
 
 def main() -> None:

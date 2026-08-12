@@ -134,6 +134,183 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
     }
 
 
+def test_merge_review_issue_is_public_and_ui_groups_it_for_operator_decision(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "изменение.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+    message = (
+        "Связанные изменения содержат разные значения поля «Орган выдачи»; "
+        "автоматический перенос поля не выполнен."
+    )
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        output.write_bytes(xlsx.read_bytes() + b"-review")
+        return {
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "changes": [{
+                "number": "38-1-1-2026",
+                "new": True,
+                "row": 42,
+                "issues": [message],
+                "outcome": "review",
+                "document": pdf.name,
+            }],
+            "conflicts": [],
+            "selected_records": {
+                "38-1-1-2026": {
+                    "filename": pdf.name,
+                    "pdf": str(pdf),
+                    "object": "Этап 1. Проверочный объект",
+                    "merge_issues": [{"field": "issuer", "message": message}],
+                }
+            },
+        }
+
+    manager = JobManager(runner)
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    public = manager.public(str(finished["id"]))
+
+    assert public is not None and public["status"] == "done"
+    assert public["proposals"] == []
+    assert public["row_cards"] == [{
+        "row": 42,
+        "number": "38-1-1-2026",
+        "object": "Этап 1. Проверочный объект",
+        "details": message,
+        "outcome": "review",
+        "needs_review": True,
+        "filename": pdf.name,
+        "document_id": public["documents"][0]["id"],
+    }]
+    javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
+    assert "function renderReviewCard" in javascript
+    assert ".filter(item => item.needs_review" in javascript
+    assert "item.details ||" in javascript
+    assert "Строки для проверки" in javascript
+
+
+def test_merge_review_details_remain_visible_when_same_row_has_a_proposal(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "изменение.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+    message = (
+        "Связанные изменения содержат разные значения поля «Орган выдачи»; "
+        "автоматический перенос поля не выполнен."
+    )
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        output.write_bytes(xlsx.read_bytes() + b"-mixed-review")
+        return {
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "changes": [{
+                "number": "38-1-1-2026",
+                "new": False,
+                "row": 42,
+                "issues": [message, "Не перенесено «Наименование объекта»: значения различаются."],
+                "outcome": "review",
+                "document": pdf.name,
+            }],
+            "conflicts": [{
+                "number": "38-1-1-2026",
+                "cell": "D42",
+                "field": "Наименование объекта",
+                "existing": "Старый объект",
+                "pdf": "Новый объект",
+                "action": "Перенести изменения",
+            }],
+            "selected_records": {
+                "38-1-1-2026": {
+                    "filename": pdf.name,
+                    "pdf": str(pdf),
+                    "object": "Новый объект",
+                    "field_sources": {"object": str(pdf)},
+                    "merge_issues": [{"field": "issuer", "message": message}],
+                }
+            },
+        }
+
+    manager = JobManager(runner)
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    public = manager.public(str(finished["id"]))
+
+    assert public is not None and len(public["proposals"]) == 1
+    assert public["proposals"][0]["review_details"] == message
+    assert public["row_cards"][0]["needs_review"] is True
+    javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
+    assert "Связанные документы требуют проверки" in javascript
+    assert "item.review_details" in javascript
+    assert 'item.status !== "approved" || item.review_details' in javascript
+    assert 'item.status === "approved" && !item.review_details' in javascript
+    assert "Поле перенесено — нужна проверка" in javascript
+
+
+def test_approved_field_keeps_unresolved_merge_review_visible_and_in_excel_status(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "изменение.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "38-1-1-2026"
+    sheet["D4"] = "Старый объект"
+    book.save(target)
+    message = (
+        "Связанные изменения содержат разные значения поля «Орган выдачи»; "
+        "автоматический перенос поля не выполнен."
+    )
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        record = _synthetic_record("38-1-1-2026", pdf)
+        record.update({
+            "object": "Новый объект",
+            "merge_issues": [{"field": "issuer", "message": message}],
+        })
+        result = apply({"38-1-1-2026": record}, xlsx, output, sha256(xlsx))
+        result.update({
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "selected_records": {
+                "38-1-1-2026": {
+                    "filename": pdf.name,
+                    "pdf": str(pdf),
+                    "object": "Новый объект",
+                    "field_sources": {"object": str(pdf)},
+                    "merge_issues": [{"field": "issuer", "message": message}],
+                }
+            },
+        })
+        return result
+
+    manager = JobManager(runner)
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    assert finished["status"] == "done" and len(finished["proposals"]) == 1
+    proposal = finished["proposals"][0]
+
+    manager.approve(str(finished["id"]), str(proposal["id"]), str(finished["capability"]))
+    public = manager.public(str(finished["id"]))
+    saved = load_workbook(target)[SHEET]
+
+    assert public is not None
+    assert public["proposals"][0]["status"] == "approved"
+    assert public["proposals"][0]["review_details"] == message
+    assert saved["D4"].value == "Новый объект"
+    assert saved["AA4"].value == message
+
+
 def test_job_refuses_external_edit_after_verified_backup(monkeypatch, tmp_path: Path):
     pdf_dir = tmp_path / "pdf"
     pdf_dir.mkdir()
@@ -819,7 +996,9 @@ def test_number_only_record_is_review_not_already_present(tmp_path: Path):
 
     result = apply({"38-1-1-2026": _synthetic_record("38-1-1-2026", pdf)}, source, output, sha256(source))
     assert result["changes"][0]["outcome"] == "review"
-    assert result["changes"][0]["issues"] == ["no_transferable_evidence"]
+    assert result["changes"][0]["issues"] == [
+        "В документе не найдено ни одного подтверждённого поля для переноса."
+    ]
     assert load_workbook(output)[SHEET]["W4"].value is None
 
 
@@ -1246,6 +1425,7 @@ def test_transfer_issue_explains_missing_and_conflicting_values():
     assert _change_outcome(False, ["D42"], []) == "updated"
     assert _change_outcome(False, [], ["расхождение"]) == "review"
     assert _change_outcome(True, ["D43"], []) == "added"
+    assert _change_outcome(True, ["D43"], ["спор документов"]) == "review"
 
 
 def test_document_optimizer_text_normalization_contract_is_preserved():

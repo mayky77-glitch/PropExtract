@@ -16,10 +16,10 @@ from openpyxl.formula.translate import Translator
 
 try:
     from rns_import_server.audit import sha256
-    from rns_import_server.normalization import canonical_rns_identities, normalize_comparison_text
+    from rns_import_server.normalization import canonical_rns_identities, field_comparison_equal
 except ModuleNotFoundError:  # Direct ``python rns_import_server/app.py`` invocation.
     from audit import sha256
-    from normalization import canonical_rns_identities, normalize_comparison_text
+    from normalization import canonical_rns_identities, field_comparison_equal
 
 SHEET = "Реестр РНС"
 STATUS_COLUMN = 27  # AA; Y:Z are occupied by the register's service formulas.
@@ -52,8 +52,9 @@ def _value_text(value: object) -> str:
     return str(value).strip()
 
 
-def _comparable(value: object) -> str:
-    return normalize_comparison_text(_value_text(value))
+def _same_value(label: str, existing: object, proposed: object) -> bool:
+    """Use one conservative equality rule for outcome and proposal decisions."""
+    return field_comparison_equal(label, _value_text(existing), _value_text(proposed))
 
 
 def transfer_issue(label: str, existing: object, proposed: object) -> str | None:
@@ -66,7 +67,7 @@ def transfer_issue(label: str, existing: object, proposed: object) -> str | None
             f"Не подтверждено «{label}»: значение не найдено в PDF; "
             f"значение Excel «{_value_text(existing)}» сохранено."
         )
-    if existing_empty or _comparable(existing) == _comparable(proposed):
+    if existing_empty or _same_value(label, existing, proposed):
         return None
     return (
         f"Не перенесено «{label}»: в Excel — «{_value_text(existing)}», "
@@ -75,10 +76,10 @@ def transfer_issue(label: str, existing: object, proposed: object) -> str | None
 
 
 def _change_outcome(new: bool, written: list[str], issues: list[str]) -> str:
-    if new:
-        return "added"
     if issues:
         return "review"
+    if new:
+        return "added"
     if written:
         return "updated"
     return "already_present"
@@ -235,10 +236,8 @@ def _put(cell, value: object, label: str, number: str, conflicts: list[dict[str,
         if isinstance(value, str):
             cell.data_type = "s"  # OCR text must never become an Excel formula.
         return True
-    previous = cell.value.date() if isinstance(cell.value, datetime) else str(cell.value).strip()
-    proposed = value.date() if isinstance(value, datetime) else str(value).strip()
-    if previous != proposed:
-        conflicts.append({"number": number, "cell": cell.coordinate, "field": label, "existing": str(previous), "pdf": str(proposed), "action": "Перенести изменения"})
+    if not _same_value(label, cell.value, value):
+        conflicts.append({"number": number, "cell": cell.coordinate, "field": label, "existing": _value_text(cell.value), "pdf": _value_text(value), "action": "Перенести изменения"})
     return False
 
 
@@ -367,6 +366,11 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
         statuses: dict[str, str | None] = {}
         outcomes: dict[str, str] = {}
         for number, record in records.items():
+            merge_issue_messages = [
+                str(issue["message"])
+                for issue in record.get("merge_issues", [])
+                if isinstance(issue, dict) and issue.get("message")
+            ]
             matches = _rows_by_number(sheet, number)
             ambiguous = _ambiguous_rows_by_number(sheet, number)
             if len(matches) > 1 or ambiguous:
@@ -388,7 +392,19 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
             if not any(record.get(field) is not None for field in _TRANSFER_FIELDS):
                 outcomes[number] = "review"
                 statuses[number] = sheet.cell(row, STATUS_COLUMN).value if row is not None else None
-                changes.append({"number": number, "row": row, "new": False, "outcome": "review", "written": [], "document": record["filename"], "end": record.get("end"), "status": statuses[number], "issues": ["no_transferable_evidence"]})
+                issues = merge_issue_messages or [
+                    "В документе не найдено ни одного подтверждённого поля для переноса."
+                ]
+                if row is not None:
+                    status = sheet.cell(row, STATUS_COLUMN)
+                    status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
+                    status_alignment = copy(status.alignment)
+                    status_alignment.wrap_text = True
+                    status_alignment.vertical = "top"
+                    status.alignment = status_alignment
+                    status.value = "\n".join(issues)
+                    statuses[number] = status.value
+                changes.append({"number": number, "row": row, "new": False, "outcome": "review", "written": [], "document": record["filename"], "end": record.get("end"), "status": statuses[number], "issues": issues})
                 continue
             if new:
                 row = _next_data_row(sheet)
@@ -396,7 +412,7 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 ids = [sheet.cell(item, 1).value for item in range(4, row) if isinstance(sheet.cell(item, 1).value, int)]
                 sheet.cell(row, 1).value = max(ids, default=0) + 1
             mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number if new else None, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
-            issues, written = [], []
+            issues, written = list(merge_issue_messages), []
             for label, value in mapping.items():
                 if label == "Номер РНС" and not new:
                     continue

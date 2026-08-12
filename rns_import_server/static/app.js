@@ -107,15 +107,20 @@
 
   function renderProposalCard(item, documents) {
     const approved = item.status === "approved";
-    const tone = approved ? "approved" : "review";
+    const unresolvedReview = Boolean(item.review_details);
+    const tone = approved && !unresolvedReview ? "approved" : "review";
     const comparisonLabel = approved ? "Перенесено в таблицу" : "Предлагаемое изменение";
     const existingLabel = approved ? "Было" : "В таблице";
     const proposedLabel = approved ? "Перенесено" : "В документе";
+    const status = approved && unresolvedReview
+      ? "Поле перенесено — нужна проверка"
+      : approved ? "Перенесено" : "Требует решения";
     return `<article class="record-card record-card--${tone}">
       ${rowMarker(item.row)}
       <div class="record-card-main">
-        ${recordHeader(item, approved ? "Перенесено" : "Требует решения", tone)}
+        ${recordHeader(item, status, tone)}
         <p class="record-object">${escapeText(item.object || "Данные документа отличаются от таблицы.")}</p>
+        ${item.review_details ? `<div class="record-verdict record-verdict--review"><strong>Связанные документы требуют проверки</strong><span>${escapeText(item.review_details)}</span></div>` : ""}
         <div class="record-diff" aria-label="Сравнение поля ${escapeText(item.field)}">
           <div class="record-diff-heading"><span>${comparisonLabel}</span><strong>${escapeText(item.field)}</strong></div>
           <div class="record-diff-values">
@@ -150,6 +155,18 @@
       <div class="record-card-main">
         ${recordHeader(item, "Обработано", "processed")}
         <p class="record-object">${escapeText(item.object || item.details || "Данные обработаны.")}</p>
+        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
+      </div>
+    </article>`;
+  }
+
+  function renderReviewCard(item, documents) {
+    return `<article class="record-card record-card--review">
+      ${rowMarker(item.row)}
+      <div class="record-card-main">
+        ${recordHeader(item, "Требует проверки", "review")}
+        ${item.object ? `<p class="record-object">${escapeText(item.object)}</p>` : ""}
+        <div class="record-verdict record-verdict--review"><strong>Автоматический перенос ограничен</strong><span>${escapeText(item.details || "Строка содержит неоднозначные данные. Сверьте исходный PDF и таблицу.")}</span></div>
         <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
       </div>
     </article>`;
@@ -246,14 +263,19 @@
     resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p>${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
     const documents = Object.fromEntries((job.documents || []).map(item => [item.id, item]));
     const proposalRows = new Set((job.proposals || []).map(item => `${item.row ?? ""}::${item.number || ""}`));
-    const reviewCards = (job.proposals || []).filter(item => item.status !== "approved").map(item => renderProposalCard(item, documents));
-    const approvedCards = (job.proposals || []).filter(item => item.status === "approved").map(item => renderProposalCard(item, documents));
+    const reviewCards = [
+      ...(job.proposals || []).filter(item => item.status !== "approved" || item.review_details).map(item => renderProposalCard(item, documents)),
+      ...(job.row_cards || [])
+        .filter(item => item.needs_review && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
+        .map(item => renderReviewCard(item, documents))
+    ];
+    const approvedCards = (job.proposals || []).filter(item => item.status === "approved" && !item.review_details).map(item => renderProposalCard(item, documents));
     const processedCards = (job.row_cards || [])
-      .filter(item => item.outcome !== "already_present" && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
+      .filter(item => item.outcome !== "already_present" && !item.needs_review && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
       .map(item => renderProcessedCard(item, documents));
     const matchedCards = (job.row_cards || []).filter(item => item.outcome === "already_present").map(item => renderMatchedCard(item, documents));
     resultRows.innerHTML = [
-      renderCardGroup("review-group-title", "Нужно ваше решение", "Одобрить изменения", "Сверьте значения и перенесите только подтверждённые данные.", reviewCards, "review"),
+      renderCardGroup("review-group-title", "Нужно ваше решение", "Строки для проверки", "Сверьте исходный PDF с таблицей и переносите только подтверждённые предложения.", reviewCards, "review"),
       renderCardGroup("matched-group-title", "Без изменений", "Уже заполнены", "Данные PDF совпадают с реестром. Можно открыть исходный файл для проверки.", matchedCards, "matched"),
       renderCardGroup("approved-group-title", "Одобрено", "Изменения перенесены", "Для каждого изменения создана проверенная резервная копия.", approvedCards, "approved"),
       renderCardGroup("processed-group-title", "Готово", "Обработанные строки", "Данные перенесены и проверены.", processedCards, "processed")

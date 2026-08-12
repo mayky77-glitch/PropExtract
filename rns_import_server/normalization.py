@@ -11,6 +11,11 @@ import unicodedata
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _QUOTES_RE = re.compile(r"[«»„“”\"']")
+_DASHES_RE = re.compile(r"[‐‑‒–—−]")
+_OBJECT_STAGE_RE = re.compile(r"\bэтап\s+\d+(?:\s*\.\s*\d+)*\b")
+_GENERIC_OBJECT_PREAMBLES = {
+    "обустройство ковыктинского газоконденсатного месторождения",
+}
 _LEGACY_RNS = re.compile(
     r"(?<![0-9A-Za-zА-Яа-я])(?:38|3[ВB]|З8)[\s_\-–—]*(\d{1,2})[\s_\-–—]*(\d{1,2})[\s_\-–—]*(20\d{2})(?!\d)",
     re.IGNORECASE,
@@ -37,7 +42,32 @@ def normalize_comparison_text(value: str | None) -> str:
     """Normalize harmless presentation differences without changing meaning."""
     normalized = normalize_text(value) or ""
     normalized = _QUOTES_RE.sub("", normalized)
+    normalized = _DASHES_RE.sub("-", normalized)
     return normalized.strip(" .,;:")
+
+
+def field_comparison_equal(label: str, existing: str | None, proposed: str | None) -> bool:
+    """Compare workbook/PDF text without erasing meaningful field evidence.
+
+    Object names may omit the proven generic ``Обустройство … месторождения``
+    preamble before an explicit ``Этап N`` marker.  Other pre-anchor text and
+    everything after the marker stay significant.
+    """
+    normalized_existing = normalize_comparison_text(existing)
+    normalized_proposed = normalize_comparison_text(proposed)
+    if label != "Наименование объекта":
+        return normalized_existing == normalized_proposed
+
+    def without_generic_preamble(value: str) -> str:
+        anchor = _OBJECT_STAGE_RE.search(value)
+        if not anchor:
+            return value
+        preamble = value[:anchor.start()].strip(" .,;:-")
+        if preamble in _GENERIC_OBJECT_PREAMBLES:
+            return value[anchor.start():]
+        return value
+
+    return without_generic_preamble(normalized_existing) == without_generic_preamble(normalized_proposed)
 
 
 def canonical_rns_identities(value: object) -> tuple[str, ...]:

@@ -20,10 +20,10 @@ on:
       - "scripts/build_windows_*"
       - "scripts/windows_ocr_stdio_probe.py"
       - "scripts/windows_end_to_end_smoke.py"
-      - "tests/test_admin_server.py"
-      - "tests/test_ocr_resource_limits.py"
-      - "tests/test_windows_installer_contract.py"
-      - "tests/test_lifecycle_contract.py"
+      # The installed portable smoke imports the production modules and its
+      # synthetic regressions live in tests too.  Do not silently skip the
+      # Windows job when a new regression file is added.
+      - "tests/**"
       - "README.md"
   pull_request:
     paths:
@@ -41,10 +41,7 @@ on:
       - "scripts/build_windows_*"
       - "scripts/windows_ocr_stdio_probe.py"
       - "scripts/windows_end_to_end_smoke.py"
-      - "tests/test_admin_server.py"
-      - "tests/test_ocr_resource_limits.py"
-      - "tests/test_windows_installer_contract.py"
-      - "tests/test_lifecycle_contract.py"
+      - "tests/**"
       - "README.md"
   workflow_dispatch:
 

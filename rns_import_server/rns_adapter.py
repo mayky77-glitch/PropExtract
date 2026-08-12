@@ -17,6 +17,7 @@ _DATE_RE = re.compile(_DATE)
 _BOUNDARY = re.compile(
     r"(?:^|\n)\s*(?:[1-9]\d?(?:[.-]\d{1,2}){0,2}[.)]?\s*)?(?:дата\s+(?:выдачи|разрешения)|срок\s+действия|"
     r"дата\s+(?:последн\w*\s*)?(?:измен\w*|внесения)|наименование\s+(?:объекта|застройщика)|"
+    r"номер\s+разрешения\s+на\s+строительство|"
     r"объект(?:\s+капитального\s+строительства)?|орган\s+(?:выдачи|местного)|застройщик|"
     r"разработчик\s+пд|проектн\w*\s+организац\w*|субъект\s+рф|муниципальн\w*\s+район|"
     r"этап)\b",
@@ -40,6 +41,9 @@ def _clean_district(value: str | None) -> str | None:
     if not cleaned:
         return None
     cleaned = re.sub(r"^округ,?\s+(?=[А-ЯЁ])", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^иркутская\s+область\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+(?:в\s+)?составе$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+в$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+муниципальн\w*\s+район\w*$", " район", cleaned, flags=re.IGNORECASE)
     if re.fullmatch(r"[А-ЯЁ][А-Яа-яЁё-]+(?:ский|ской|цкий|цкой)", cleaned):
         cleaned += " район"
@@ -158,6 +162,49 @@ def _label_dates(text: str, labels: str) -> list[str]:
     return dates
 
 
+_RNS_NUMBER_LABEL = r"номер\s+разрешения\s+на\s+строительство"
+_REORDERED_RNS_LINE_LABEL = re.compile(
+    r"^\s*(?:[|¦]?\s*[-–—]?\s*\d+(?:[.-]\d+)*[.)]?\s*)?"
+    r"строительство\s*:\s*номер\s+разрешения\s+на\b",
+    re.IGNORECASE,
+)
+
+
+def _reordered_rns_line_evidence(text: str) -> tuple[tuple[str, ...], bool]:
+    """Read only the proven reversed table-label grammar on one OCR line."""
+    geometry_lines = tuple(getattr(text, "lines", ()))
+    lines = tuple(line.text for line in geometry_lines) if geometry_lines else tuple(str(text).splitlines())
+    candidates: list[tuple[str, ...]] = []
+    for line in lines:
+        if not _REORDERED_RNS_LINE_LABEL.search(line):
+            continue
+        identities = canonical_rns_identities(line)
+        if identities:
+            candidates.append(identities)
+    ambiguous = len(candidates) > 1 or any(len(identities) != 1 for identities in candidates)
+    identities = tuple(dict.fromkeys(identity for candidate in candidates for identity in candidate))
+    return identities, ambiguous
+
+
+def _labeled_rns_evidence(text: str) -> tuple[tuple[str, ...], bool]:
+    """Read identities from bounded RNS-number form fields only."""
+    pattern = re.compile(
+        rf"(?:^|\n)\s*(?:[1-9]\d?(?:[.-]\d{{1,2}}){{0,2}}[.)]?\s*)?(?:{_RNS_NUMBER_LABEL})\s*[:№-]?\s*",
+        re.IGNORECASE,
+    )
+    identities: list[str] = []
+    for match in pattern.finditer(text):
+        value = text[match.end():match.end() + 240]
+        boundary = _BOUNDARY.search("\n" + value)
+        if boundary:
+            value = value[:boundary.start()]
+        identities.extend(canonical_rns_identities(value))
+    reordered_identities, reordered_ambiguity = _reordered_rns_line_evidence(text)
+    identities.extend(reordered_identities)
+    combined = tuple(dict.fromkeys(identities))
+    return combined, reordered_ambiguity or len(combined) > 1
+
+
 def date(value: str | None) -> datetime | None:
     return datetime.strptime(value, "%d.%m.%Y") if value else None
 
@@ -165,6 +212,11 @@ def date(value: str | None) -> datetime | None:
 def norm(pdf: Path, text: str) -> str | None:
     """Read a complete RNS number from content, then a complete filename fallback."""
     content_identities = canonical_rns_identities(text)
+    labeled_identities, labeled_ambiguity = _labeled_rns_evidence(text)
+    if labeled_ambiguity:
+        return None
+    if len(labeled_identities) == 1:
+        return labeled_identities[0]
     if len(content_identities) > 1:
         return None
     if content_identities:
@@ -212,11 +264,17 @@ def _explicit_extension_end(pdf: Path) -> str | None:
 def extract(pdf: Path, text: str, number: str | None = None) -> dict[str, object] | None:
     """Extract direct RNS fields.  ``number`` is test/API input, never an inference."""
     content_identities = canonical_rns_identities(text)
+    labeled_identities, labeled_ambiguity = _labeled_rns_evidence(text)
     filename_identities = canonical_rns_identities(pdf.stem)
     if number is None:
-        if len(content_identities) > 1:
+        if labeled_ambiguity:
             return None
-        number = content_identities[0] if content_identities else (filename_identities[0] if len(filename_identities) == 1 else None)
+        if len(labeled_identities) == 1:
+            number = labeled_identities[0]
+        elif len(content_identities) > 1:
+            return None
+        else:
+            number = content_identities[0] if content_identities else (filename_identities[0] if len(filename_identities) == 1 else None)
     if not number:
         return None
     issue_labels = r"дата\s+(?:выдачи\s+)?разрешения(?:\s+на\s+строительство)?|дата\s+выдачи"
@@ -257,7 +315,10 @@ def extract(pdf: Path, text: str, number: str | None = None) -> dict[str, object
         "object": _label_block(text, r"наименование\s+объекта|объект(?:\s+капитального\s+строительства)?") or one(text, r"(?:Обустройство|Строительство)[^\n]{30,400}"),
         "pdf": str(pdf.resolve()),
         "filename": pdf.name,
-        "number_source": "content" if len(content_identities) == 1 and content_identities[0] == number else "filename",
+        "number_source": "content" if (
+            (len(content_identities) == 1 and content_identities[0] == number)
+            or (len(labeled_identities) == 1 and labeled_identities[0] == number)
+        ) else "filename",
         "field_provenance": {"issue": "filename" if issue and not issue_block else "ocr"} if issue else {},
     }
     record["field_provenance"] = {key: "ocr" for key in ("end", "changed", "issuer", "developer", "builder", "district", "region", "stage", "object") if record.get(key)} | record["field_provenance"]
