@@ -84,6 +84,85 @@
 
   const escapeText = (value) => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[char]);
 
+  const sourceName = (item, documents) => {
+    const document = documents[item.document_id] || {};
+    return item.filename || document.filename || "PDF";
+  };
+
+  const openDocumentButton = item => item.document_id
+    ? `<button class="row-action row-action--secondary" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>`
+    : "";
+
+  function recordHeader(item, status, tone) {
+    return `<div class="record-card-heading"><div><span class="record-label">РНС</span><h4>${escapeText(item.number || "Не определён")}</h4></div><span class="record-status record-status--${tone}">${status}</span></div>`;
+  }
+
+  function rowMarker(row) {
+    return `<div class="sheet-row-marker" aria-label="Строка Excel ${escapeText(row ?? "не определена")}"><span>Строка</span><strong>${escapeText(row ?? "—")}</strong></div>`;
+  }
+
+  function recordSource(item, documents) {
+    return `<div class="record-source"><span class="record-label">Источник PDF</span><strong>${escapeText(sourceName(item, documents))}</strong></div>`;
+  }
+
+  function renderProposalCard(item, documents) {
+    const approved = item.status === "approved";
+    const tone = approved ? "approved" : "review";
+    const comparisonLabel = approved ? "Перенесено в таблицу" : "Предлагаемое изменение";
+    const existingLabel = approved ? "Было" : "В таблице";
+    const proposedLabel = approved ? "Перенесено" : "В документе";
+    return `<article class="record-card record-card--${tone}">
+      ${rowMarker(item.row)}
+      <div class="record-card-main">
+        ${recordHeader(item, approved ? "Перенесено" : "Требует решения", tone)}
+        <p class="record-object">${escapeText(item.object || "Данные документа отличаются от таблицы.")}</p>
+        <div class="record-diff" aria-label="Сравнение поля ${escapeText(item.field)}">
+          <div class="record-diff-heading"><span>${comparisonLabel}</span><strong>${escapeText(item.field)}</strong></div>
+          <div class="record-diff-values">
+            <div class="record-value record-value--existing"><span>${existingLabel}</span><strong>${escapeText(item.existing ?? "Не заполнено")}</strong></div>
+            <span class="record-diff-arrow" aria-hidden="true">→</span>
+            <div class="record-value record-value--proposed"><span>${proposedLabel}</span><strong>${escapeText(item.proposed ?? "Не заполнено")}</strong></div>
+          </div>
+        </div>
+        <div class="record-card-footer">
+          ${recordSource(item, documents)}
+          <div class="row-actions">${openDocumentButton(item)}<button class="row-action row-action--primary" type="button" data-approve-proposal="${escapeText(item.id)}" ${approved ? "disabled" : ""}>${approved ? "Изменение перенесено" : "Перенести в таблицу"}</button></div>
+        </div>
+      </div>
+    </article>`;
+  }
+
+  function renderMatchedCard(item, documents) {
+    return `<article class="record-card record-card--matched">
+      ${rowMarker(item.row)}
+      <div class="record-card-main">
+        ${recordHeader(item, "Совпадает", "matched")}
+        ${item.object ? `<p class="record-object">${escapeText(item.object)}</p>` : ""}
+        <div class="record-verdict"><strong>Данные уже есть в таблице</strong><span>Строка оставлена без изменений. При открытии Excel обновятся только родные цветовые маркеры сроков.</span></div>
+        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
+      </div>
+    </article>`;
+  }
+
+  function renderProcessedCard(item, documents) {
+    return `<article class="record-card record-card--processed">
+      ${rowMarker(item.row)}
+      <div class="record-card-main">
+        ${recordHeader(item, "Обработано", "processed")}
+        <p class="record-object">${escapeText(item.object || item.details || "Данные обработаны.")}</p>
+        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
+      </div>
+    </article>`;
+  }
+
+  function renderCardGroup(id, eyebrow, title, description, cards, tone) {
+    if (!cards.length) return "";
+    return `<section class="result-group result-group--${tone}" aria-labelledby="${id}">
+      <div class="result-group-heading"><div><span>${eyebrow}</span><h3 id="${id}">${title}</h3><p>${description}</p></div><strong aria-label="Количество строк: ${cards.length}">${cards.length}</strong></div>
+      <div class="result-card-list">${cards.join("")}</div>
+    </section>`;
+  }
+
   document.querySelectorAll("[data-picker-kind]").forEach(button => {
     button.addEventListener("click", async () => {
       const target = document.querySelector(`#${button.dataset.pickerTarget}`);
@@ -166,24 +245,19 @@
     const issueRows = (stats.rows_with_issues || []).join(", ") || "нет";
     resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p>${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
     const documents = Object.fromEntries((job.documents || []).map(item => [item.id, item]));
-    const cards = [];
     const proposalRows = new Set((job.proposals || []).map(item => `${item.row ?? ""}::${item.number || ""}`));
-    (job.proposals || []).forEach(item => {
-      const document = documents[item.document_id] || {};
-      const difference = item.status === "approved"
-        ? `Перенесено «${escapeText(item.field)}»: «${escapeText(item.proposed)}».`
-        : `${escapeText(item.field)}: в Excel «${escapeText(item.existing)}», в PDF «${escapeText(item.proposed)}».`;
-      cards.push(`<article class="result-row ${item.status === "approved" ? "" : "conflict"}"><div><h3>Строка Excel ${escapeText(item.row ?? "не определена")} · РНС ${escapeText(item.number)}</h3><p>${escapeText(item.object || "Данные документа отличаются от таблицы.")}</p><p>${difference}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}<button class="row-action" type="button" data-approve-proposal="${escapeText(item.id)}" ${item.status === "approved" ? "disabled" : ""}>${item.status === "approved" ? "Перенесено" : "Перенести изменения"}</button></div></article>`);
-    });
-    (job.row_cards || []).filter(item => item.outcome !== "already_present" && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`)).forEach(item => {
-      const document = documents[item.document_id] || {};
-      cards.push(`<article class="result-row"><div><h3>Строка Excel ${escapeText(item.row ?? "не определена")} · РНС ${escapeText(item.number)}</h3><p>${escapeText(item.object || item.details || "Данные обработаны.")}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}</div></article>`);
-    });
-    (job.row_cards || []).filter(item => item.outcome === "already_present").forEach(item => {
-      const document = documents[item.document_id] || {};
-      cards.push(`<article class="result-row"><div><h3>Строка Excel ${escapeText(item.row)} · РНС ${escapeText(item.number)}</h3><p>Строка не изменена: данные уже есть в таблице.</p><p>При открытии Excel обновятся только родные цветовые маркеры сроков.</p><p>${escapeText(item.object || "")}</p><p>Источник: ${escapeText(item.filename || document.filename || "PDF")}</p></div><div class="row-actions">${item.document_id ? `<button class="row-action" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>` : ""}</div></article>`);
-    });
-    resultRows.innerHTML = cards.join("");
+    const reviewCards = (job.proposals || []).filter(item => item.status !== "approved").map(item => renderProposalCard(item, documents));
+    const approvedCards = (job.proposals || []).filter(item => item.status === "approved").map(item => renderProposalCard(item, documents));
+    const processedCards = (job.row_cards || [])
+      .filter(item => item.outcome !== "already_present" && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
+      .map(item => renderProcessedCard(item, documents));
+    const matchedCards = (job.row_cards || []).filter(item => item.outcome === "already_present").map(item => renderMatchedCard(item, documents));
+    resultRows.innerHTML = [
+      renderCardGroup("review-group-title", "Нужно ваше решение", "Одобрить изменения", "Сверьте значения и перенесите только подтверждённые данные.", reviewCards, "review"),
+      renderCardGroup("matched-group-title", "Без изменений", "Уже заполнены", "Данные PDF совпадают с реестром. Можно открыть исходный файл для проверки.", matchedCards, "matched"),
+      renderCardGroup("approved-group-title", "Одобрено", "Изменения перенесены", "Для каждого изменения создана проверенная резервная копия.", approvedCards, "approved"),
+      renderCardGroup("processed-group-title", "Готово", "Обработанные строки", "Данные перенесены и проверены.", processedCards, "processed")
+    ].join("");
   }
 
   resultRows?.addEventListener("click", async event => {

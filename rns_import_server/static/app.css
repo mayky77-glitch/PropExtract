@@ -9,6 +9,7 @@
   --lake: #176d75;
   --lake-strong: #0e555c;
   --signal: #b45936;
+  --on-signal: #ffffff;
   --ok: #1f7a5a;
   --error: #a23e35;
   --shadow: 0 20px 60px rgba(34, 64, 70, .09);
@@ -27,6 +28,7 @@
   --lake: #67bec3;
   --lake-strong: #89d4d7;
   --signal: #efa06f;
+  --on-signal: #172126;
   --ok: #70c89e;
   --error: #ef9188;
   --shadow: 0 22px 70px rgba(0, 0, 0, .28);
@@ -44,6 +46,7 @@
     --lake: #67bec3;
     --lake-strong: #89d4d7;
     --signal: #efa06f;
+    --on-signal: #172126;
     --ok: #70c89e;
     --error: #ef9188;
     --shadow: 0 22px 70px rgba(0, 0, 0, .28);
@@ -149,16 +152,61 @@ h1 { max-width: 920px; margin: 0 0 30px; font-family: "Aptos Display", "Segoe UI
 .result-files ul { margin: 8px 0; padding-left: 20px; }
 .result-files li { margin: 4px 0; overflow-wrap: anywhere; }
 .result-files p { color: var(--muted); }
-.result-rows { display: grid; gap: 10px; margin-top: 18px; }
-.result-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 15px 16px; background: var(--canvas); border: 1px solid var(--line); border-left: 4px solid var(--lake); border-radius: 10px; }
-.result-row.conflict { border-left-color: var(--signal); }
-.result-row h3 { margin: 0; font: 700 14px/1.35 "Trebuchet MS", sans-serif; }
-.result-row p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.row-actions { display: flex; align-items: start; gap: 8px; flex-wrap: wrap; }
-.row-action { min-height: 34px; padding: 7px 10px; color: var(--lake-strong); background: transparent; border: 1px solid currentColor; border-radius: 7px; font: 700 12px/1.1 "Trebuchet MS", sans-serif; cursor: pointer; }
-.row-action:hover { color: var(--paper); background: var(--lake-strong); }
+.result-rows { display: grid; gap: 34px; margin-top: 30px; }
+.result-group { display: grid; gap: 13px; }
+.result-group-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 0 3px; }
+.result-group-heading > div > span { display: block; margin-bottom: 5px; color: var(--muted); font: 750 10px/1.2 "Trebuchet MS", sans-serif; letter-spacing: .09em; text-transform: uppercase; }
+.result-group--review .result-group-heading > div > span { color: var(--signal); }
+.result-group-heading h3 { margin: 0; font: 650 20px/1.2 "Aptos Display", "Segoe UI Variable Display", sans-serif; letter-spacing: -.02em; }
+.result-group-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.result-group-heading > strong { min-width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: var(--lake-strong); background: color-mix(in srgb, var(--lake) 10%, var(--canvas)); border: 1px solid color-mix(in srgb, var(--lake) 24%, var(--line)); border-radius: 50%; font: 750 13px/1 "Trebuchet MS", sans-serif; font-variant-numeric: tabular-nums; }
+.result-group--review .result-group-heading > strong { color: var(--signal); background: color-mix(in srgb, var(--signal) 10%, var(--canvas)); border-color: color-mix(in srgb, var(--signal) 30%, var(--line)); }
+.result-card-list { display: grid; gap: 12px; }
+.record-card { display: grid; grid-template-columns: 82px minmax(0, 1fr); overflow: hidden; background: var(--canvas); border: 1px solid var(--line); border-radius: 14px; transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
+.record-card:hover { border-color: color-mix(in srgb, var(--lake) 30%, var(--line)); box-shadow: 0 12px 30px color-mix(in srgb, var(--ink) 7%, transparent); transform: translateY(-1px); }
+.record-card--review { border-color: color-mix(in srgb, var(--signal) 38%, var(--line)); }
+.record-card--review:hover { border-color: color-mix(in srgb, var(--signal) 62%, var(--line)); }
+.sheet-row-marker { display: grid; align-content: center; justify-items: center; gap: 7px; min-height: 100%; padding: 18px 10px; color: var(--lake-strong); background: color-mix(in srgb, var(--lake) 8%, var(--paper)); border-right: 1px solid var(--line); }
+.record-card--review .sheet-row-marker { color: var(--signal); background: color-mix(in srgb, var(--signal) 9%, var(--paper)); }
+.record-card--approved .sheet-row-marker, .record-card--matched .sheet-row-marker { color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--paper)); }
+.sheet-row-marker span, .record-label { color: currentColor; font: 750 9px/1.2 "Trebuchet MS", sans-serif; letter-spacing: .09em; text-transform: uppercase; }
+.sheet-row-marker strong { font: 750 25px/1 "Trebuchet MS", sans-serif; font-variant-numeric: tabular-nums; letter-spacing: -.03em; }
+.record-card-main { min-width: 0; padding: 19px 20px 18px; }
+.record-card-heading { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
+.record-card-heading h4 { margin: 3px 0 0; font: 750 16px/1.3 "Trebuchet MS", sans-serif; overflow-wrap: anywhere; }
+.record-card-heading .record-label { color: var(--muted); }
+.record-status { flex: 0 0 auto; padding: 6px 9px; border: 1px solid currentColor; border-radius: 999px; font: 750 10px/1 "Trebuchet MS", sans-serif; white-space: nowrap; }
+.record-status--review { color: var(--signal); background: color-mix(in srgb, var(--signal) 8%, transparent); }
+.record-status--matched, .record-status--approved { color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, transparent); }
+.record-status--processed { color: var(--lake-strong); background: color-mix(in srgb, var(--lake) 8%, transparent); }
+.record-object { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.record-diff { margin-top: 15px; padding: 13px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; }
+.record-diff-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 9px; }
+.record-diff-heading span { color: var(--muted); font-size: 10px; }
+.record-diff-heading strong { color: var(--ink); font: 750 11px/1.3 "Trebuchet MS", sans-serif; text-align: right; }
+.record-diff-values { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr); gap: 8px; align-items: stretch; }
+.record-value { min-width: 0; padding: 11px 12px; background: var(--canvas); border: 1px solid var(--line); border-radius: 8px; }
+.record-value--proposed { background: color-mix(in srgb, var(--signal) 7%, var(--canvas)); border-color: color-mix(in srgb, var(--signal) 35%, var(--line)); }
+.record-card--approved .record-value--proposed { background: color-mix(in srgb, var(--ok) 7%, var(--canvas)); border-color: color-mix(in srgb, var(--ok) 32%, var(--line)); }
+.record-value span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.record-value strong { display: block; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.record-diff-arrow { display: grid; place-items: center; color: var(--signal); font: 700 18px/1 "Trebuchet MS", sans-serif; }
+.record-card--approved .record-diff-arrow { color: var(--ok); }
+.record-verdict { display: grid; gap: 4px; margin-top: 14px; padding: 12px 13px; color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--paper)); border: 1px solid color-mix(in srgb, var(--ok) 27%, var(--line)); border-radius: 9px; }
+.record-verdict strong { font: 750 12px/1.3 "Trebuchet MS", sans-serif; }
+.record-verdict span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.record-card-footer { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-top: 15px; padding-top: 14px; border-top: 1px solid var(--line); }
+.record-source { min-width: 0; display: grid; gap: 4px; }
+.record-source .record-label { color: var(--muted); }
+.record-source strong { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.row-actions { display: flex; justify-content: end; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row-action { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; border: 1px solid currentColor; border-radius: 8px; font: 750 11px/1.1 "Trebuchet MS", sans-serif; cursor: pointer; transition: color .15s ease, background .15s ease, border-color .15s ease; }
+.row-action--secondary { color: var(--lake-strong); background: transparent; }
+.row-action--primary { color: var(--on-signal); background: var(--signal); border-color: var(--signal); }
+.row-action--secondary:hover { color: var(--paper); background: var(--lake-strong); }
+.row-action--primary:hover { color: var(--on-signal); background: color-mix(in srgb, var(--signal) 84%, #000); border-color: color-mix(in srgb, var(--signal) 84%, #000); }
 .row-action:focus-visible { outline: 3px solid color-mix(in srgb, var(--lake) 35%, transparent); outline-offset: 2px; }
-.row-action:disabled { opacity: .55; cursor: wait; }
+.row-action:disabled { color: var(--muted); background: var(--soft); border-color: var(--line); opacity: 1; cursor: default; }
 
 .help-shell { padding-top: 78px; }
 .help-title { max-width: 840px; }
@@ -212,7 +260,9 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .guide-grid article:nth-child(2) { border-right: 0; }
   .guide-grid article:nth-child(3), .guide-grid article:nth-child(4) { border-bottom: 0; }
   .result-stats { grid-template-columns: 1fr 1fr; }
-  .result-row { grid-template-columns: 1fr; }
+  .record-card { grid-template-columns: 72px minmax(0, 1fr); }
+  .record-card-footer { align-items: start; flex-direction: column; }
+  .row-actions { justify-content: start; }
   .lifecycle-state { display: none; }
 }
 
@@ -234,6 +284,20 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .troubleshooting { grid-template-columns: 1fr; gap: 30px; }
   .result { padding: 28px 24px; }
   .result-stats { grid-template-columns: 1fr 1fr; }
+  .result-rows { gap: 28px; }
+  .result-group-heading { align-items: start; }
+  .record-card { grid-template-columns: 1fr; }
+  .sheet-row-marker { min-height: 0; display: flex; align-items: baseline; justify-content: space-between; padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .sheet-row-marker strong { font-size: 18px; }
+  .record-card-main { padding: 16px; }
+  .record-card-heading { gap: 10px; }
+  .record-card-heading h4 { font-size: 14px; }
+  .record-status { padding: 5px 7px; font-size: 9px; }
+  .record-diff-values { grid-template-columns: 1fr; }
+  .record-diff-arrow { min-height: 14px; transform: rotate(90deg); }
+  .record-card-footer { gap: 12px; }
+  .row-actions, .row-action { width: 100%; }
+  .row-action { justify-content: center; }
   .shutdown-card { padding: 38px 24px; }
   footer { width: calc(100% - 32px); flex-direction: column; }
 }

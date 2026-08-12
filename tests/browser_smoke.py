@@ -91,19 +91,90 @@ with sync_playwright() as playwright:
     result_text = page.locator("#result").inner_text()
     assert "Разрешение ВЛ 110кВ.pdf" in result_text
     assert "Продление до 28.11.2026.pdf" in result_text
-    assert "Строка Excel 584" in result_text
-    assert "Строка не изменена: данные уже есть в таблице." in result_text
-    assert "При открытии Excel обновятся только родные цветовые маркеры сроков." in result_text
+    assert "Уже заполнены" in result_text
+    assert "Данные уже есть в таблице" in result_text
+    assert "Строка оставлена без изменений." in result_text
+    assert page.locator(".sheet-row-marker", has_text="584").count() == 1
+    assert page.locator(".record-status--matched", has_text="Совпадает").count() == 2
     assert page.get_by_role("button", name="Открыть PDF").count() == 2
     page.screenshot(path=SCREENSHOTS / "already-present-dark.png", full_page=True)
     page.unroute("**/api/jobs**", mock_job)
+
+    review_state = {"approved": False}
+
+    def mock_review_job(route):
+        if route.request.method == "POST" and route.request.url.endswith("/approve"):
+            review_state["approved"] = True
+            route.fulfill(status=200, content_type="application/json", body='{"status":"approved","backup":"backup.xlsx"}')
+            return
+        if route.request.method == "POST":
+            route.fulfill(status=202, content_type="application/json", body='{"id":"review-records"}')
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "id": "review-records",
+                "status": "done",
+                "progress": 100,
+                "stage": "Готово",
+                "summary": {
+                    "pdf_count": 2,
+                    "record_count": 2,
+                    "changed_rows": 0,
+                    "new_rows": 0,
+                    "already_present_count": 1,
+                    "issue_count": 1,
+                    "row_numbers": [592, 593],
+                    "new_row_numbers": [],
+                    "rows_with_issues": [592],
+                },
+                "documents": [
+                    {"id": "doc-review", "filename": "Продление РНС до 31.12.2028.pdf"},
+                    {"id": "doc-match", "filename": "Разрешение на этап 2.pdf"},
+                ],
+                "row_cards": [
+                    {"row": 592, "number": "RU-38509306-19-2022", "object": "Строительство жилого дома, этап 1", "outcome": "review_conflict", "filename": "Продление РНС до 31.12.2028.pdf", "document_id": "doc-review"},
+                    {"row": 593, "number": "RU-38509306-20-2022", "object": "Строительство жилого дома, этап 2", "outcome": "already_present", "filename": "Разрешение на этап 2.pdf", "document_id": "doc-match"},
+                ],
+                "proposals": [{
+                    "id": "proposal-1",
+                    "row": 592,
+                    "number": "RU-38509306-19-2022",
+                    "field": "Срок действия",
+                    "existing": "31.12.2026",
+                    "proposed": "31.12.2028",
+                    "object": "Строительство жилого дома, этап 1",
+                    "filename": "Продление РНС до 31.12.2028.pdf",
+                    "document_id": "doc-review",
+                    "status": "approved" if review_state["approved"] else "pending",
+                }],
+            }, ensure_ascii=False),
+        )
+
+    page.route("**/api/jobs**", mock_review_job)
+    page.get_by_role("button", name="Перенести данные").click()
+    page.get_by_role("heading", name="Одобрить изменения").wait_for(timeout=5000)
+    expect(page.locator(".record-value--existing span")).to_have_text("В таблице")
+    expect(page.locator(".record-value--existing strong")).to_have_text("31.12.2026")
+    expect(page.locator(".record-value--proposed span")).to_have_text("В документе")
+    expect(page.locator(".record-value--proposed strong")).to_have_text("31.12.2028")
+    assert page.locator(".sheet-row-marker", has_text="592").count() == 1
+    assert page.get_by_role("button", name="Перенести в таблицу").is_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    page.screenshot(path=SCREENSHOTS / "review-comparison-dark.png", full_page=True)
+    page.get_by_role("button", name="Перенести в таблицу").click()
+    page.get_by_role("heading", name="Изменения перенесены").wait_for(timeout=5000)
+    expect(page.get_by_role("button", name="Изменение перенесено")).to_be_disabled()
+    page.screenshot(path=SCREENSHOTS / "review-approved-dark.png", full_page=True)
+    page.unroute("**/api/jobs**", mock_review_job)
 
     page.get_by_label("Папка с PDF").fill('"/path/that/does/not/exist"')
     page.get_by_label("Целевой файл Excel").fill("/path/that/does/not/exist.xlsx")
     page.get_by_role("button", name="Перенести данные").click()
     page.get_by_role("heading", name="Реестр не изменён").wait_for(timeout=5000)
     error_text = page.locator("#result-paths").inner_text()
-    assert "Проверьте папку с PDF, файл Excel и параметры операции." in error_text
+    assert "Проверьте подключение к PropExtract и параметры запуска." in error_text
     assert "/path/that/does/not/exist" not in error_text
     assert page.get_by_role("button", name="Перенести данные").is_enabled()
 
@@ -112,12 +183,22 @@ with sync_playwright() as playwright:
     assert page.locator("h1", has_text="От папки со сканами").is_visible()
     page.screenshot(path=SCREENSHOTS / "help-dark.png", full_page=True)
 
-    mobile = browser.new_page(viewport={"width": 390, "height": 844}, color_scheme="light")
+    mobile_context = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="light")
+    mobile = mobile_context.new_page()
     mobile.goto(BASE)
     mobile.wait_for_load_state("networkidle")
     assert mobile.get_by_role("button", name="Перенести данные").is_visible()
     assert mobile.get_by_role("button", name="Остановить PropExtract").is_visible()
+    mobile.route("**/api/jobs**", mock_job)
+    mobile.get_by_label("Папка с PDF").fill("C:\\PDF")
+    mobile.get_by_label("Целевой файл Excel").fill("C:\\Реестр.xlsx")
+    mobile.get_by_role("button", name="Перенести данные").click()
+    mobile.get_by_role("heading", name="Уже заполнены").wait_for(timeout=5000)
+    assert mobile.locator(".record-card").count() == 2
+    assert mobile.locator(".sheet-row-marker", has_text="584").is_visible()
+    assert mobile.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
     mobile.screenshot(path=SCREENSHOTS / "mobile-light.png", full_page=True)
+    mobile_context.close()
 
     page.goto(BASE)
     page.wait_for_load_state("networkidle")
