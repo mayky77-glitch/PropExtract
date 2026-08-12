@@ -80,6 +80,37 @@ def test_geometry_ocr_uses_project_models_and_tsv_output(monkeypatch):
     assert environment == {"TESSDATA_PREFIX": "/project/tessdata"}
 
 
+def test_geometry_ocr_treats_header_only_tsv_as_empty_page(monkeypatch):
+    blank_tsv = "\n".join(
+        (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+            "1\t1\t0\t0\t0\t0\t0\t0\t640\t320\t-1\t",
+        )
+    )
+    monkeypatch.setattr(ocr, "tesseract_environment", lambda: {})
+    monkeypatch.setattr(
+        ocr,
+        "_run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=blank_tsv, stderr=""),
+    )
+
+    result = ocr._ocr_image(Path("blank.png"), "project-tesseract")
+
+    assert result == ""
+    assert result.lines == ()
+
+
+def test_geometry_ocr_preserves_compatible_plain_text_fallback(monkeypatch):
+    monkeypatch.setattr(ocr, "tesseract_environment", lambda: {})
+    monkeypatch.setattr(
+        ocr,
+        "_run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Обычный текст", stderr=""),
+    )
+
+    assert ocr._ocr_image(Path("page.png"), "project-tesseract") == "Обычный текст"
+
+
 def test_tesseract_environment_limits_openmp_unless_operator_set(monkeypatch):
     monkeypatch.setattr(ocr, "bundled_language_status", lambda: {"rus": {"valid": True}, "eng": {"valid": True}})
     monkeypatch.delenv("OMP_THREAD_LIMIT", raising=False)

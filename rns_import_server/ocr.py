@@ -292,6 +292,13 @@ def _tsv_text(value: str) -> OCRText:
     return OCRText("\n".join(line.text for line in lines), tuple(lines))
 
 
+def _is_tsv_output(value: str) -> bool:
+    """Distinguish an empty TSV document from compatible plain OCR output."""
+    first_line = value.lstrip("\ufeff").partition("\n")[0].rstrip("\r")
+    fields = set(first_line.split("\t"))
+    return {"level", "page_num", "left", "top", "width", "height", "conf", "text"} <= fields
+
+
 def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = None) -> OCRText:
     try:
         environment = (
@@ -316,7 +323,7 @@ def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = N
         raise RuntimeError(f"tesseract_failed:{image.name}")
     raw = _captured_text(result.stdout)
     parsed = _tsv_text(raw)
-    if not parsed.strip():
+    if not parsed.strip() and not _is_tsv_output(raw):
         # Preserve compatible plain output from older/probed native runtimes;
         # geometry remains empty and the deterministic text parser still works.
         return OCRText(raw)
