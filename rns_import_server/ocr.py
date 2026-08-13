@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -91,16 +92,19 @@ class OCRText(str):
 
     lines: tuple[OCRLine, ...]
     source: str
+    trace: dict[str, object]
 
     def __new__(
         cls,
         value: str,
         lines: tuple[OCRLine, ...] = (),
         source: str = "raster",
+        trace: dict[str, object] | None = None,
     ) -> "OCRText":
         instance = super().__new__(cls, value)
         instance.lines = lines
         instance.source = source
+        instance.trace = dict(trace or {})
         return instance
 
 
@@ -337,6 +341,37 @@ def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = N
     return parsed
 
 
+def _elapsed_ms(started_at: float) -> int:
+    """Return a monotonic, JSON-safe nonnegative duration."""
+    return max(0, int((time.monotonic() - started_at) * 1000))
+
+
+def _trace(
+    *,
+    route: str,
+    requested_dpi: int,
+    effective_dpi: int,
+    total_pages: int,
+    processed_pages: int,
+    tesseract_calls: int,
+    timings_ms: dict[str, int],
+    fallback_reason: str | None = None,
+) -> dict[str, object]:
+    """Typed OCR metadata; intentionally excludes content and local identity."""
+    return {
+        "ocr_trace_version": 1,
+        "route": route,
+        "requested_dpi": int(requested_dpi),
+        "effective_dpi": int(effective_dpi),
+        "total_pages": max(0, int(total_pages)),
+        "processed_pages": max(0, int(processed_pages)),
+        "tesseract_calls": max(0, int(tesseract_calls)),
+        "tesseract_started": bool(tesseract_calls),
+        "fallback_reason": fallback_reason,
+        "timings_ms": {stage: max(0, int(timings_ms.get(stage, 0))) for stage in ("page_count", "text_layer", "render", "tesseract", "total")},
+    }
+
+
 def _read(
     pdf: Path,
     dpi: int,
@@ -345,33 +380,50 @@ def _read(
     *,
     force_ocr: bool = False,
 ) -> tuple[OCRText, int]:
+    started_at = time.monotonic()
+    page_count_started = started_at
     total = page_count(pdf, native_workspace=native_workspace) if native_workspace is not None else page_count(pdf)
+    page_count_ms = _elapsed_ms(page_count_started)
     last_page = min(total, max_pages) if max_pages else total
+    text_layer_ms = 0
     if not force_ocr:
+        text_layer_started = time.monotonic()
         text = (
             _text_layer(pdf, last_page, native_workspace=native_workspace)
             if native_workspace is not None
             else _text_layer(pdf, last_page)
         )
+        text_layer_ms = _elapsed_ms(text_layer_started)
         if text:
-            return OCRText(text, source="text_layer"), total
+            return OCRText(
+                text,
+                source="text_layer",
+                trace=_trace(
+                    route="text_layer", requested_dpi=dpi, effective_dpi=dpi,
+                    total_pages=total, processed_pages=last_page, tesseract_calls=0,
+                    timings_ms={"page_count": page_count_ms, "text_layer": text_layer_ms, "render": 0, "tesseract": 0, "total": _elapsed_ms(started_at)},
+                ),
+            ), total
     renderer, tesseract = find_tool("pdftoppm"), find_tool("tesseract")
     if not renderer:
         raise RuntimeError("pdftoppm_unavailable")
     if not tesseract:
         raise RuntimeError("tesseract_unavailable")
 
-    def render_and_ocr(temporary: Path) -> tuple[str, int]:
+    def render_and_ocr(temporary: Path) -> tuple[OCRText, int]:
         prefix = temporary / "page"
         cache = temporary / "cache" if native_workspace is not None else Path(tempfile.gettempdir()) / "rns-import-font-cache"
         cache.mkdir(exist_ok=True)
         environment = _native_environment(native_workspace) or dict(os.environ)
         environment["XDG_CACHE_HOME"] = _native_relative_path(cache, native_workspace)
         parts: list[tuple[int, OCRText]] = []
+        render_ms = 0
+        tesseract_ms = 0
         for first_page in range(1, last_page + 1, OCR_PAGE_BATCH_SIZE):
             final_page = min(first_page + OCR_PAGE_BATCH_SIZE - 1, last_page)
             try:
                 try:
+                    rendered_started = time.monotonic()
                     rendered = _run(
                         _native_argv(
                             renderer,
@@ -395,11 +447,13 @@ def _read(
                     )
                 except subprocess.TimeoutExpired as error:
                     raise RuntimeError("pdf_render_timeout") from error
+                render_ms += _elapsed_ms(rendered_started)
                 images = sorted(temporary.glob("page-*.png"))
                 expected_images = final_page - first_page + 1
                 if rendered.returncode or len(images) != expected_images:
                     raise RuntimeError("pdf_render_failed")
                 workers = min(2, len(images))
+                tesseract_started = time.monotonic()
                 with ThreadPoolExecutor(max_workers=workers) as executor:
                     batch_parts = list(
                         executor.map(
@@ -407,6 +461,7 @@ def _read(
                             images,
                         )
                     )
+                tesseract_ms += _elapsed_ms(tesseract_started)
                 parts.extend(zip(range(first_page, final_page + 1), batch_parts))
             finally:
                 for image in temporary.glob("page-*.png"):
@@ -416,7 +471,16 @@ def _read(
             for page, part in parts
             for line in part.lines
         )
-        return OCRText("\n".join(_captured_text(part) for _, part in parts), lines, source="raster"), total
+        return OCRText(
+            "\n".join(_captured_text(part) for _, part in parts),
+            lines,
+            source="raster",
+            trace=_trace(
+                route="raster", requested_dpi=dpi, effective_dpi=dpi,
+                total_pages=total, processed_pages=last_page, tesseract_calls=len(parts),
+                timings_ms={"page_count": page_count_ms, "text_layer": text_layer_ms, "render": render_ms, "tesseract": tesseract_ms, "total": _elapsed_ms(started_at)},
+            ),
+        ), total
 
     if native_workspace is not None:
         return render_and_ocr(native_workspace)

@@ -12,6 +12,8 @@ import unicodedata
 _WHITESPACE_RE = re.compile(r"\s+")
 _QUOTES_RE = re.compile(r"[«»„“”\"']")
 _DASHES_RE = re.compile(r"[‐‑‒–—−]")
+_NUMERIC_KV_RE = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*(?:кв|kb)\b", re.IGNORECASE)
+_NUMERIC_MVA_RE = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*мва\b", re.IGNORECASE)
 _OBJECT_STAGE_RE = re.compile(r"\bэтап\s+\d+(?:\s*\.\s*\d+)*\b")
 _GENERIC_OBJECT_PREAMBLES = {
     "обустройство ковыктинского газоконденсатного месторождения",
@@ -43,6 +45,11 @@ def normalize_comparison_text(value: str | None) -> str:
     normalized = normalize_text(value) or ""
     normalized = _QUOTES_RE.sub("", normalized)
     normalized = _DASHES_RE.sub("-", normalized)
+    # OCR sometimes reads Cyrillic ``кВ`` as Latin ``KB``.  This is a
+    # presentation tolerance only when a numeric electrical rating proves the
+    # context; ordinary words and stored workbook text are never rewritten.
+    normalized = _NUMERIC_KV_RE.sub(r"\1 кв", normalized)
+    normalized = _NUMERIC_MVA_RE.sub(r"\1 мва", normalized)
     return normalized.strip(" .,;:")
 
 

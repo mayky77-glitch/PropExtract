@@ -273,18 +273,77 @@ _QUALITY_ANCHORS = {
 }
 
 
+def _quality_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[\wЁё]+", value.casefold()))
+
+
+def _field_value_grammar(field: str, value: str) -> bool:
+    """Require the small field shapes that make OCR evidence transferable."""
+    normalized = _clean_field(value) or ""
+    if field in {"issue", "end", "changed"}:
+        return bool(re.fullmatch(_DATE, normalized))
+    if field == "stage":
+        return bool(re.fullmatch(r"этап\s*\d+(?:\.\d+)+", normalized, re.IGNORECASE))
+    if field == "district":
+        return bool(re.search(r"\b(?:район|округ|муниципальн\w*\s+образован\w*)\b", normalized, re.IGNORECASE))
+    if field in {"developer", "builder"}:
+        return bool(re.match(r"\s*(?:ооо|пао|ао|ип|общество\s+с\s+ограниченной|акционерное\s+общество)\b", normalized, re.IGNORECASE))
+    if field == "issuer":
+        return bool(re.match(r"\s*(?:администрац|министерств|служб|комитет|департамент|управлен)", normalized, re.IGNORECASE))
+    return bool(_quality_tokens(normalized))
+
+
+def _contiguous_line_evidence(text: object, anchor: str, value: str) -> tuple[list[object], str | None]:
+    """Find a label and its value only in the same or next OCR line/window."""
+    lines = tuple(getattr(text, "lines", ()))
+    expected = _quality_tokens(value)
+    if not lines:
+        return [], "missing_geometry_evidence"
+    saw_anchor = False
+    for index, line in enumerate(lines):
+        line_text = getattr(line, "text", "")
+        anchor_match = re.search(anchor, line_text, re.IGNORECASE)
+        if not anchor_match:
+            continue
+        saw_anchor = True
+        line_words = list(getattr(line, "words", ()))
+        # OCRLine.text joins word text with single spaces. Locate the first
+        # word whose textual span ends after the matched label and accept only
+        # words after that boundary; prefix/reference text is never a value.
+        cursor = 0
+        first_after_anchor = len(line_words)
+        for word_index, word in enumerate(line_words):
+            word_text = getattr(word, "text", "")
+            word_start = cursor
+            word_end = word_start + len(word_text)
+            cursor = word_end + 1
+            if word_start >= anchor_match.end():
+                first_after_anchor = word_index
+                break
+        words = line_words[first_after_anchor:]
+        if index + 1 < len(lines) and getattr(lines[index + 1], "page", 0) == getattr(line, "page", 0):
+            words.extend(getattr(lines[index + 1], "words", ()))
+        observed = _quality_tokens(" ".join(getattr(word, "text", "") for word in words))
+        if not expected or not any(observed[offset:offset + len(expected)] == expected for offset in range(len(observed) - len(expected) + 1)):
+            continue
+        evidence: list[object] = []
+        for offset in range(len(observed) - len(expected) + 1):
+            if observed[offset:offset + len(expected)] == expected:
+                token_offset = 0
+                for word in words:
+                    tokens = _quality_tokens(getattr(word, "text", ""))
+                    if token_offset + len(tokens) > offset and token_offset < offset + len(expected):
+                        evidence.append(word)
+                    token_offset += len(tokens)
+                return evidence, None
+    return [], "missing_contiguous_value_evidence" if saw_anchor else "missing_label_anchor"
+
+
 def _field_quality(text: str, record: dict[str, object]) -> dict[str, dict[str, object]]:
-    """Emit review-only raster quality signals only when geometry proves a concern."""
+    """Fail closed unless local geometry proves a label/value relationship."""
     if getattr(text, "source", None) != "raster":
         return {}
-    words = tuple(word for line in getattr(text, "lines", ()) for word in getattr(line, "words", ()))
-    if not words:
-        return {}
     quality: dict[str, dict[str, object]] = {}
-    normalized_words: dict[str, list[float]] = {}
-    for word in words:
-        for token in re.findall(r"[\wЁё]+", word.text.casefold()):
-            normalized_words.setdefault(token, []).append(float(word.confidence))
     for field, anchor in _QUALITY_ANCHORS.items():
         value = record.get(field)
         if not isinstance(value, str) or not value:
@@ -295,18 +354,14 @@ def _field_quality(text: str, record: dict[str, object]) -> dict[str, dict[str, 
         if "�" in value or "…" in value or re.search(r"(?:\.\.\.|[-/])\s*$", value):
             quality[field] = {"status": "review", "reason": "obvious_ocr_truncation"}
             continue
-        if not re.search(anchor, str(text), re.IGNORECASE):
-            quality[field] = {"status": "review", "reason": "missing_label_anchor"}
+        if not _field_value_grammar(field, value):
+            quality[field] = {"status": "review", "reason": "invalid_field_grammar"}
             continue
-        matches = [
-            confidence
-            for token in re.findall(r"[\wЁё]+", value.casefold())
-            for confidence in normalized_words.get(token, [])
-        ]
-        if not matches:
-            quality[field] = {"status": "review", "reason": "missing_geometry_evidence"}
+        evidence, failure = _contiguous_line_evidence(text, anchor, value)
+        if failure:
+            quality[field] = {"status": "review", "reason": failure}
             continue
-        confidence = round(max(0.0, min(100.0, min(matches))), 1)
+        confidence = round(max(0.0, min(100.0, min(float(word.confidence) for word in evidence))), 1)
         quality[field] = {
             "status": "actionable" if confidence >= 55.0 else "review",
             "reason": "ocr_geometry" if confidence >= 55.0 else "low_ocr_confidence",

@@ -64,6 +64,26 @@ def test_collect_retries_bad_text_layer_once_with_true_raster_at_180(monkeypatch
     assert documents[0]["ocr_source"] == "raster"
 
 
+def test_collect_retries_bad_text_layer_once_with_true_raster_at_direct_400(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "Разрешение на строительство.pdf"
+    pdf.write_bytes(b"synthetic")
+    calls: list[tuple[int, int, bool]] = []
+
+    def reader(source: Path, dpi: int, max_pages: int, *, force_ocr: bool = False):
+        calls.append((dpi, max_pages, force_ocr))
+        if not force_ocr:
+            return OCRText("Номер РНС не читается", source="text_layer"), 16
+        return OCRText(f"Номер разрешения на строительство: {NUMBER}", source="raster"), 16
+
+    monkeypatch.setattr(app, "read_ocr", reader)
+    records, documents = app.collect(tmp_path, 400, 0, pdfs=[pdf])
+
+    assert calls == [(400, 0, False), (400, 10, True)]
+    assert list(records) == [NUMBER]
+    assert documents[0]["ocr_trace"]["route"] == "text_layer_then_raster"
+    assert documents[0]["ocr_trace"]["fallback_reason"] == "identity_missing_text_layer"
+
+
 def test_collect_uses_one_bounded_400_fallback_after_an_actual_raster_miss(monkeypatch, tmp_path: Path):
     pdf = tmp_path / "Разрешение на строительство.pdf"
     pdf.write_bytes(b"synthetic")
@@ -105,3 +125,28 @@ def test_collect_classifies_only_positive_gro_ro_gpzu_as_out_of_scope(monkeypatc
     assert "error" not in by_file[gro]
     assert by_file[permit]["outcome"] == "unidentified_permit"
     assert by_file[garbled]["outcome"] == "unidentified_permit"
+
+
+def test_collect_skips_ocr_only_for_strong_out_of_scope_filename(monkeypatch, tmp_path: Path):
+    gro = tmp_path / "ГПЗУ.pdf"
+    gro.write_bytes(b"synthetic")
+    monkeypatch.setattr(app, "read_ocr", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("OCR must be skipped")))
+
+    records, documents = app.collect(tmp_path, 180, 0, pdfs=[gro])
+
+    assert records == {}
+    assert documents[0]["outcome"] == "out_of_scope"
+    assert documents[0]["ocr_trace"]["route"] == "preclassified_title"
+    assert documents[0]["ocr_trace"]["tesseract_calls"] == 0
+
+
+def test_permit_body_reference_to_gpzu_never_preclassifies_it(monkeypatch, tmp_path: Path):
+    permit = tmp_path / "Разрешение на строительство.pdf"
+    permit.write_bytes(b"synthetic")
+    text = OCRText("Разрешение на строительство без номера\nСм. градостроительный план земельного участка", source="text_layer")
+    monkeypatch.setattr(app, "read_ocr", lambda *args, **kwargs: (text, 1))
+
+    records, documents = app.collect(tmp_path, 400, 0, pdfs=[permit])
+
+    assert records == {}
+    assert documents[0]["outcome"] == "unidentified_permit"

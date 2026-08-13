@@ -27,12 +27,14 @@ try:
     from rns_import_server.row_edit import publish_manual_edit, publish_proposal
     from rns_import_server.files import discover_pdfs
     from rns_import_server.runtime import runtime_status
+    from rns_import_server.app import safe_report_projection
 except ModuleNotFoundError:
     from audit import atomic_json, sha256
     from workbook import EDITABLE_FIELDS, editable_field_values
     from row_edit import publish_manual_edit, publish_proposal
     from files import discover_pdfs
     from runtime import runtime_status
+    from app import safe_report_projection
 
 Runner = Callable[..., dict]
 MAX_BODY = 64 * 1024
@@ -374,7 +376,7 @@ class JobManager:
             report = target.with_name(f"{target.stem} — отчет PropExtract.json")
             report_error = None
             try:
-                atomic_json(report, result)
+                atomic_json(report, safe_report_projection(result))
             except Exception as error:  # Workbook is already safely published and backed up.
                 report_error = str(error)
             documents = result.get("documents", [])

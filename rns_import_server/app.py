@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import ntpath
 import re
 import sys
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -44,9 +46,48 @@ FIELD_LABELS = {
 }
 IDENTITY_RETRY_DPI = 400
 IDENTITY_RETRY_MAX_PAGES = 10
+OCR_TRACE_VERSION = 1
+_TRACE_TIMING_STAGES = ("page_count", "text_layer", "render", "tesseract", "total")
 _PERMIT_BASENAME = re.compile(r"(?<![А-Яа-яЁё])разреш[её]н[А-Яа-яЁё-]*", re.IGNORECASE)
+_PERMIT_MARKER = re.compile(r"(?<![А-Яа-яЁё])рнс(?![А-Яа-яЁё])", re.IGNORECASE)
 _PERMIT_TEXT = re.compile(r"разрешени\w*\s+на\s+строительств\w*|номер\s+разрешения\s+на\s+строительств\w*", re.IGNORECASE)
 _OUT_OF_SCOPE_TEXT = re.compile(r"\b(?:гро|ро|гпзу)\b|градостроительн\w*\s+план", re.IGNORECASE)
+_OUT_OF_SCOPE_TITLE = re.compile(r"^\s*(?:(?:гро|ро|гпзу)\b|градостроительн\w*\s+план)", re.IGNORECASE)
+_OUT_OF_SCOPE_BASENAME = re.compile(
+    r"^\s*(?:\d+(?:[._-]\d+)*[.)_-]?\s*)?"
+    r"(?:(?:гро|ро|гпзу)\b|градостроительн\w*\s+план)",
+    re.IGNORECASE,
+)
+_QUOTED_LOCAL_PATH = re.compile(
+    r"(?P<quote>['\"])(?P<path>(?:[A-Z]:[\\/]|\\\\[^\\/\r\n'\"]+[\\/][^\\/\r\n'\"]+|/)"
+    r"[^'\"\r\n]*)(?P=quote)",
+    re.IGNORECASE,
+)
+_UNQUOTED_POSIX_PATH_WITH_SPACES = re.compile(
+    r"(?<![:\w])/(?:[^/\s:'\"<>|]+/)+(?:[^\s,;:'\"<>|]+(?:\s+[^\s,;:'\"<>|]+)*/)*"
+    r"(?:[^\s,;:'\"<>|]+)?"
+)
+_WINDOWS_PATH_IN_TEXT = re.compile(
+    r"(?i)(?<![0-9A-ZА-ЯЁ])(?:[A-Z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+[\\/])"
+    r"(?:[^\\/:*?\"<>|'\r\n]+[\\/])*[^\\/:*?\"<>|'\r\n]+"
+)
+_POSIX_PATH_IN_TEXT = re.compile(r"(?<![:\w])/(?:[^/\s:'\"<>|]+/)*[^/\s:'\"<>|]+")
+_REPORT_OMITTED_KEYS = {
+    "authorization",
+    "capability",
+    "captured_text",
+    "ocr_output",
+    "ocr_text",
+    "password",
+    "raw_ocr_text",
+    "raw_text",
+    "secret",
+    "stderr",
+    "stdout",
+    "text",
+    "token",
+}
+_REPORT_DIAGNOSTIC_KEYS = {"error", "technical_error", "message"}
 ProgressCallback = Callable[[int, str, str | None], None]
 
 
@@ -171,12 +212,32 @@ def _finalize_warnings(merged: dict, records: list[dict]) -> None:
     merged["warnings"] = warnings
 
 
+def _document_title(text: str) -> str:
+    """Use only the opening title block; later body mentions are not type evidence."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(lines[:3])[:600]
+
+
 def _is_permit_like(pdf: Path, text: str) -> bool:
-    return _PERMIT_BASENAME.search(pdf.stem) is not None or _PERMIT_TEXT.search(text) is not None
+    if _OUT_OF_SCOPE_BASENAME.search(pdf.stem.replace("_", " ")):
+        return False
+    return (
+        _PERMIT_BASENAME.search(pdf.stem) is not None
+        or _PERMIT_MARKER.search(pdf.stem) is not None
+        or bool(canonical_rns_identities(pdf.stem))
+        or _PERMIT_TEXT.search(_document_title(text)) is not None
+    )
 
 
-def _should_retry_identity(pdf: Path, dpi: int, text: str = "") -> bool:
-    return dpi < IDENTITY_RETRY_DPI and _is_permit_like(pdf, text)
+def _is_strong_out_of_scope(pdf: Path, text: str) -> bool:
+    return (
+        _OUT_OF_SCOPE_BASENAME.search(pdf.stem.replace("_", " ")) is not None
+        or _OUT_OF_SCOPE_TITLE.search(_document_title(text)) is not None
+    )
+
+
+def _should_retry_identity(pdf: Path, text: str = "") -> bool:
+    return _is_permit_like(pdf, text)
 
 
 def _read_supports_force_ocr() -> bool:
@@ -197,9 +258,191 @@ def _forced_raster_read(pdf: Path, dpi: int, max_pages: int):
 def _document_outcome(pdf: Path, text: str, record: dict | None) -> str:
     if record and record.get("number"):
         return "processed_rns"
-    if _OUT_OF_SCOPE_TEXT.search(f"{pdf.stem}\n{text}"):
+    if _is_permit_like(pdf, text):
+        return "unidentified_permit"
+    # A context document may be skipped only when its own filename/title says
+    # so. A later-body reference is not evidence of a document type.
+    if _is_strong_out_of_scope(pdf, text):
         return "out_of_scope"
     return "unidentified_permit"
+
+
+def _trace_for_read(text: object, pages: int, dpi: int) -> dict[str, object]:
+    """Normalize product and legacy-double OCR metadata to one public schema."""
+    source = getattr(text, "source", "raster")
+    raw = getattr(text, "trace", {})
+    raw = raw if isinstance(raw, dict) else {}
+    timings = raw.get("timings_ms", {})
+    timings = timings if isinstance(timings, dict) else {}
+    calls = raw.get("tesseract_calls", 0 if source == "text_layer" else 0)
+    try:
+        calls = max(0, int(calls))
+    except (TypeError, ValueError):
+        calls = 0
+    return _with_trace_compatibility_aliases({
+        "ocr_trace_version": OCR_TRACE_VERSION,
+        "route": source if source in {"text_layer", "raster"} else "unknown",
+        "requested_dpi": int(raw.get("requested_dpi", dpi)),
+        "effective_dpi": int(raw.get("effective_dpi", dpi)),
+        "total_pages": max(0, int(raw.get("total_pages", pages))),
+        "processed_pages": max(0, int(raw.get("processed_pages", pages))),
+        "tesseract_calls": calls,
+        "tesseract_started": bool(raw.get("tesseract_started", calls)),
+        "fallback_reason": raw.get("fallback_reason") if isinstance(raw.get("fallback_reason"), str) else None,
+        "timings_ms": {
+            stage: max(0, int(timings.get(stage, 0)))
+            for stage in _TRACE_TIMING_STAGES
+        },
+    })
+
+
+def _with_trace_compatibility_aliases(trace: dict[str, object]) -> dict[str, object]:
+    """Keep the Windows tester's compact trace fields beside richer schema."""
+    trace.update(
+        dpi=int(trace["effective_dpi"]),
+        pages=int(trace["processed_pages"]),
+        ocr_calls=max(0, int(trace["tesseract_calls"])),
+    )
+    return trace
+
+
+def _failure_trace(dpi: int, *, reason: str, elapsed_ms: int = 0) -> dict[str, object]:
+    """Describe a failed read without inventing native-tool progress."""
+    return _with_trace_compatibility_aliases({
+        "ocr_trace_version": OCR_TRACE_VERSION,
+        "route": "failed",
+        "requested_dpi": dpi,
+        "effective_dpi": dpi,
+        "total_pages": 0,
+        "processed_pages": 0,
+        "tesseract_calls": 0,
+        "tesseract_started": False,
+        "fallback_reason": reason,
+        "timings_ms": {
+            stage: (max(0, int(elapsed_ms)) if stage == "total" else 0)
+            for stage in _TRACE_TIMING_STAGES
+        },
+    })
+
+
+def _combine_retry_trace(initial: dict[str, object], retry: dict[str, object], reason: str) -> dict[str, object]:
+    return _with_trace_compatibility_aliases({
+        "ocr_trace_version": OCR_TRACE_VERSION,
+        "route": (
+            f"{initial['route']}_then_{retry['route']}"
+            if initial["route"] != retry["route"]
+            else initial["route"]
+        ),
+        "requested_dpi": initial["requested_dpi"],
+        "effective_dpi": retry["effective_dpi"],
+        "total_pages": retry["total_pages"],
+        "processed_pages": retry["processed_pages"],
+        "tesseract_calls": int(initial["tesseract_calls"]) + int(retry["tesseract_calls"]),
+        "tesseract_started": bool(initial["tesseract_started"] or retry["tesseract_started"]),
+        "fallback_reason": reason,
+        "timings_ms": {
+            stage: int(initial["timings_ms"][stage]) + int(retry["timings_ms"][stage])
+            for stage in _TRACE_TIMING_STAGES
+        },
+    })
+
+
+def _aggregate_ocr_traces(documents: list[dict]) -> dict[str, object]:
+    traces = [item.get("ocr_trace") for item in documents if isinstance(item.get("ocr_trace"), dict)]
+    return {
+        "ocr_trace_version": OCR_TRACE_VERSION,
+        "input_document_count": len(documents),
+        "document_count": len(traces),
+        "untraced_document_count": len(documents) - len(traces),
+        "failed_document_count": sum(1 for item in documents if item.get("outcome") == "processing_failed"),
+        "route_counts": {
+            route: sum(1 for trace in traces if trace.get("route") == route)
+            for route in sorted({str(trace.get("route")) for trace in traces})
+        },
+        "total_pages": sum(int(trace["total_pages"]) for trace in traces),
+        "processed_pages": sum(int(trace["processed_pages"]) for trace in traces),
+        "tesseract_calls": sum(int(trace["tesseract_calls"]) for trace in traces),
+        "tesseract_started_count": sum(1 for trace in traces if trace.get("tesseract_started")),
+        "timings_ms": {
+            stage: sum(int(trace["timings_ms"][stage]) for trace in traces)
+            for stage in _TRACE_TIMING_STAGES
+        },
+    }
+
+
+def _preclassified_out_of_scope_document(pdf: Path, dpi: int) -> dict[str, object]:
+    """Skip OCR only for an unambiguous filename-level context document."""
+    return {
+        "file": str(pdf),
+        "pages": 0,
+        "ocr_characters": 0,
+        "number": None,
+        "extracted": {},
+        "warnings": ["out_of_scope"],
+        "outcome": "out_of_scope",
+        "ocr_trace": _with_trace_compatibility_aliases({
+            "ocr_trace_version": OCR_TRACE_VERSION,
+            "route": "preclassified_title",
+            "requested_dpi": dpi,
+            "effective_dpi": dpi,
+            "total_pages": 0,
+            "processed_pages": 0,
+            "tesseract_calls": 0,
+            "tesseract_started": False,
+            "fallback_reason": "strong_out_of_scope_filename",
+            "timings_ms": {stage: 0 for stage in _TRACE_TIMING_STAGES},
+        }),
+    }
+
+
+def _is_absolute_local_path(value: str) -> bool:
+    return Path(value).is_absolute() or ntpath.isabs(value)
+
+
+def _safe_report_string(value: str, key: str | None = None) -> str:
+    if _is_absolute_local_path(value):
+        normalized = value.replace("/", "\\")
+        if re.fullmatch(r"[A-Za-z]:\\*|\\\\[^\\]+\\[^\\]+\\*", normalized):
+            return "[локальный путь]"
+        return ntpath.basename(normalized.rstrip("\\")) or "[локальный путь]"
+    if (key or "").casefold() in _REPORT_DIAGNOSTIC_KEYS:
+        value = _QUOTED_LOCAL_PATH.sub(
+            lambda match: f"{match.group('quote')}[локальный путь]{match.group('quote')}",
+            value,
+        )
+        value = _UNQUOTED_POSIX_PATH_WITH_SPACES.sub("[локальный путь]", value)
+        value = _WINDOWS_PATH_IN_TEXT.sub("[локальный путь]", value)
+        value = _POSIX_PATH_IN_TEXT.sub("[локальный путь]", value)
+    return value
+
+
+def safe_report_projection(value: object, key: str | None = None) -> object:
+    """Return a disk-safe copy without OCR content or absolute local paths.
+
+    The caller's in-memory result remains untouched for server-held capability
+    actions. This is deliberately recursive because records nest source maps.
+    """
+    normalized_key = (key or "").casefold()
+    if normalized_key in _REPORT_OMITTED_KEYS:
+        return None
+    if isinstance(value, dict):
+        projected: dict[str, object] = {}
+        for index, (item_key, item_value) in enumerate(value.items(), start=1):
+            original_key = str(item_key)
+            if original_key.casefold() in _REPORT_OMITTED_KEYS:
+                continue
+            safe_key = _safe_report_string(original_key, "message")
+            if safe_key in projected:
+                safe_key = f"{safe_key} ({index})"
+            projected[safe_key] = safe_report_projection(item_value, original_key)
+        return projected
+    if isinstance(value, list):
+        return [safe_report_projection(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [safe_report_projection(item, key) for item in value]
+    if isinstance(value, str):
+        return _safe_report_string(value, key)
+    return value
 
 
 def _identity_retry_page_limit(max_pages: int, total_pages: int) -> int:
@@ -216,6 +459,11 @@ def _merge_group(number: str, versions: list[dict], documents: list[dict]) -> di
         return None
     selected = max(source_records, key=_record_sort_key)
     merged = dict(selected)
+    merged["ocr_traces"] = [
+        dict(record["ocr_trace"])
+        for record in versions
+        if isinstance(record.get("ocr_trace"), dict)
+    ]
     merged["field_provenance"] = dict(selected.get("field_provenance", {}))
     merged["field_sources"] = {field: str(selected["pdf"]) for field in EVIDENCE_FIELDS if selected.get(field) is not None}
     merged["merge_issues"] = list(selected.get("merge_issues", []))
@@ -245,7 +493,16 @@ def _merge_group(number: str, versions: list[dict], documents: list[dict]) -> di
         # Explicit canonical ID is supplied by the parser; evidence must be
         # material before a directive can enrich a permit.
         if directive.get("number") != number or _evidence_count(directive) == 0:
-            documents.append({"file": directive["pdf"], "pages": directive.get("pages"), "ocr_characters": None, "number": number, "extracted": {}, "warnings": ["unlinked_directive"], "error": "Изменение/продление не связано: недостаточно подтверждённых данных."})
+            diagnostic = next(
+                (item for item in documents if item.get("file") == directive.get("pdf")),
+                None,
+            )
+            if diagnostic is not None:
+                diagnostic["warnings"] = ["unlinked_directive"]
+                diagnostic["error"] = "Изменение/продление не связано: недостаточно подтверждённых данных."
+            else:
+                # Direct unit callers may not supply the collect-time document.
+                documents.append({"file": directive["pdf"], "pages": directive.get("pages"), "ocr_characters": None, "number": number, "extracted": {}, "warnings": ["unlinked_directive"], "error": "Изменение/продление не связано: недостаточно подтверждённых данных.", "ocr_trace": directive.get("ocr_trace")})
             continue
         linked_directives.append(directive)
     merged["source_files"] = sorted(
@@ -288,12 +545,28 @@ def collect(
     for index, pdf in enumerate(pdfs, start=1):
         if progress:
             progress(8 + int((index - 1) / len(pdfs) * 68), "Распознаём PDF", pdf.name)
+        # A permit basename may legitimately mention GPZU/ГРО/РО. Only a
+        # context-document filename without stronger permit evidence may skip
+        # OCR before its title/body can be classified.
+        if not _is_permit_like(pdf, "") and _is_strong_out_of_scope(pdf, ""):
+            documents.append(_preclassified_out_of_scope_document(pdf, dpi))
+            if progress:
+                progress(8 + int(index / len(pdfs) * 68), "PDF обработан", pdf.name)
+            continue
         try:
+            processing_started = time.monotonic()
+            trace: dict[str, object] | None = None
             text, pages = read_ocr(pdf, dpi, max_pages)
+            trace = _trace_for_read(text, pages, dpi)
             extracted = extract(pdf, text)
             retry_error: str | None = None
             text_source = getattr(text, "source", None)
-            if extracted is None and not canonical_rns_identities(text) and _should_retry_identity(pdf, dpi, text):
+            if (
+                extracted is None
+                and not canonical_rns_identities(text)
+                and _should_retry_identity(pdf, text)
+                and not (text_source == "raster" and dpi >= IDENTITY_RETRY_DPI)
+            ):
                 try:
                     # A failed text layer gets one real raster pass at the current
                     # 180-DPI default. A real raster miss can make one bounded
@@ -306,11 +579,15 @@ def collect(
                     retry_text, retry_pages = _forced_raster_read(
                         pdf, retry_dpi, _identity_retry_page_limit(max_pages, pages)
                     )
+                    retry_trace = _trace_for_read(retry_text, retry_pages, retry_dpi)
+                    retry_reason = "identity_missing_raster" if text_source == "raster" else "identity_missing_text_layer"
+                    trace = _combine_retry_trace(trace, retry_trace, retry_reason)
                     retry_extracted = extract(pdf, retry_text)
                     if retry_extracted is not None:
                         text, pages, extracted = retry_text, retry_pages, retry_extracted
                 except Exception as error:
                     retry_error = str(error) or type(error).__name__
+                    trace["fallback_reason"] = "identity_retry_failed"
             # Dormant unless an owner-approved future extractor emits candidates.
             # Without candidates/configuration this preserves prior behavior.
             record = map_extracted_record(extracted) if extracted else None
@@ -322,12 +599,18 @@ def collect(
                 "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {},
                 "warnings": record.get("warnings", []) if record else ["unidentified"],
                 "outcome": _document_outcome(pdf, text, record),
+                "ocr_trace": trace,
             }
+            trace["timings_ms"]["total"] = max(
+                int(trace["timings_ms"]["total"]),
+                int((time.monotonic() - processing_started) * 1000),
+            )
             ocr_source = getattr(text, "source", None)
             if ocr_source in {"text_layer", "raster"}:
                 document["ocr_source"] = ocr_source
             if record and record.get("number"):
                 record["pages"] = pages
+                record["ocr_trace"] = trace
                 if ocr_source in {"text_layer", "raster"}:
                     record["ocr_source"] = ocr_source
                 groups.setdefault(str(record["number"]), []).append(record)
@@ -348,7 +631,18 @@ def collect(
                 document["error"] = "Не найден номер РНС"
             documents.append(document)
         except Exception as error:
-            documents.append({"file": str(pdf), "pages": None, "ocr_characters": 0, "number": None, "extracted": {}, "warnings": ["processing_failed"], "outcome": "processing_failed", "error": str(error) or type(error).__name__})
+            elapsed_ms = int((time.monotonic() - processing_started) * 1000) if "processing_started" in locals() else 0
+            failed_trace = trace if "trace" in locals() and isinstance(trace, dict) else _failure_trace(
+                dpi,
+                reason="processing_failed",
+                elapsed_ms=elapsed_ms,
+            )
+            failed_trace["fallback_reason"] = "processing_failed"
+            failed_trace["timings_ms"]["total"] = max(
+                int(failed_trace["timings_ms"]["total"]),
+                elapsed_ms,
+            )
+            documents.append({"file": str(pdf), "pages": None, "ocr_characters": 0, "number": None, "extracted": {}, "warnings": ["processing_failed"], "outcome": "processing_failed", "error": str(error) or type(error).__name__, "ocr_trace": failed_trace})
         if progress:
             progress(8 + int(index / len(pdfs) * 68), "PDF обработан", pdf.name)
     chosen = {number: record for number, versions in groups.items() if (record := _merge_group(number, versions, documents)) is not None}
@@ -394,10 +688,10 @@ def run(
         output.unlink(missing_ok=True)
         raise RuntimeError("source_inputs_changed")
     selected = {
-        number: {key: record.get(key) for key in ("filename", "pdf", "issue", "end", "changed", "warnings", "stage", "object", "issuer", "builder", "region", "district", "developer", "source_files", "field_sources", "field_provenance", "field_quality", "ocr_source", "merge_issues")}
+        number: {key: record.get(key) for key in ("filename", "pdf", "issue", "end", "changed", "warnings", "stage", "object", "issuer", "builder", "region", "district", "developer", "source_files", "field_sources", "field_provenance", "field_quality", "ocr_source", "ocr_trace", "ocr_traces", "merge_issues")}
         for number, record in records.items()
     }
-    result.update({"contract_version": "rns-import-2", "input_hashes": before, "input_digest": digest(before), "documents": documents, "logical_records": sorted(records), "selected_records": selected, "output": str(output)})
+    result.update({"contract_version": "rns-import-2", "input_hashes": before, "input_digest": digest(before), "documents": documents, "ocr_trace_summary": _aggregate_ocr_traces(documents), "logical_records": sorted(records), "selected_records": selected, "output": str(output)})
     if progress:
         progress(97, "Файл подготовлен", None)
     return result
@@ -433,7 +727,7 @@ def main() -> None:
     if report.resolve() in {options.xlsx.resolve(), options.output.resolve()}:
         parser.error("report must not collide with input or output")
     result = run(options.pdf_dir, options.xlsx, options.output, options.dpi, options.max_pages)
-    atomic_json(report, result)
+    atomic_json(report, safe_report_projection(result))
     print(json.dumps({"output": str(options.output), "report": str(report), "records": len(result["logical_records"]), "conflicts": len(result["conflicts"])}))
 
 

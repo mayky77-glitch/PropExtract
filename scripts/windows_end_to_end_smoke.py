@@ -262,6 +262,7 @@ def _verify_field_contracts() -> str:
         sys.path.insert(0, str(PROJECT_ROOT))
     from rns_import_server import app
     from rns_import_server.normalization import field_comparison_equal
+    from rns_import_server.ocr import OCRLine, OCRText, OCRWord
     from rns_import_server.rns_adapter import extract, norm
     from rns_import_server.workbook import _change_outcome
 
@@ -341,6 +342,181 @@ def _verify_field_contracts() -> str:
     )
     if quote_equal is not True or prefix_equal is not False:
         raise RuntimeError("field comparison lost quote or meaningful-prefix distinction")
+    if not field_comparison_equal(
+        "Наименование объекта",
+        "ПС Восточная 110 кВ, мощность 16 МВА",
+        "ПС Восточная 110 KB, мощность 16МВА",
+    ):
+        raise RuntimeError("numeric engineering-unit comparison is not stable")
+
+    garbage_value = "а Иркутской области разрешения"
+    garbage_lines = (
+        OCRLine(
+            1,
+            1000,
+            1400,
+            tuple(
+                OCRWord(token, 20 + index * 45, 30, 35, 16, 96.1)
+                for index, token in enumerate(
+                    f"Номер разрешения на строительство: {number}".split()
+                )
+            ),
+        ),
+        OCRLine(
+            1,
+            1000,
+            1400,
+            tuple(
+                OCRWord(token, 20 + index * 45, 60, 35, 16, 96.1)
+                for index, token in enumerate(f"Муниципальный район: {garbage_value}".split())
+            ),
+        ),
+    )
+    garbage = extract(
+        Path("synthetic.pdf"),
+        OCRText(
+            f"Номер разрешения на строительство: {number}\n"
+            f"Муниципальный район: {garbage_value}",
+            garbage_lines,
+            source="raster",
+        ),
+    )
+    if (
+        garbage is None
+        or garbage.get("field_quality", {}).get("district", {}).get("status") != "review"
+    ):
+        raise RuntimeError("garbled high-confidence district is not review-only")
+
+    before_label_line = OCRLine(
+        1,
+        1000,
+        1400,
+        tuple(
+            OCRWord(token, 20 + index * 45, 60, 35, 16, 96.1)
+            for index, token in enumerate(
+                "Жигаловский район справочно Муниципальный район:".split()
+            )
+        ),
+    )
+    before_label = extract(
+        Path("synthetic.pdf"),
+        OCRText(
+            f"Номер разрешения на строительство: {number}\n"
+            "Жигаловский район справочно Муниципальный район:",
+            (garbage_lines[0], before_label_line),
+            source="raster",
+        ),
+    )
+    if (
+        before_label is None
+        or before_label.get("field_quality", {}).get("district", {}).get("status") != "review"
+    ):
+        raise RuntimeError("text before a field label became actionable")
+
+    trace = app._trace_for_read(
+        OCRText(
+            "no identity",
+            source="text_layer",
+            trace={
+                "effective_dpi": 400,
+                "processed_pages": 3,
+                "total_pages": 3,
+                "tesseract_calls": 0,
+            },
+        ),
+        3,
+        400,
+    )
+    if not all(key in trace for key in ("route", "tesseract_started", "dpi", "pages", "ocr_calls", "fallback_reason")):
+        raise RuntimeError("Windows OCR trace compatibility fields are absent")
+    if trace["dpi"] != 400 or trace["pages"] != 3 or trace["ocr_calls"] != 0:
+        raise RuntimeError("Windows OCR trace compatibility fields are inconsistent")
+
+    with tempfile.TemporaryDirectory(prefix="propextract-retry-contract-") as retry_name:
+        retry_root = Path(retry_name)
+        permit_pdf = retry_root / "Разрешение по ГПЗУ.pdf"
+        permit_pdf.write_bytes(b"synthetic")
+        calls: list[tuple[int, int, bool]] = []
+
+        def bad_layer_then_raster(
+            source: Path,
+            dpi: int,
+            pages: int,
+            *,
+            force_ocr: bool = False,
+        ) -> tuple[OCRText, int]:
+            calls.append((dpi, pages, force_ocr))
+            if force_ocr:
+                return OCRText(
+                    f"Номер разрешения на строительство: {number}",
+                    source="raster",
+                ), 1
+            return OCRText("неисправный текстовый слой", source="text_layer"), 1
+
+        original_read_ocr = app.read_ocr
+        try:
+            app.read_ocr = bad_layer_then_raster
+            recovered, documents = app.collect(retry_root, 400, 0, pdfs=[permit_pdf])
+        finally:
+            app.read_ocr = original_read_ocr
+        if list(recovered) != [number] or calls != [(400, 0, False), (400, 1, True)]:
+            raise RuntimeError("direct-400 bad text layer did not get one bounded forced-raster retry")
+        if documents[0].get("outcome") != "processed_rns":
+            raise RuntimeError("permit evidence did not outrank its GPZU reference")
+
+        calls.clear()
+
+        def raster_400_miss(
+            source: Path,
+            dpi: int,
+            pages: int,
+            *,
+            force_ocr: bool = False,
+        ) -> tuple[OCRText, int]:
+            calls.append((dpi, pages, force_ocr))
+            return OCRText("нет номера", source="raster"), 1
+
+        try:
+            app.read_ocr = raster_400_miss
+            app.collect(retry_root, 400, 0, pdfs=[permit_pdf])
+        finally:
+            app.read_ocr = original_read_ocr
+        if calls != [(400, 0, False)]:
+            raise RuntimeError("an actual 400-DPI raster miss was processed twice")
+
+        context_pdf = retry_root / f"ГПЗУ для РНС {number}.pdf"
+        context_pdf.write_bytes(b"synthetic")
+        calls.clear()
+        try:
+            app.read_ocr = bad_layer_then_raster
+            context_records, context_documents = app.collect(
+                retry_root, 400, 0, pdfs=[context_pdf]
+            )
+        finally:
+            app.read_ocr = original_read_ocr
+        if calls or context_records or context_documents[0].get("outcome") != "out_of_scope":
+            raise RuntimeError("leading context document type lost to a later RNS reference")
+
+    projected = app.safe_report_projection(
+        {
+            "documents": [
+                {
+                    "file": r"C:\Private Folder\permit.pdf",
+                    "ocr_text": "private OCR text",
+                    "technical_error": "Failed /Users/operator/Secret Project/permit.pdf",
+                    "ocr_trace": trace,
+                }
+            ],
+            "capability": "private capability",
+        }
+    )
+    if (
+        projected["documents"][0].get("file") != "permit.pdf"
+        or "ocr_text" in projected["documents"][0]
+        or "capability" in projected
+        or "Secret Project" in projected["documents"][0].get("technical_error", "")
+    ):
+        raise RuntimeError("disk report projection retained private OCR/path data")
 
     labeled = (
         f"Номер разрешения на строительство: {number}\n"
@@ -386,7 +562,7 @@ def _verify_field_contracts() -> str:
     ):
         raise RuntimeError("district cleanup does not preserve intended boundaries")
 
-    return "merge,comparison,identity,district,review"
+    return "merge,comparison,identity,district,quality,ocr-retry,ocr-trace,report-privacy,review"
 
 
 def _verify_admin_edit_contracts() -> str:

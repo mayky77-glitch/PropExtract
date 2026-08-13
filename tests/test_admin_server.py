@@ -407,6 +407,36 @@ def test_job_with_only_already_present_changes_keeps_workbook_unchanged(tmp_path
     assert finished["backup"] is None
 
 
+def test_disk_report_redacts_source_paths_while_server_retains_capability_path(tmp_path: Path):
+    pdf_dir = tmp_path / "private-pdfs"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        output.write_bytes(b"updated")
+        return {
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf), "ocr_text": "private OCR text"}],
+            "logical_records": ["00-00-00-0000"],
+            "selected_records": {"00-00-00-0000": {"pdf": str(pdf), "field_sources": {"object": str(pdf)}}},
+            "changes": [{"new": False, "row": 42, "issues": [], "outcome": "added", "document": pdf.name}],
+            "conflicts": [],
+        }
+
+    manager = JobManager(runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    report_data = json.loads(Path(str(finished["report"])).read_text(encoding="utf-8"))
+
+    assert finished["status"] == "done"
+    assert str(pdf) not in json.dumps(report_data)
+    assert "private OCR text" not in json.dumps(report_data)
+    internal = finished["documents_internal"]
+    assert next(iter(internal.values()))["path"] == pdf
+
+
 def test_partial_pdf_failure_is_reported_without_stopping_valid_records(tmp_path: Path):
     pdf_dir = tmp_path / "pdf"
     pdf_dir.mkdir()

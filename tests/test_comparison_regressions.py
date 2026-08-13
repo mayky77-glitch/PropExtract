@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from rns_import_server.audit import sha256
 from rns_import_server.workbook import SHEET, apply, transfer_issue
@@ -75,6 +75,37 @@ def test_object_comparison_ignores_only_generic_bundle_preamble(tmp_path: Path):
     assert transfer_issue("Наименование объекта", object_tail, pdf_object) is None
     assert result["changes"][0]["outcome"] == "already_present"
     assert result["conflicts"] == []
+
+
+def test_numeric_engineering_unit_presentation_differences_are_comparison_only(tmp_path: Path):
+    existing = "ПС Восточная 110 кВ, мощность 16 МВА"
+    proposed = "ПС Восточная 110 KB, мощность 16МВА"
+    source, output, pdf = tmp_path / "register.xlsx", tmp_path / "output.xlsx", tmp_path / "permit.pdf"
+    pdf.write_bytes(b"pdf")
+    _existing_workbook(source, "Наименование объекта", existing)
+
+    result = apply({NUMBER: _record(pdf, object=proposed)}, source, output, sha256(source))
+
+    assert transfer_issue("Наименование объекта", existing, proposed) is None
+    assert result["changes"][0]["outcome"] == "already_present"
+    assert load_workbook(output)[SHEET]["D4"].value == existing
+
+
+@pytest.mark.parametrize(
+    "proposed",
+    (
+        "ПС Восточная 110 KB, мощность 17МВА",
+        "ПС Восточная 110 kB, мощность 16 МВА. Этап 2",
+        "ПС Восточная 110 кВ, газотурбинная мощность 16 МВА",
+    ),
+)
+def test_engineering_unit_normalization_keeps_semantic_object_conflicts(tmp_path: Path, proposed: str):
+    existing = "ПС Восточная 110 кВ, газозапорная мощность 16 МВА. Этап 1"
+    result = _apply_existing(tmp_path, "Наименование объекта", existing, object=proposed)
+
+    assert result["changes"][0]["outcome"] == "review"
+    assert result["conflicts"][0]["existing"] == existing
+    assert result["conflicts"][0]["pdf"] == proposed
 
 
 def test_object_comparison_preserves_significant_pre_anchor_substation(tmp_path: Path):

@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 
 from rns_import_server import app
 from rns_import_server.audit import sha256
+from rns_import_server.ocr import OCRText
 from rns_import_server.workbook import SHEET, apply
 
 
@@ -293,9 +294,7 @@ def test_collect_retries_unidentified_permit_at_400_dpi_with_bounded_pages(
 @pytest.mark.parametrize(
     ("filename", "dpi", "text"),
     [
-        ("ГРО.pdf", 180, "нет номера"),
         ("unrelated.pdf", 180, "нет номера"),
-        ("Разрешение.pdf", 400, "нет номера"),
         ("Разрешение.pdf", 180, f"{NUMBER}; RU-87654321-09-2026"),
         ("Разрешение.pdf", 180, NUMBER),
     ],
@@ -316,6 +315,43 @@ def test_collect_does_not_retry_unrelated_400_ambiguous_or_already_extracted(
     app.collect(tmp_path, dpi, 0, pdfs=[pdf])
 
     assert calls == [(dpi, 0)]
+
+
+def test_collect_does_not_retry_an_actual_400_dpi_raster_miss(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "Разрешение.pdf"
+    pdf.write_bytes(b"pdf")
+    calls: list[tuple[int, int, bool]] = []
+
+    def read(source: Path, dpi: int, pages: int, *, force_ocr: bool = False):
+        calls.append((dpi, pages, force_ocr))
+        return OCRText("нет номера", source="raster"), 3
+
+    monkeypatch.setattr(app, "read_ocr", read)
+    records, documents = app.collect(tmp_path, 400, 0, pdfs=[pdf])
+
+    assert calls == [(400, 0, False)]
+    assert records == {}
+    assert documents[0]["outcome"] == "unidentified_permit"
+    assert "technical_error" not in documents[0]
+
+
+def test_collect_does_not_duplicate_unlinked_directive_document(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / f"Изменение РНС {NUMBER}.pdf"
+    pdf.write_bytes(b"pdf")
+    monkeypatch.setattr(
+        app,
+        "read_ocr",
+        lambda *_args, **_kwargs: (OCRText(f"Номер разрешения на строительство: {NUMBER}", source="text_layer"), 1),
+    )
+
+    records, documents = app.collect(tmp_path, 180, 0, pdfs=[pdf])
+    aggregate = app._aggregate_ocr_traces(documents)
+
+    assert list(records) == [NUMBER]
+    assert len(documents) == 1
+    assert documents[0]["warnings"] == ["unlinked_directive"]
+    assert aggregate["input_document_count"] == aggregate["document_count"] == 1
+    assert aggregate["untraced_document_count"] == 0
 
 
 def test_collect_retry_failure_keeps_bounded_russian_error_and_exact_technical_detail(monkeypatch, tmp_path: Path):
