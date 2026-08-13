@@ -208,6 +208,26 @@ h1 { max-width: 920px; margin: 0 0 30px; font-family: "Aptos Display", "Segoe UI
 .row-action--primary:hover { color: var(--on-signal); background: color-mix(in srgb, var(--signal) 84%, #000); border-color: color-mix(in srgb, var(--signal) 84%, #000); }
 .row-action:focus-visible { outline: 3px solid color-mix(in srgb, var(--lake) 35%, transparent); outline-offset: 2px; }
 .row-action:disabled { color: var(--muted); background: var(--soft); border-color: var(--line); opacity: 1; cursor: default; }
+.row-edit-wrap { display: contents; }
+.row-edit-form { width: 100%; flex: 1 0 100%; display: grid; gap: 14px; margin-top: 4px; padding: 17px 0 0 16px; background: color-mix(in srgb, var(--paper) 82%, var(--canvas)); border-top: 1px solid var(--line); border-left: 3px solid var(--signal); }
+.row-edit-form[hidden] { display: none; }
+.row-edit-form[aria-busy="true"] { opacity: .76; }
+.row-edit-heading { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
+.row-edit-heading .record-label { color: var(--signal); }
+.row-edit-heading h5 { margin: 3px 0 0; font: 750 15px/1.25 "Trebuchet MS", sans-serif; }
+.row-edit-heading p { max-width: 300px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; text-align: right; }
+.row-edit-date-hint { margin: -5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.row-edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px 12px; }
+.row-edit-field { min-width: 0; display: grid; gap: 6px; color: var(--ink); font-size: 11px; font-weight: 700; }
+.row-edit-field input { width: 100%; min-width: 0; height: 38px; padding: 0 10px; color: var(--ink); background: var(--canvas); border: 1px solid var(--line); border-radius: 7px; outline: none; font-size: 12px; transition: border-color .15s ease, box-shadow .15s ease; }
+.row-edit-field input::placeholder { color: color-mix(in srgb, var(--muted) 76%, transparent); }
+.row-edit-field input:focus { border-color: var(--lake); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lake) 18%, transparent); }
+.row-edit-feedback { min-height: 16px; margin: -2px 0 0; color: var(--error); font-size: 11px; line-height: 1.45; }
+.row-edit-form[aria-busy="true"] .row-edit-feedback { color: var(--lake-strong); }
+.row-edit-actions { display: flex; justify-content: end; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row-action--edit { color: var(--lake-strong); background: color-mix(in srgb, var(--lake) 8%, var(--paper)); border-color: color-mix(in srgb, var(--lake) 36%, var(--line)); }
+.row-action--edit:hover { color: var(--paper); background: var(--lake-strong); border-color: var(--lake-strong); }
+.row-action--resolved { color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--paper)); border-color: color-mix(in srgb, var(--ok) 30%, var(--line)); cursor: default; }
 
 .help-shell { padding-top: 78px; }
 .help-title { max-width: 840px; }
@@ -299,6 +319,12 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .record-card-footer { gap: 12px; }
   .row-actions, .row-action { width: 100%; }
   .row-action { justify-content: center; }
+  .row-edit-form { padding-left: 12px; }
+  .row-edit-heading { flex-direction: column; gap: 7px; }
+  .row-edit-heading p { max-width: none; text-align: left; }
+  .row-edit-grid { grid-template-columns: 1fr; }
+  .row-edit-actions { display: grid; grid-template-columns: 1fr; }
+  .row-edit-actions .row-action { width: 100%; }
   .shutdown-card { padding: 38px 24px; }
   footer { width: calc(100% - 32px); flex-direction: column; }
 }

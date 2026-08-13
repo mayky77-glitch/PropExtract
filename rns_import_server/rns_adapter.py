@@ -242,8 +242,77 @@ def _first_date(value: str | None) -> str | None:
 
 
 def _last_date(value: str | None) -> str | None:
-    values = _DATE_RE.findall(value or "")
+    values, _ = _valid_dates(_DATE_RE.findall(value or ""))
     return max(values, key=lambda item: date(item) or datetime.min) if values else None
+
+
+def _valid_dates(values: list[str]) -> tuple[list[str], bool]:
+    """Keep impossible OCR calendar values document-local and non-authoritative."""
+    valid: list[str] = []
+    invalid = False
+    for value in values:
+        try:
+            if date(value) is not None:
+                valid.append(value)
+        except (TypeError, ValueError):
+            invalid = True
+    return valid, invalid
+
+
+_QUALITY_ANCHORS = {
+    "issue": r"дата\s+(?:выдачи\s+)?разрешения|дата\s+выдачи",
+    "end": r"срок\s+действия|\bдо\s*\d{2}\.\d{2}\.20\d{2}",
+    "changed": r"дата\s+(?:последн\w*\s*)?(?:измен\w*|внесения\s+измен\w*)|изменения",
+    "issuer": r"наименование\s+органа|орган\s+(?:выдачи|местного\s+самоуправления)",
+    "developer": r"разработчик\s+пд|проектн\w*\s+организац\w*",
+    "builder": r"застройщик",
+    "district": r"муниципальн\w*\s+район",
+    "region": r"субъект\s+рф",
+    "stage": r"этап",
+    "object": r"наименование\s+объекта|объект(?:\s+капитального\s+строительства)?",
+}
+
+
+def _field_quality(text: str, record: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Emit review-only raster quality signals only when geometry proves a concern."""
+    if getattr(text, "source", None) != "raster":
+        return {}
+    words = tuple(word for line in getattr(text, "lines", ()) for word in getattr(line, "words", ()))
+    if not words:
+        return {}
+    quality: dict[str, dict[str, object]] = {}
+    normalized_words: dict[str, list[float]] = {}
+    for word in words:
+        for token in re.findall(r"[\wЁё]+", word.text.casefold()):
+            normalized_words.setdefault(token, []).append(float(word.confidence))
+    for field, anchor in _QUALITY_ANCHORS.items():
+        value = record.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        provenance = record.get("field_provenance", {})
+        if not isinstance(provenance, dict) or provenance.get(field) != "ocr":
+            continue
+        if "�" in value or "…" in value or re.search(r"(?:\.\.\.|[-/])\s*$", value):
+            quality[field] = {"status": "review", "reason": "obvious_ocr_truncation"}
+            continue
+        if not re.search(anchor, str(text), re.IGNORECASE):
+            quality[field] = {"status": "review", "reason": "missing_label_anchor"}
+            continue
+        matches = [
+            confidence
+            for token in re.findall(r"[\wЁё]+", value.casefold())
+            for confidence in normalized_words.get(token, [])
+        ]
+        if not matches:
+            quality[field] = {"status": "review", "reason": "missing_geometry_evidence"}
+            continue
+        confidence = round(max(0.0, min(100.0, min(matches))), 1)
+        quality[field] = {
+            "status": "actionable" if confidence >= 55.0 else "review",
+            "reason": "ocr_geometry" if confidence >= 55.0 else "low_ocr_confidence",
+            "confidence": confidence,
+        }
+    return quality
 
 
 def add_months(value: str, months: int) -> str:
@@ -280,22 +349,45 @@ def extract(pdf: Path, text: str, number: str | None = None) -> dict[str, object
     issue_labels = r"дата\s+(?:выдачи\s+)?разрешения(?:\s+на\s+строительство)?|дата\s+выдачи"
     issue_block = _label_block(text, issue_labels)
     issue_dates = _label_dates(text, issue_labels)
-    issue = (issue_dates[0] if issue_dates else None) or _first_date(issue_block) or find(text, rf"1[.-]1[\s\S]{{0,120}}?:\s*\[?\s*{_DATE}")
-    if not issue:
-        issue = find(pdf.name, _DATE)
+    issue_candidates = issue_dates + _DATE_RE.findall(issue_block or "")
+    issue_fallback = find(text, rf"1[.-]1[\s\S]{{0,120}}?:\s*\[?\s*{_DATE}")
+    if issue_fallback:
+        issue_candidates.append(issue_fallback)
+    valid_issue_dates, invalid_issue = _valid_dates(issue_candidates)
+    filename_issue = find(pdf.name, _DATE)
+    valid_filename_issue, invalid_filename_issue = _valid_dates([filename_issue] if filename_issue else [])
+    invalid_issue = invalid_issue or invalid_filename_issue
+    issue = valid_issue_dates[0] if valid_issue_dates else (valid_filename_issue[0] if valid_filename_issue else None)
+    issue_from_filename = not valid_issue_dates and bool(valid_filename_issue)
     validity_labels = r"срок\s+действия(?:\s+настоящего)?\s+разрешения|срок\s+действия"
     validity_block = _label_block(text, validity_labels)
     months = re.search(r"\b(\d+)\s*месяц", validity_block or "", re.IGNORECASE)
     validity_dates = _label_dates(text, validity_labels)
     extension_end = _explicit_extension_end(pdf)
-    end = extension_end or (validity_dates[-1] if validity_dates else None) or _last_date(validity_block) or (add_months(issue, int(months.group(1))) if issue and months else find(pdf.name + "\n" + text, rf"до\s*{_DATE}"))
+    end_candidates = ([extension_end] if extension_end else []) + validity_dates + _DATE_RE.findall(validity_block or "")
+    valid_end_dates, invalid_end = _valid_dates(end_candidates)
+    # An unlabelled ``до DD.MM.YYYY`` remains a last-resort document hint. It
+    # must not outrank a scanned validity field unless the filename expressly
+    # says this is a prolongation.
+    if not valid_end_dates:
+        explicit_end = find(pdf.name + "\n" + text, rf"до\s*{_DATE}")
+        if explicit_end:
+            fallback_end_dates, fallback_invalid = _valid_dates([explicit_end])
+            valid_end_dates.extend(fallback_end_dates)
+            invalid_end = invalid_end or fallback_invalid
+    end = (
+        extension_end
+        if extension_end and extension_end in valid_end_dates
+        else (valid_end_dates[-1] if valid_end_dates else (add_months(issue, int(months.group(1))) if issue and months else None))
+    )
     changed_labels = r"дата\s+(?:последн\w*\s*)?(?:измен\w*|внесения\s+измен\w*)|изменения"
     changed_block = _label_block(text, changed_labels)
     changed_dates = _label_dates(text, changed_labels)
-    changed = max(changed_dates, key=lambda item: date(item) or datetime.min) if changed_dates else _last_date(changed_block)
-    if not changed:
-        changed_values = re.findall(rf"1\.[5-9][\s\S]{{0,120}}?:\s*{_DATE}", text, re.IGNORECASE)
-        changed = max(changed_values, key=lambda item: date(item) or datetime.min) if changed_values else None
+    changed_values = changed_dates + _DATE_RE.findall(changed_block or "") + re.findall(
+        rf"1\.[5-9][\s\S]{{0,120}}?:\s*{_DATE}", text, re.IGNORECASE
+    )
+    valid_changed_dates, invalid_changed = _valid_dates(changed_values)
+    changed = max(valid_changed_dates, key=lambda item: date(item) or datetime.min) if valid_changed_dates else None
     issuer = _label_block(text, r"наименование\s+органа(?:\s*\(организации\))?|орган\s+(?:выдачи|местного\s+самоуправления)") or one(text, r"(?:Администрация|Служба)[\s\S]{0,260}?(?:район\w*|области)")
     builder = _label_block(text, r"застройщик") or one(text, r"ПАО\s*[«\"]?Газпром[»\"]?")
     developer = _label_block(text, r"разработчик\s+пд|проектн\w*\s+организац\w*") or one(text, r"(?:ООО|Общество\s+с\s+ограниченной)[\s\S]{0,150}?Газпром\s+проектировани\S*")
@@ -319,10 +411,10 @@ def extract(pdf: Path, text: str, number: str | None = None) -> dict[str, object
             (len(content_identities) == 1 and content_identities[0] == number)
             or (len(labeled_identities) == 1 and labeled_identities[0] == number)
         ) else "filename",
-        "field_provenance": {"issue": "filename" if issue and not issue_block else "ocr"} if issue else {},
+        "field_provenance": {"issue": "filename" if issue_from_filename else "ocr"} if issue else {},
     }
     record["field_provenance"] = {key: "ocr" for key in ("end", "changed", "issuer", "developer", "builder", "district", "region", "stage", "object") if record.get(key)} | record["field_provenance"]
-    if extension_end:
+    if end == extension_end and extension_end in valid_end_dates:
         record["field_provenance"]["end"] = "filename"
     audited_fields = (
         "issue",
@@ -337,4 +429,9 @@ def extract(pdf: Path, text: str, number: str | None = None) -> dict[str, object
         "object",
     )
     record["warnings"] = [field for field in audited_fields if not record[field]]
+    for field, invalid in (("issue", invalid_issue), ("end", invalid_end), ("changed", invalid_changed)):
+        if invalid:
+            record["warnings"].append(f"invalid_date:{field}")
+    if quality := _field_quality(text, record):
+        record["field_quality"] = quality
     return record

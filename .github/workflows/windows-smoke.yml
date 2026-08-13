@@ -408,6 +408,14 @@ jobs:
           $env:PYTHONDONTWRITEBYTECODE = "1"
           & $python -B -S -m scripts.windows_ocr_stdio_probe
           if ($LASTEXITCODE -ne 0) { throw "Tesseract stdout probe failed" }
+      - name: Verify deterministic admin-edit contracts through portable Python
+        shell: powershell
+        run: |
+          $lock = Get-Content .\windows-runtime.lock.json -Raw | ConvertFrom-Json
+          $python = ".runtime\windows\python-$($lock.artifacts.python.version)\python.exe"
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          & $python -B -S scripts\windows_end_to_end_smoke.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw "portable admin-edit contract smoke failed" }
       - name: Exercise real portable PDF-to-XLSX publication and no-op
         shell: powershell
         run: |

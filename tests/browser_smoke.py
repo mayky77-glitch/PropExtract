@@ -154,7 +154,7 @@ with sync_playwright() as playwright:
 
     page.route("**/api/jobs**", mock_review_job)
     page.get_by_role("button", name="Перенести данные").click()
-    page.get_by_role("heading", name="Одобрить изменения").wait_for(timeout=5000)
+    page.get_by_role("heading", name="Строки для проверки").wait_for(timeout=5000)
     expect(page.locator(".record-value--existing span")).to_have_text("В таблице")
     expect(page.locator(".record-value--existing strong")).to_have_text("31.12.2026")
     expect(page.locator(".record-value--proposed span")).to_have_text("В документе")
@@ -165,9 +165,78 @@ with sync_playwright() as playwright:
     page.screenshot(path=SCREENSHOTS / "review-comparison-dark.png", full_page=True)
     page.get_by_role("button", name="Перенести в таблицу").click()
     page.get_by_role("heading", name="Изменения перенесены").wait_for(timeout=5000)
-    expect(page.get_by_role("button", name="Изменение перенесено")).to_be_disabled()
+    assert page.get_by_role("button", name="Перенести в таблицу").count() == 0
+    assert page.get_by_text("Перенесено", exact=True).count() >= 1
     page.screenshot(path=SCREENSHOTS / "review-approved-dark.png", full_page=True)
     page.unroute("**/api/jobs**", mock_review_job)
+
+    edit_state = {"saved": False, "failed": False, "payloads": []}
+
+    def manual_edit_job():
+        proposal_status = "resolved_manual" if edit_state["saved"] else "pending"
+        return {
+            "id": "manual-records", "status": "done", "progress": 100, "stage": "Готово", "capability": "opaque-capability",
+            "summary": {"pdf_count": 1, "record_count": 1, "changed_rows": 1, "new_rows": 0, "already_present_count": 0, "issue_count": 1, "row_numbers": [594], "new_row_numbers": [], "rows_with_issues": [594]},
+            "documents": [{"id": "doc-edit", "filename": "РНС для ручной сверки.pdf"}],
+            "row_cards": [{"row": 594, "number": "RU-38509306-21-2022", "object": "Объект после ручной проверки" if edit_state["saved"] else "Объект для ручной проверки", "outcome": "review_conflict", "needs_review": True, "filename": "РНС для ручной сверки.pdf", "document_id": "doc-edit", "edit_id": "fresh-edit" if edit_state["saved"] else "edit-1", "editable_fields": [{"key": "object", "label": "Наименование объекта", "type": "text"}, {"key": "end", "label": "Срок действия", "type": "date"}], "editable_values": {"object": "Объект после ручной проверки" if edit_state["saved"] else "Объект для ручной проверки", "end": "31.12.2027"}}],
+            "proposals": [{"id": "proposal-edit", "row": 594, "number": "RU-38509306-21-2022", "field": "Наименование объекта", "existing": "Старое имя", "proposed": "Объект для ручной проверки", "object": "Объект для ручной проверки", "filename": "РНС для ручной сверки.pdf", "document_id": "doc-edit", "status": proposal_status, "action": "Исправлено вручную" if edit_state["saved"] else "Перенести изменения"}],
+        }
+
+    def mock_manual_edit(route):
+        if route.request.method == "POST" and "/edits/" in route.request.url:
+            edit_state["payloads"].append(route.request.post_data_json)
+            if edit_state["failed"]:
+                route.fulfill(status=400, content_type="application/json", body='{"error":"Проверьте введённые данные."}')
+            else:
+                edit_state["saved"] = True
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(manual_edit_job(), ensure_ascii=False))
+            return
+        if route.request.method == "POST":
+            route.fulfill(status=202, content_type="application/json", body='{"id":"manual-records"}')
+            return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(manual_edit_job(), ensure_ascii=False))
+
+    page.route("**/api/jobs**", mock_manual_edit)
+    page.get_by_role("button", name="Перенести данные").click()
+    page.get_by_role("button", name="Исправить данные").click()
+    first_edit = page.locator("[data-edit-input]").first
+    expect(first_edit).to_be_focused()
+    first_edit.fill("Объект после ручной проверки")
+    page.get_by_role("button", name="Сохранить исправления").click()
+    page.get_by_text("Исправлено вручную", exact=True).first.wait_for(timeout=5000)
+    assert edit_state["payloads"] == [{"capability": "opaque-capability", "fields": {"object": "Объект после ручной проверки"}}]
+    assert page.get_by_role("button", name="Перенести в таблицу").count() == 0
+    assert page.get_by_role("button", name="Исправить данные").count() == 1
+    assert page.locator('[data-edit-toggle="fresh-edit"]').count() == 1
+
+    # Server error stays Russian, leaves form usable, and never exposes response internals.
+    edit_state.update(saved=False, failed=True, payloads=[])
+    page.get_by_role("button", name="Перенести данные").click()
+    page.get_by_role("button", name="Исправить данные").click()
+    page.locator("[data-edit-input]").first.fill("Ошибка проверки")
+    page.get_by_role("button", name="Сохранить исправления").click()
+    expect(page.locator("[data-edit-feedback]")).to_have_text("Не удалось сохранить исправления. Проверьте данные и повторите попытку.")
+    expect(page.get_by_role("button", name="Сохранить исправления")).to_be_enabled()
+    assert "opaque-capability" not in page.locator("#result").inner_text()
+    page.unroute("**/api/jobs**", mock_manual_edit)
+
+    def mock_low_quality(route):
+        if route.request.method == "POST":
+            route.fulfill(status=202, content_type="application/json", body='{"id":"low-quality"}')
+            return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "id": "low-quality", "status": "done", "progress": 100, "stage": "Готово", "capability": "opaque-capability",
+            "summary": {"pdf_count": 1, "record_count": 1, "changed_rows": 0, "new_rows": 0, "already_present_count": 0, "issue_count": 1, "row_numbers": [595], "new_row_numbers": [], "rows_with_issues": [595]},
+            "documents": [{"id": "doc-low", "filename": "Низкое качество OCR.pdf"}], "row_cards": [],
+            "proposals": [{"row": 595, "number": "RU-38509306-22-2022", "field": "Разработчик ПД", "existing": "ООО Старое", "proposed": "ООО OCR", "object": "Строка с низким качеством", "filename": "Низкое качество OCR.pdf", "document_id": "doc-low", "quality": "review", "review_details": "Низкая уверенность OCR: проверьте PDF вручную."}],
+        }, ensure_ascii=False))
+
+    page.route("**/api/jobs**", mock_low_quality)
+    page.get_by_role("button", name="Перенести данные").click()
+    page.get_by_role("heading", name="Строки для проверки").wait_for(timeout=5000)
+    assert page.get_by_text("Низкая уверенность OCR: проверьте PDF вручную.").is_visible()
+    assert page.get_by_role("button", name="Перенести в таблицу").count() == 0
+    page.unroute("**/api/jobs**", mock_low_quality)
 
     page.get_by_label("Папка с PDF").fill('"/path/that/does/not/exist"')
     page.get_by_label("Целевой файл Excel").fill("/path/that/does/not/exist.xlsx")
@@ -189,13 +258,14 @@ with sync_playwright() as playwright:
     mobile.wait_for_load_state("networkidle")
     assert mobile.get_by_role("button", name="Перенести данные").is_visible()
     assert mobile.get_by_role("button", name="Остановить PropExtract").is_visible()
-    mobile.route("**/api/jobs**", mock_job)
+    edit_state.update(saved=False, failed=False, payloads=[])
+    mobile.route("**/api/jobs**", mock_manual_edit)
     mobile.get_by_label("Папка с PDF").fill("C:\\PDF")
     mobile.get_by_label("Целевой файл Excel").fill("C:\\Реестр.xlsx")
     mobile.get_by_role("button", name="Перенести данные").click()
-    mobile.get_by_role("heading", name="Уже заполнены").wait_for(timeout=5000)
-    assert mobile.locator(".record-card").count() == 2
-    assert mobile.locator(".sheet-row-marker", has_text="584").is_visible()
+    mobile.get_by_role("button", name="Исправить данные").click()
+    expect(mobile.locator("[data-edit-input]").first).to_be_focused()
+    assert mobile.locator("[data-row-edit-form]").is_visible()
     assert mobile.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
     mobile.screenshot(path=SCREENSHOTS / "mobile-light.png", full_page=True)
     mobile_context.close()

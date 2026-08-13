@@ -168,6 +168,7 @@ def run() -> dict[str, object]:
     if not runtime.get("ready") or not all(runtime.get("commands", {}).values()):
         raise RuntimeError("portable Poppler/Tesseract runtime is not ready")
     field_contracts = _verify_field_contracts()
+    admin_contracts = _verify_admin_edit_contracts()
 
     with tempfile.TemporaryDirectory(prefix="propextract-e2e-") as temporary_name:
         temporary = Path(temporary_name) / "Проверка_Юникод"
@@ -244,6 +245,7 @@ def run() -> dict[str, object]:
                 "x14_preserved": isinstance(verification, dict) and verification.get("x14_preserved") is True,
                 "native_cf_preserved": isinstance(verification, dict) and verification.get("native_cf_preserved") is True,
                 "field_contracts": field_contracts,
+                "admin_contracts": admin_contracts,
             }
         finally:
             server.shutdown()
@@ -387,8 +389,77 @@ def _verify_field_contracts() -> str:
     return "merge,comparison,identity,district,review"
 
 
+def _verify_admin_edit_contracts() -> str:
+    """Exercise portable invalid-date, quality, edit, and OOXML contracts."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from datetime import datetime
+
+    from openpyxl import Workbook, load_workbook
+    from rns_import_server import app
+    from rns_import_server.audit import sha256
+    from rns_import_server.ocr import OCRLine, OCRText, OCRWord
+    from rns_import_server.rns_adapter import extract
+    from rns_import_server.server import JobManager
+    from rns_import_server.workbook import SHEET, apply
+
+    invalid = extract(Path(f"Разрешение {PERMIT_NUMBER} от 03.02.2026.pdf"), f"Номер разрешения на строительство: {PERMIT_NUMBER}\nДата выдачи: 11.41.2025")
+    if not invalid or invalid.get("issue") != "03.02.2026" or "invalid_date:issue" not in invalid.get("warnings", []):
+        raise RuntimeError("invalid date was not quarantined at field scope")
+    if app._document_outcome(Path("ГРО.pdf"), "ГРО", None) != "out_of_scope" or app._document_outcome(Path("Разрешение.pdf"), "Номер разрешения на строительство", None) != "unidentified_permit":
+        raise RuntimeError("typed document outcomes are not stable")
+    quality_text = f"Номер разрешения на строительство: {PERMIT_NUMBER}\nРазработчик ПД: ООО Проект"
+    words = tuple(OCRWord(token, 10 + index * 30, 20, 20, 10, 24.0) for index, token in enumerate(quality_text.replace("\n", " ").split()))
+    quality = extract(Path("permit.pdf"), OCRText(quality_text, (OCRLine(1, 10000, 1000, words),), source="raster"))
+    if not quality or quality.get("field_quality", {}).get("developer", {}).get("status") != "review":
+        raise RuntimeError("low-quality raster field is not review-only")
+
+    with tempfile.TemporaryDirectory(prefix="propextract-admin-contract-") as temporary_name:
+        root = Path(temporary_name)
+        pdf_dir = root / "pdf"; pdf_dir.mkdir()
+        old_pdf, pdf = pdf_dir / "old.pdf", pdf_dir / "new.pdf"
+        old_pdf.write_bytes(b"old"); pdf.write_bytes(b"new")
+        target = root / "register.xlsx"
+        book = Workbook(); sheet = book.active; sheet.title = SHEET
+        sheet["F4"], sheet["D4"], sheet["H4"] = PERMIT_NUMBER, "Старый объект", datetime(2025, 12, 31)
+        sheet["W4"] = old_pdf.name; sheet["W4"].hyperlink = old_pdf.as_uri()
+        sheet["Y4"], sheet["Z4"] = '=IF(A4<>"",ROW(),"")', '=IF(F4<>"",ROW(),"")'
+        book.save(target)
+
+        def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict[str, object]:
+            record = {"number": PERMIT_NUMBER, "filename": pdf.name, "pdf": str(pdf), "stage": None, "object": "Новый объект", "issue": None, "end": None, "changed": None, "issuer": None, "builder": None, "region": None, "district": None, "developer": None, "merge_issues": [{"message": "Требуется сверка."}]}
+            result = apply({PERMIT_NUMBER: record}, xlsx, output, sha256(xlsx))
+            result.update(input_hashes={"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}}, documents=[{"file": str(pdf)}], logical_records=[PERMIT_NUMBER], selected_records={PERMIT_NUMBER: {**record, "field_sources": {"object": pdf.name}, "field_quality": {"object": {"status": "review", "reason": "low_ocr_confidence"}}}})
+            return result
+
+        manager = JobManager(runner, error_log=root / "error.log")
+        job_id = str(manager.start(str(pdf_dir), str(target))["id"])
+        for _ in range(100):
+            job = manager.get(job_id)
+            if job and job.get("status") in {"done", "error"}:
+                break
+            time.sleep(0.02)
+        else:
+            raise RuntimeError("manual edit contract job did not finish")
+        public = manager.public(job_id)
+        if not public or public.get("status") != "done" or public.get("proposals") and public["proposals"][0].get("id"):
+            raise RuntimeError("low-quality proposal received one-click transfer authority")
+        card = public["row_cards"][0]
+        before_link = load_workbook(target, data_only=False)[SHEET]["W4"].hyperlink.target
+        updated = manager.edit(job_id, str(card["edit_id"]), public["capability"], {"object": "Исправленный объект", "end": "2027-12-31"})
+        saved = load_workbook(target, data_only=False)[SHEET]
+        if updated["row_cards"][0].get("edited") is not True or saved["D4"].value != "Исправленный объект" or saved["H4"].value != datetime(2027, 12, 31):
+            raise RuntimeError("manual edit did not publish typed values")
+        if updated["row_cards"][0].get("object") != "Исправленный объект" or updated["proposals"][0].get("status") != "resolved_manual" or updated["proposals"][0].get("manual_value") != "Исправленный объект":
+            raise RuntimeError("manual edit did not refresh the public review card")
+        if saved["F4"].value != PERMIT_NUMBER or saved["W4"].hyperlink.target != before_link or saved["Y4"].value != '=IF(A4<>"",ROW(),"")' or saved["Z4"].value != '=IF(F4<>"",ROW(),"")':
+            raise RuntimeError("manual edit changed identity, W, or Y:Z invariants")
+    return "invalid-date,outcomes,quality,manual-edit,ooxml"
+
+
 def self_test() -> dict[str, object]:
     field_contracts = _verify_field_contracts()
+    admin_contracts = _verify_admin_edit_contracts()
 
     with tempfile.TemporaryDirectory(prefix="propextract-e2e-self-test-") as temporary_name:
         fixture = Path(temporary_name) / "fixture.pdf"
@@ -401,6 +472,7 @@ def self_test() -> dict[str, object]:
             "fixture_sha256": _sha256(fixture),
             "temporary_fixture_deleted": True,
             "field_contracts": field_contracts,
+            "admin_contracts": admin_contracts,
         }
 
 

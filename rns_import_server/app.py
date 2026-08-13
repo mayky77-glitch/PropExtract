@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 import sys
@@ -44,6 +45,8 @@ FIELD_LABELS = {
 IDENTITY_RETRY_DPI = 400
 IDENTITY_RETRY_MAX_PAGES = 10
 _PERMIT_BASENAME = re.compile(r"(?<![А-Яа-яЁё])разреш[её]н[А-Яа-яЁё-]*", re.IGNORECASE)
+_PERMIT_TEXT = re.compile(r"разрешени\w*\s+на\s+строительств\w*|номер\s+разрешения\s+на\s+строительств\w*", re.IGNORECASE)
+_OUT_OF_SCOPE_TEXT = re.compile(r"\b(?:гро|ро|гпзу)\b|градостроительн\w*\s+план", re.IGNORECASE)
 ProgressCallback = Callable[[int, str, str | None], None]
 
 
@@ -67,6 +70,11 @@ def _adopt_directive_field(merged: dict, directive: dict, field: str) -> None:
     merged[field] = directive[field]
     merged["field_provenance"][field] = directive.get("field_provenance", {}).get(field, "ocr")
     merged["field_sources"][field] = str(directive["pdf"])
+    quality = directive.get("field_quality", {})
+    if isinstance(quality, dict) and isinstance(quality.get(field), dict):
+        merged.setdefault("field_quality", {})[field] = dict(quality[field])
+    elif isinstance(merged.get("field_quality"), dict):
+        merged["field_quality"].pop(field, None)
 
 
 def _adopt_primary_source(merged: dict, directive: dict) -> None:
@@ -163,8 +171,35 @@ def _finalize_warnings(merged: dict, records: list[dict]) -> None:
     merged["warnings"] = warnings
 
 
-def _should_retry_identity(pdf: Path, dpi: int) -> bool:
-    return dpi < IDENTITY_RETRY_DPI and _PERMIT_BASENAME.search(pdf.stem) is not None
+def _is_permit_like(pdf: Path, text: str) -> bool:
+    return _PERMIT_BASENAME.search(pdf.stem) is not None or _PERMIT_TEXT.search(text) is not None
+
+
+def _should_retry_identity(pdf: Path, dpi: int, text: str = "") -> bool:
+    return dpi < IDENTITY_RETRY_DPI and _is_permit_like(pdf, text)
+
+
+def _read_supports_force_ocr() -> bool:
+    parameters = inspect.signature(read_ocr).parameters.values()
+    return any(
+        parameter.name == "force_ocr" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _forced_raster_read(pdf: Path, dpi: int, max_pages: int):
+    """Request real raster OCR, while keeping old three-argument test doubles usable."""
+    if _read_supports_force_ocr():
+        return read_ocr(pdf, dpi, max_pages, force_ocr=True)
+    return read_ocr(pdf, dpi, max_pages)
+
+
+def _document_outcome(pdf: Path, text: str, record: dict | None) -> str:
+    if record and record.get("number"):
+        return "processed_rns"
+    if _OUT_OF_SCOPE_TEXT.search(f"{pdf.stem}\n{text}"):
+        return "out_of_scope"
+    return "unidentified_permit"
 
 
 def _identity_retry_page_limit(max_pages: int, total_pages: int) -> int:
@@ -192,12 +227,15 @@ def _merge_group(number: str, versions: list[dict], documents: list[dict]) -> di
             merged[field] = None
         merged["field_provenance"] = {}
         merged["field_sources"] = {}
+        merged["field_quality"] = {}
     else:
         for field in DATE_FIELDS:
             if merged.get(field) is not None and _parsed_date(merged.get(field)) is None:
                 merged[field] = None
                 merged["field_provenance"].pop(field, None)
                 merged["field_sources"].pop(field, None)
+                if isinstance(merged.get("field_quality"), dict):
+                    merged["field_quality"].pop(field, None)
     merged["source_files"] = sorted(
         {str(record["filename"]) for record in ([selected] if permits else directives)},
         key=str.casefold,
@@ -254,12 +292,19 @@ def collect(
             text, pages = read_ocr(pdf, dpi, max_pages)
             extracted = extract(pdf, text)
             retry_error: str | None = None
-            if extracted is None and not canonical_rns_identities(text) and _should_retry_identity(pdf, dpi):
+            text_source = getattr(text, "source", None)
+            if extracted is None and not canonical_rns_identities(text) and _should_retry_identity(pdf, dpi, text):
                 try:
-                    retry_text, retry_pages = read_ocr(
-                        pdf,
-                        IDENTITY_RETRY_DPI,
-                        _identity_retry_page_limit(max_pages, pages),
+                    # A failed text layer gets one real raster pass at the current
+                    # 180-DPI default. A real raster miss can make one bounded
+                    # 400-DPI fallback; neither path re-enters pdftotext.
+                    retry_dpi = IDENTITY_RETRY_DPI if text_source == "raster" else dpi
+                    # Legacy three-argument doubles cannot honour force_ocr, so
+                    # preserve their former 400-DPI compatibility path only there.
+                    if not _read_supports_force_ocr():
+                        retry_dpi = IDENTITY_RETRY_DPI
+                    retry_text, retry_pages = _forced_raster_read(
+                        pdf, retry_dpi, _identity_retry_page_limit(max_pages, pages)
                     )
                     retry_extracted = extract(pdf, retry_text)
                     if retry_extracted is not None:
@@ -269,22 +314,41 @@ def collect(
             # Dormant unless an owner-approved future extractor emits candidates.
             # Without candidates/configuration this preserves prior behavior.
             record = map_extracted_record(extracted) if extracted else None
-            document = {"file": str(pdf), "pages": pages, "ocr_characters": len(text), "number": record.get("number") if record else None, "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {}, "warnings": record.get("warnings", []) if record else ["unidentified"]}
+            document = {
+                "file": str(pdf),
+                "pages": pages,
+                "ocr_characters": len(text),
+                "number": record.get("number") if record else None,
+                "extracted": {key: record.get(key) for key in EVIDENCE_FIELDS} if record else {},
+                "warnings": record.get("warnings", []) if record else ["unidentified"],
+                "outcome": _document_outcome(pdf, text, record),
+            }
+            ocr_source = getattr(text, "source", None)
+            if ocr_source in {"text_layer", "raster"}:
+                document["ocr_source"] = ocr_source
             if record and record.get("number"):
                 record["pages"] = pages
+                if ocr_source in {"text_layer", "raster"}:
+                    record["ocr_source"] = ocr_source
                 groups.setdefault(str(record["number"]), []).append(record)
             elif retry_error:
                 document["warnings"] = ["identity_retry_failed"]
-                document["error"] = "Повторное распознавание номера РНС при 400 DPI завершилось ошибкой."
+                document["error"] = (
+                    "Повторное распознавание номера РНС при 400 DPI завершилось ошибкой."
+                    if retry_dpi == IDENTITY_RETRY_DPI
+                    else "Принудительное растровое распознавание номера РНС завершилось ошибкой."
+                )
                 document["technical_error"] = retry_error
             elif record and _is_amendment(record):
                 document["warnings"] = ["unlinked_directive"]
                 document["error"] = "Изменение/продление не связано: отсутствует явный номер РНС."
+            elif document["outcome"] == "out_of_scope":
+                document["warnings"] = ["out_of_scope"]
             else:
                 document["error"] = "Не найден номер РНС"
             documents.append(document)
         except Exception as error:
-            documents.append({"file": str(pdf), "pages": None, "ocr_characters": 0, "number": None, "extracted": {}, "warnings": ["processing_failed"], "error": str(error) or type(error).__name__})
+            documents.append({"file": str(pdf), "pages": None, "ocr_characters": 0, "number": None, "extracted": {}, "warnings": ["processing_failed"], "outcome": "processing_failed", "error": str(error) or type(error).__name__})
         if progress:
             progress(8 + int(index / len(pdfs) * 68), "PDF обработан", pdf.name)
     chosen = {number: record for number, versions in groups.items() if (record := _merge_group(number, versions, documents)) is not None}
@@ -330,7 +394,7 @@ def run(
         output.unlink(missing_ok=True)
         raise RuntimeError("source_inputs_changed")
     selected = {
-        number: {key: record.get(key) for key in ("filename", "pdf", "issue", "end", "changed", "warnings", "stage", "object", "issuer", "builder", "region", "district", "developer", "source_files", "field_sources", "field_provenance", "merge_issues")}
+        number: {key: record.get(key) for key in ("filename", "pdf", "issue", "end", "changed", "warnings", "stage", "object", "issuer", "builder", "region", "district", "developer", "source_files", "field_sources", "field_provenance", "field_quality", "ocr_source", "merge_issues")}
         for number, record in records.items()
     }
     result.update({"contract_version": "rns-import-2", "input_hashes": before, "input_digest": digest(before), "documents": documents, "logical_records": sorted(records), "selected_records": selected, "output": str(output)})

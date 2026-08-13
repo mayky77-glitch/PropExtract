@@ -90,10 +90,17 @@ class OCRText(str):
     """Plain OCR text carrying optional word geometry for table fields."""
 
     lines: tuple[OCRLine, ...]
+    source: str
 
-    def __new__(cls, value: str, lines: tuple[OCRLine, ...] = ()) -> "OCRText":
+    def __new__(
+        cls,
+        value: str,
+        lines: tuple[OCRLine, ...] = (),
+        source: str = "raster",
+    ) -> "OCRText":
         instance = super().__new__(cls, value)
         instance.lines = lines
+        instance.source = source
         return instance
 
 
@@ -330,16 +337,24 @@ def _ocr_image(image: Path, tesseract: str, *, native_workspace: Path | None = N
     return parsed
 
 
-def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = None) -> tuple[str, int]:
+def _read(
+    pdf: Path,
+    dpi: int,
+    max_pages: int,
+    native_workspace: Path | None = None,
+    *,
+    force_ocr: bool = False,
+) -> tuple[OCRText, int]:
     total = page_count(pdf, native_workspace=native_workspace) if native_workspace is not None else page_count(pdf)
     last_page = min(total, max_pages) if max_pages else total
-    text = (
-        _text_layer(pdf, last_page, native_workspace=native_workspace)
-        if native_workspace is not None
-        else _text_layer(pdf, last_page)
-    )
-    if text:
-        return text, total
+    if not force_ocr:
+        text = (
+            _text_layer(pdf, last_page, native_workspace=native_workspace)
+            if native_workspace is not None
+            else _text_layer(pdf, last_page)
+        )
+        if text:
+            return OCRText(text, source="text_layer"), total
     renderer, tesseract = find_tool("pdftoppm"), find_tool("tesseract")
     if not renderer:
         raise RuntimeError("pdftoppm_unavailable")
@@ -401,7 +416,7 @@ def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = N
             for page, part in parts
             for line in part.lines
         )
-        return OCRText("\n".join(_captured_text(part) for _, part in parts), lines), total
+        return OCRText("\n".join(_captured_text(part) for _, part in parts), lines, source="raster"), total
 
     if native_workspace is not None:
         return render_and_ocr(native_workspace)
@@ -409,10 +424,10 @@ def _read(pdf: Path, dpi: int, max_pages: int, native_workspace: Path | None = N
         return render_and_ocr(Path(temporary_name))
 
 
-def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
-    """Prefer the PDF text layer, then render and OCR bounded page batches."""
+def read(pdf: Path, dpi: int = 180, max_pages: int = 0, *, force_ocr: bool = False) -> tuple[OCRText, int]:
+    """Prefer the text layer unless a caller explicitly requests true raster OCR."""
     if not _is_windows():
-        return _read(pdf, dpi, max_pages)
+        return _read(pdf, dpi, max_pages, force_ocr=force_ocr)
     job_root = _windows_ocr_job_root()
     job_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="job-", dir=job_root) as temporary_name:
@@ -420,4 +435,4 @@ def read(pdf: Path, dpi: int = 180, max_pages: int = 0) -> tuple[str, int]:
         (workspace / "cache").mkdir()
         staged_pdf = workspace / "input.pdf"
         shutil.copyfile(pdf, staged_pdf)
-        return _read(staged_pdf, dpi, max_pages, native_workspace=workspace)
+        return _read(staged_pdf, dpi, max_pages, native_workspace=workspace, force_ocr=force_ocr)

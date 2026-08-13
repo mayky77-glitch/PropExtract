@@ -83,6 +83,9 @@
   let pollTimer = null;
 
   const escapeText = (value) => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[char]);
+  const editableFieldKeys = new Set(["type", "stage", "object", "issue", "end", "changed", "issuer", "builder", "region", "district", "developer"]);
+  const dateFieldKeys = new Set(["issue", "end", "changed"]);
+  const manuallyResolvedStatuses = new Set(["resolved", "resolved_manual"]);
 
   const sourceName = (item, documents) => {
     const document = documents[item.document_id] || {};
@@ -92,6 +95,32 @@
   const openDocumentButton = item => item.document_id
     ? `<button class="row-action row-action--secondary" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>`
     : "";
+
+  function editableFields(item) {
+    if (typeof item.edit_id !== "string" || !item.edit_id) return [];
+    return (Array.isArray(item.editable_fields) ? item.editable_fields : [])
+      .filter(field => field && editableFieldKeys.has(field.key) && typeof field.label === "string" && field.label)
+      .map(field => ({...field, value: String((item.editable_values || {})[field.key] ?? "")}));
+  }
+
+  function renderEditControls(item) {
+    const fields = editableFields(item);
+    if (!fields.length) return "";
+    const inputs = fields.map(field => {
+      const isDate = dateFieldKeys.has(field.key);
+      return `<label class="row-edit-field"><span>${escapeText(field.label)}</span><input data-edit-input data-field-key="${escapeText(field.key)}" data-initial-value="${escapeText(field.value)}" value="${escapeText(field.value)}" type="text"${isDate ? " inputmode=\"numeric\" placeholder=\"дд.мм.гггг\"" : ""} autocomplete="off"></label>`;
+    }).join("");
+    return `<div class="row-edit-wrap">
+      <button class="row-action row-action--edit" type="button" data-edit-toggle="${escapeText(item.edit_id)}" aria-expanded="false">Исправить данные</button>
+      <form class="row-edit-form" data-row-edit-form="${escapeText(item.edit_id)}" hidden novalidate>
+        <div class="row-edit-heading"><div><span class="record-label">Корректировка строки</span><h5>Исправить данные</h5></div><p>Измените только нужные сведения. Номер РНС и служебные столбцы не редактируются.</p></div>
+        <p class="row-edit-date-hint">Даты указывайте в формате дд.мм.гггг.</p>
+        <div class="row-edit-grid">${inputs}</div>
+        <p class="row-edit-feedback" data-edit-feedback role="status" aria-live="polite"></p>
+        <div class="row-edit-actions"><button class="row-action row-action--secondary" type="button" data-edit-cancel>Отмена</button><button class="row-action row-action--primary" type="submit" data-edit-save>Сохранить исправления</button></div>
+      </form>
+    </div>`;
+  }
 
   function recordHeader(item, status, tone) {
     return `<div class="record-card-heading"><div><span class="record-label">РНС</span><h4>${escapeText(item.number || "Не определён")}</h4></div><span class="record-status record-status--${tone}">${status}</span></div>`;
@@ -107,12 +136,15 @@
 
   function renderProposalCard(item, documents) {
     const approved = item.status === "approved";
+    const resolved = manuallyResolvedStatuses.has(item.status);
+    const canApprove = typeof item.id === "string" && item.id && item.status === "pending" && Boolean(item.action);
     const unresolvedReview = Boolean(item.review_details);
-    const tone = approved && !unresolvedReview ? "approved" : "review";
-    const comparisonLabel = approved ? "Перенесено в таблицу" : "Предлагаемое изменение";
-    const existingLabel = approved ? "Было" : "В таблице";
-    const proposedLabel = approved ? "Перенесено" : "В документе";
-    const status = approved && unresolvedReview
+    const tone = (approved || resolved) && !unresolvedReview ? "approved" : "review";
+    const comparisonLabel = approved ? "Перенесено в таблицу" : resolved ? "Исправлено вручную" : "Предлагаемое изменение";
+    const existingLabel = approved || resolved ? "Было" : "В таблице";
+    const proposedLabel = approved ? "Перенесено" : resolved ? "Исправлено" : "В документе";
+    const displayedValue = resolved ? item.manual_value : item.proposed;
+    const status = resolved ? "Исправлено вручную" : approved && unresolvedReview
       ? "Поле перенесено — нужна проверка"
       : approved ? "Перенесено" : "Требует решения";
     return `<article class="record-card record-card--${tone}">
@@ -126,12 +158,12 @@
           <div class="record-diff-values">
             <div class="record-value record-value--existing"><span>${existingLabel}</span><strong>${escapeText(item.existing ?? "Не заполнено")}</strong></div>
             <span class="record-diff-arrow" aria-hidden="true">→</span>
-            <div class="record-value record-value--proposed"><span>${proposedLabel}</span><strong>${escapeText(item.proposed ?? "Не заполнено")}</strong></div>
+            <div class="record-value record-value--proposed"><span>${proposedLabel}</span><strong>${escapeText(displayedValue ?? "Не заполнено")}</strong></div>
           </div>
         </div>
         <div class="record-card-footer">
           ${recordSource(item, documents)}
-          <div class="row-actions">${openDocumentButton(item)}<button class="row-action row-action--primary" type="button" data-approve-proposal="${escapeText(item.id)}" ${approved ? "disabled" : ""}>${approved ? "Изменение перенесено" : "Перенести в таблицу"}</button></div>
+          <div class="row-actions">${openDocumentButton(item)}${canApprove ? `<button class="row-action row-action--primary" type="button" data-approve-proposal="${escapeText(item.id)}">Перенести в таблицу</button>` : ""}${resolved ? `<span class="row-action row-action--resolved" aria-label="Исправлено вручную">Исправлено вручную</span>` : ""}${renderEditControls(item)}</div>
         </div>
       </div>
     </article>`;
@@ -144,7 +176,7 @@
         ${recordHeader(item, "Совпадает", "matched")}
         ${item.object ? `<p class="record-object">${escapeText(item.object)}</p>` : ""}
         <div class="record-verdict"><strong>Данные уже есть в таблице</strong><span>Строка оставлена без изменений. При открытии Excel обновятся только родные цветовые маркеры сроков.</span></div>
-        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
+        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}${renderEditControls(item)}</div></div>
       </div>
     </article>`;
   }
@@ -155,7 +187,7 @@
       <div class="record-card-main">
         ${recordHeader(item, "Обработано", "processed")}
         <p class="record-object">${escapeText(item.object || item.details || "Данные обработаны.")}</p>
-        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
+        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}${renderEditControls(item)}</div></div>
       </div>
     </article>`;
   }
@@ -167,7 +199,7 @@
         ${recordHeader(item, "Требует проверки", "review")}
         ${item.object ? `<p class="record-object">${escapeText(item.object)}</p>` : ""}
         <div class="record-verdict record-verdict--review"><strong>Автоматический перенос ограничен</strong><span>${escapeText(item.details || "Строка содержит неоднозначные данные. Сверьте исходный PDF и таблицу.")}</span></div>
-        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}</div></div>
+        <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}${renderEditControls(item)}</div></div>
       </div>
     </article>`;
   }
@@ -255,7 +287,13 @@
       [stats.new_rows, "Новых строк"],
       [stats.issue_count ?? stats.conflicts, "Замечаний в Excel"]
     ];
-    if (stats.failed_pdf_count) statItems.push([stats.failed_pdf_count, "PDF пропущено"]);
+    const hasTypedDocumentCounts = ["out_of_scope_count", "unidentified_permit_count", "processing_failed_count"]
+      .some(key => Object.hasOwn(stats, key));
+    if (stats.out_of_scope_count) statItems.push([stats.out_of_scope_count, "Не относятся к РНС"]);
+    const attentionCount = hasTypedDocumentCounts
+      ? Number(stats.unidentified_permit_count || 0) + Number(stats.processing_failed_count || 0)
+      : Number(stats.failed_pdf_count || 0);
+    if (attentionCount) statItems.push([attentionCount, "Требуют внимания"]);
     resultStats.innerHTML = statItems.map(([number, label]) => `<div class="stat"><strong>${escapeText(number ?? 0)}</strong><span>${label}</span></div>`).join("");
     const rows = (stats.row_numbers || []).join(", ") || "нет";
     const newRows = (stats.new_row_numbers || []).join(", ") || "нет";
@@ -263,13 +301,27 @@
     resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p>${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
     const documents = Object.fromEntries((job.documents || []).map(item => [item.id, item]));
     const proposalRows = new Set((job.proposals || []).map(item => `${item.row ?? ""}::${item.number || ""}`));
+    const editableCards = new Map((job.row_cards || [])
+      .filter(item => editableFields(item).length)
+      .map(item => [`${item.row ?? ""}::${item.number || ""}`, item]));
+    const renderedEditRows = new Set();
+    const renderProposal = item => {
+      const key = `${item.row ?? ""}::${item.number || ""}`;
+      const rowCard = editableCards.get(key);
+      if (!rowCard || renderedEditRows.has(key)) return renderProposalCard(item, documents);
+      renderedEditRows.add(key);
+      return renderProposalCard({...item, edit_id: rowCard.edit_id, editable_fields: rowCard.editable_fields, editable_values: rowCard.editable_values}, documents);
+    };
     const reviewCards = [
-      ...(job.proposals || []).filter(item => item.status !== "approved" || item.review_details).map(item => renderProposalCard(item, documents)),
+      ...(job.proposals || []).filter(item => (item.status !== "approved" || item.review_details) && !manuallyResolvedStatuses.has(item.status)).map(renderProposal),
       ...(job.row_cards || [])
         .filter(item => item.needs_review && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
         .map(item => renderReviewCard(item, documents))
     ];
-    const approvedCards = (job.proposals || []).filter(item => item.status === "approved" && !item.review_details).map(item => renderProposalCard(item, documents));
+    const approvedCards = [
+      ...(job.proposals || []).filter(item => item.status === "approved" && !item.review_details).map(renderProposal),
+      ...(job.proposals || []).filter(item => manuallyResolvedStatuses.has(item.status) && !item.review_details).map(renderProposal)
+    ];
     const processedCards = (job.row_cards || [])
       .filter(item => item.outcome !== "already_present" && !item.needs_review && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
       .map(item => renderProcessedCard(item, documents));
@@ -288,6 +340,27 @@
     const job = window.currentPropExtractJob;
     const documentId = button.dataset.openDocument;
     const proposalId = button.dataset.approveProposal;
+    const editId = button.dataset.editToggle;
+    if (editId) {
+      const wrap = button.closest(".row-edit-wrap");
+      const editForm = wrap?.querySelector("[data-row-edit-form]");
+      if (!editForm) return;
+      const expanded = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", String(!expanded));
+      editForm.hidden = expanded;
+      if (!expanded) window.requestAnimationFrame(() => editForm.querySelector("[data-edit-input]")?.focus());
+      return;
+    }
+    if (button.hasAttribute("data-edit-cancel")) {
+      const editForm = button.closest("form");
+      const toggle = editForm?.closest(".row-edit-wrap")?.querySelector("[data-edit-toggle]");
+      editForm?.reset();
+      if (editForm) editForm.querySelector("[data-edit-feedback]").textContent = "";
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+      if (editForm) editForm.hidden = true;
+      toggle?.focus();
+      return;
+    }
     if (!documentId && !proposalId) return;
     button.disabled = true;
     try {
@@ -298,6 +371,45 @@
       if (proposalId) { showToast("Изменение перенесено. Резервная копия создана."); poll(job.id); }
       else showToast("Открываем исходный PDF.");
     } catch (error) { button.disabled = false; showToast("Не удалось выполнить действие. Обновите результат и повторите попытку.", 6000); }
+  });
+
+  resultRows?.addEventListener("submit", async event => {
+    const editForm = event.target.closest("[data-row-edit-form]");
+    if (!editForm || !window.currentPropExtractJob) return;
+    event.preventDefault();
+    const fields = {};
+    editForm.querySelectorAll("[data-edit-input]").forEach(input => {
+      if (input.value !== input.dataset.initialValue) fields[input.dataset.fieldKey] = input.value;
+    });
+    const feedback = editForm.querySelector("[data-edit-feedback]");
+    if (!Object.keys(fields).length) {
+      feedback.textContent = "Нет изменений для сохранения.";
+      return;
+    }
+    const saveButton = editForm.querySelector("[data-edit-save]");
+    const cancelButton = editForm.querySelector("[data-edit-cancel]");
+    const job = window.currentPropExtractJob;
+    saveButton.disabled = true;
+    cancelButton.disabled = true;
+    editForm.setAttribute("aria-busy", "true");
+    feedback.textContent = "Сохраняем исправления…";
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(job.id)}/edits/${encodeURIComponent(editForm.dataset.rowEditForm)}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({capability: job.capability, fields})
+      });
+      const updatedJob = await responseJson(response);
+      if (!response.ok) throw new Error(updatedJob.error || "Не удалось сохранить исправления.");
+      window.currentPropExtractJob = updatedJob;
+      renderResult(updatedJob);
+      showToast("Исправления сохранены.");
+    } catch (_) {
+      feedback.textContent = "Не удалось сохранить исправления. Проверьте данные и повторите попытку.";
+      saveButton.disabled = false;
+      cancelButton.disabled = false;
+      editForm.removeAttribute("aria-busy");
+    }
   });
 
   async function poll(jobId) {

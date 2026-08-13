@@ -86,6 +86,19 @@ def _change_outcome(new: bool, written: list[str], issues: list[str]) -> str:
 
 
 _TRANSFER_FIELDS = ("stage", "object", "issue", "end", "changed", "issuer", "builder", "region", "district", "developer")
+EDITABLE_FIELDS = {
+    "stage": "Номер этапа",
+    "object": "Наименование объекта",
+    "issue": "Дата выдачи",
+    "end": "Срок действия",
+    "changed": "Дата последн. измен.",
+    "issuer": "Орган выдачи",
+    "builder": "Застройщик",
+    "region": "Субъект РФ",
+    "district": "Муниципальный р-н",
+    "developer": "Разработчик ПД",
+}
+DATE_EDIT_FIELDS = frozenset({"issue", "end", "changed"})
 
 
 def _sheet_xml_path(book: Path, sheet_name: str) -> str:
@@ -255,6 +268,11 @@ def _validate(
         for number in records
         if outcomes[number] != "already_present"
         if (row := _row_by_number(source_sheet, number)) is not None
+        if any(
+            source_sheet.cell(row, HEADERS[label]).value != output_sheet.cell(row, HEADERS[label]).value
+            for label in HEADERS
+            if label not in {"Номер РНС", "Ссылка на документ", "Примечание"}
+        )
     }
     intended_status_cells = {
         f"{output_sheet.cell(row, STATUS_COLUMN).coordinate}"
@@ -316,6 +334,20 @@ def _validate(
             output_target = link.hyperlink.target if link.hyperlink else None
             if link.value != source_link.value or output_target != source_target:
                 raise RuntimeError(f"link_changed:{number}")
+        elif outcomes[number] == "review":
+            source_row = _row_by_number(source_sheet, number)
+            if source_row is not None:
+                source_link = source_sheet.cell(source_row, HEADERS["Ссылка на документ"])
+                source_target = source_link.hyperlink.target if source_link.hyperlink else None
+                output_target = link.hyperlink.target if link.hyperlink else None
+                changed_data = any(
+                    source_sheet.cell(source_row, HEADERS[label]).value != output_sheet.cell(source_row, HEADERS[label]).value
+                    for label in EDITABLE_FIELDS.values()
+                )
+                if not changed_data and (link.value != source_link.value or output_target != source_target):
+                    raise RuntimeError(f"link_changed:{number}")
+                if changed_data and (not link.hyperlink or link.hyperlink.target != Path(str(record["pdf"])).as_uri()):
+                    raise RuntimeError(f"link_invalid:{number}")
         elif not link.hyperlink or link.hyperlink.target != Path(str(record["pdf"])).as_uri():
             raise RuntimeError(f"link_invalid:{number}")
         if output_sheet.cell(row, STATUS_COLUMN).value != statuses[number]:
@@ -413,12 +445,23 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 sheet.cell(row, 1).value = max(ids, default=0) + 1
             mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number if new else None, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
             issues, written = list(merge_issue_messages), []
+            quality = record.get("field_quality", {})
             for label, value in mapping.items():
                 if label == "Номер РНС" and not new:
                     continue
                 if value is None:
                     continue
                 target = sheet.cell(row, HEADERS[label])
+                field_key = next((key for key, mapped_label in EDITABLE_FIELDS.items() if mapped_label == label), None)
+                quality_item = quality.get(field_key, {}) if isinstance(quality, dict) and field_key else {}
+                if isinstance(quality_item, dict) and quality_item.get("status") != "actionable" and quality_item.get("status") is not None:
+                    issues.append(f"Не перенесено «{label}»: значение PDF требует ручной сверки.")
+                    # Keep the usual conflict projection for an occupied,
+                    # substantively different cell. Server-side quality policy
+                    # then exposes it as review-only, never as a proposal.
+                    if target.value not in (None, ""):
+                        _put(target, value, label, number, conflicts)
+                    continue
                 if issue := transfer_issue(label, target.value, value):
                     issues.append(issue)
                 if _put(target, value, label, number, conflicts):
@@ -427,8 +470,13 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
             outcomes[number] = outcome
             link = sheet.cell(row, HEADERS["Ссылка на документ"])
             status = sheet.cell(row, STATUS_COLUMN)
-            if outcome != "already_present":
+            # A review with no transferable values must not overwrite the
+            # provenance link of an existing row. The review source is exposed
+            # by the job capability instead; an explicit proposal approval may
+            # still update W later.
+            if outcome != "already_present" and (new or written):
                 link.value, link.hyperlink, link.style = str(record["filename"]), Path(str(record["pdf"])).as_uri(), "Hyperlink"
+            if outcome != "already_present":
                 status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
                 status_alignment = copy(status.alignment)
                 status_alignment.wrap_text = True
@@ -498,6 +546,79 @@ def apply_proposal(source: Path, output: Path, source_hash: str, number: str, fi
                 new_link = new.hyperlink.target if new.hyperlink else None
                 if not allowed and (old.value != new.value or old._style != new._style or old_link != new_link):
                     raise RuntimeError(f"proposal_changed:{old.coordinate}")
+        sheet_path = _sheet_xml_path(source, SHEET)
+        if _extension_block(source, sheet_path) != _extension_block(staged, sheet_path):
+            raise RuntimeError("x14_extensions_changed")
+        if _standard_cf_blocks(source, sheet_path) != _standard_cf_blocks(staged, sheet_path):
+            raise RuntimeError("native_conditional_formatting_changed")
+        os.replace(staged, output)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def editable_field_values(source: Path, row: int, number: str) -> dict[str, str]:
+    """Read a compact, allowlisted value contract for one exact RNS row."""
+    workbook = load_workbook(source, data_only=False)
+    sheet = workbook[SHEET]
+    if row < 4 or _row_by_number(sheet, number) != row:
+        raise RuntimeError("manual_row_unavailable")
+    return {key: _value_text(sheet.cell(row, HEADERS[label]).value) if sheet.cell(row, HEADERS[label]).value not in (None, "") else "" for key, label in EDITABLE_FIELDS.items()}
+
+
+def apply_manual_edit(
+    source: Path,
+    output: Path,
+    source_hash: str,
+    row: int,
+    number: str,
+    fields: dict[str, object],
+) -> None:
+    """Stage a bounded manual row correction without changing row provenance."""
+    if not fields or any(key not in EDITABLE_FIELDS for key in fields):
+        raise RuntimeError("manual_field_invalid")
+    if sha256(source) != source_hash:
+        raise RuntimeError("manual_target_stale")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.stem}.", suffix=".manual-staged.xlsx", dir=output.parent)
+    os.close(descriptor)
+    staged = Path(temporary_name)
+    try:
+        workbook = load_workbook(source)
+        sheet = workbook[SHEET]
+        if row < 4 or _row_by_number(sheet, number) != row:
+            raise RuntimeError("manual_row_unavailable")
+        for key, value in fields.items():
+            if key in DATE_EDIT_FIELDS and value is not None and not isinstance(value, datetime):
+                raise RuntimeError("manual_date_invalid")
+            if key not in DATE_EDIT_FIELDS and value is not None and not isinstance(value, str):
+                raise RuntimeError("manual_value_invalid")
+            cell = sheet.cell(row, HEADERS[EDITABLE_FIELDS[key]])
+            cell.value = value
+            if isinstance(value, str):
+                cell.data_type = "s"  # A manual value is never an Excel formula.
+        status = sheet.cell(row, STATUS_COLUMN)
+        marker = "Исправлено вручную: " + ", ".join(f"«{EDITABLE_FIELDS[key]}»" for key in fields) + "."
+        old_lines = str(status.value).splitlines() if status.value not in (None, "") else []
+        stale_markers = tuple(f"Не перенесено «{EDITABLE_FIELDS[key]}»:" for key in fields)
+        status.value = "\n".join([line for line in old_lines if not line.startswith(stale_markers)] + [marker])
+        workbook.save(staged)
+        _reinject_native_conditional_formatting(source, staged)
+        _reinject_extensions(source, staged)
+        if sha256(source) != source_hash:
+            raise RuntimeError("manual_target_stale")
+        source_book, staged_book = load_workbook(source, data_only=False), load_workbook(staged, data_only=False)
+        source_sheet, staged_sheet = source_book[SHEET], staged_book[SHEET]
+        allowed = {source_sheet.cell(row, HEADERS[EDITABLE_FIELDS[key]]).coordinate for key in fields}
+        allowed.add(source_sheet.cell(row, STATUS_COLUMN).coordinate)
+        for current_row in range(4, source_sheet.max_row + 1):
+            for column in range(1, source_sheet.max_column + 1):
+                old, new = source_sheet.cell(current_row, column), staged_sheet.cell(current_row, column)
+                old_link = old.hyperlink.target if old.hyperlink else None
+                new_link = new.hyperlink.target if new.hyperlink else None
+                if old.coordinate not in allowed and (old.value != new.value or old._style != new._style or old_link != new_link):
+                    raise RuntimeError(f"manual_changed:{old.coordinate}")
+                if isinstance(old.value, str) and old.value.startswith("=") and old.value != new.value:
+                    raise RuntimeError(f"manual_formula_changed:{old.coordinate}")
+        # W, Y:Z and the canonical number are intentionally not in ``allowed``.
         sheet_path = _sheet_xml_path(source, SHEET)
         if _extension_block(source, sheet_path) != _extension_block(staged, sheet_path):
             raise RuntimeError("x14_extensions_changed")
