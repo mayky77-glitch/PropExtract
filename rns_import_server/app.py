@@ -236,7 +236,10 @@ def _is_strong_out_of_scope(pdf: Path, text: str) -> bool:
     )
 
 
-def _should_retry_identity(pdf: Path, text: str = "") -> bool:
+def _should_retry_identity(pdf: Path, text: str = "", source: str | None = None) -> bool:
+    """Allow one recovery pass without escalating neutral raster misses."""
+    if source == "text_layer":
+        return _is_permit_like(pdf, text) or not _is_strong_out_of_scope(pdf, text)
     return _is_permit_like(pdf, text)
 
 
@@ -564,7 +567,7 @@ def collect(
             if (
                 extracted is None
                 and not canonical_rns_identities(text)
-                and _should_retry_identity(pdf, text)
+                and _should_retry_identity(pdf, text, text_source)
                 and not (text_source == "raster" and dpi >= IDENTITY_RETRY_DPI)
             ):
                 try:

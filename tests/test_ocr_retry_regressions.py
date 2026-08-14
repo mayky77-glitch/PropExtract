@@ -64,15 +64,35 @@ def test_collect_retries_bad_text_layer_once_with_true_raster_at_180(monkeypatch
     assert documents[0]["ocr_source"] == "raster"
 
 
-def test_collect_retries_bad_text_layer_once_with_true_raster_at_direct_400(monkeypatch, tmp_path: Path):
-    pdf = tmp_path / "Разрешение на строительство.pdf"
+def test_collect_retries_permit_basename_despite_strong_gpzu_text_layer_title(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "Разрешение по ГПЗУ.pdf"
     pdf.write_bytes(b"synthetic")
     calls: list[tuple[int, int, bool]] = []
 
     def reader(source: Path, dpi: int, max_pages: int, *, force_ocr: bool = False):
         calls.append((dpi, max_pages, force_ocr))
         if not force_ocr:
-            return OCRText("Номер РНС не читается", source="text_layer"), 16
+            return OCRText("ГПЗУ: градостроительный план земельного участка", source="text_layer"), 16
+        return OCRText(f"Номер разрешения на строительство: {NUMBER}", source="raster"), 16
+
+    monkeypatch.setattr(app, "read_ocr", reader)
+    records, documents = app.collect(tmp_path, 180, 0, pdfs=[pdf])
+
+    assert calls == [(180, 0, False), (180, 10, True)]
+    assert list(records) == [NUMBER]
+    assert documents[0]["outcome"] == "processed_rns"
+    assert documents[0]["ocr_trace"]["fallback_reason"] == "identity_missing_text_layer"
+
+
+def test_collect_retries_bad_text_layer_once_with_true_raster_at_direct_400(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"synthetic")
+    calls: list[tuple[int, int, bool]] = []
+
+    def reader(source: Path, dpi: int, max_pages: int, *, force_ocr: bool = False):
+        calls.append((dpi, max_pages, force_ocr))
+        if not force_ocr:
+            return OCRText("Номер не читается", source="text_layer"), 16
         return OCRText(f"Номер разрешения на строительство: {NUMBER}", source="raster"), 16
 
     monkeypatch.setattr(app, "read_ocr", reader)
@@ -82,6 +102,44 @@ def test_collect_retries_bad_text_layer_once_with_true_raster_at_direct_400(monk
     assert list(records) == [NUMBER]
     assert documents[0]["ocr_trace"]["route"] == "text_layer_then_raster"
     assert documents[0]["ocr_trace"]["fallback_reason"] == "identity_missing_text_layer"
+
+
+def test_collect_retries_neutral_bad_text_layer_once_with_true_raster(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"synthetic")
+    calls: list[tuple[int, int, bool]] = []
+
+    def reader(source: Path, dpi: int, max_pages: int, *, force_ocr: bool = False):
+        calls.append((dpi, max_pages, force_ocr))
+        if not force_ocr:
+            return OCRText("Номер не читается", source="text_layer"), 16
+        return OCRText(f"Номер разрешения на строительство: {NUMBER}", source="raster"), 16
+
+    monkeypatch.setattr(app, "read_ocr", reader)
+    records, documents = app.collect(tmp_path, 180, 0, pdfs=[pdf])
+
+    assert calls == [(180, 0, False), (180, 10, True)]
+    assert list(records) == [NUMBER]
+    assert documents[0]["outcome"] == "processed_rns"
+    assert documents[0]["ocr_trace"]["fallback_reason"] == "identity_missing_text_layer"
+
+
+def test_collect_does_not_escalate_neutral_raster_miss(monkeypatch, tmp_path: Path):
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"synthetic")
+    calls: list[tuple[int, int, bool]] = []
+
+    def reader(source: Path, dpi: int, max_pages: int, *, force_ocr: bool = False):
+        calls.append((dpi, max_pages, force_ocr))
+        return OCRText("растр без номера", source="raster"), 16
+
+    monkeypatch.setattr(app, "read_ocr", reader)
+    records, documents = app.collect(tmp_path, 180, 0, pdfs=[pdf])
+
+    assert calls == [(180, 0, False)]
+    assert records == {}
+    assert documents[0]["outcome"] == "unidentified_permit"
+    assert documents[0]["ocr_trace"]["fallback_reason"] is None
 
 
 def test_collect_uses_one_bounded_400_fallback_after_an_actual_raster_miss(monkeypatch, tmp_path: Path):

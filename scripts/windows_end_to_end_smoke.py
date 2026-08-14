@@ -434,7 +434,7 @@ def _verify_field_contracts() -> str:
 
     with tempfile.TemporaryDirectory(prefix="propextract-retry-contract-") as retry_name:
         retry_root = Path(retry_name)
-        permit_pdf = retry_root / "Разрешение по ГПЗУ.pdf"
+        permit_pdf = retry_root / "scan.pdf"
         permit_pdf.write_bytes(b"synthetic")
         calls: list[tuple[int, int, bool]] = []
 
@@ -451,7 +451,7 @@ def _verify_field_contracts() -> str:
                     f"Номер разрешения на строительство: {number}",
                     source="raster",
                 ), 1
-            return OCRText("неисправный текстовый слой", source="text_layer"), 1
+            return OCRText("Номер не читается", source="text_layer"), 16
 
         original_read_ocr = app.read_ocr
         try:
@@ -459,10 +459,40 @@ def _verify_field_contracts() -> str:
             recovered, documents = app.collect(retry_root, 400, 0, pdfs=[permit_pdf])
         finally:
             app.read_ocr = original_read_ocr
-        if list(recovered) != [number] or calls != [(400, 0, False), (400, 1, True)]:
+        if list(recovered) != [number] or calls != [(400, 0, False), (400, 10, True)]:
             raise RuntimeError("direct-400 bad text layer did not get one bounded forced-raster retry")
         if documents[0].get("outcome") != "processed_rns":
-            raise RuntimeError("permit evidence did not outrank its GPZU reference")
+            raise RuntimeError("generic direct-400 fixture did not recover its permit number")
+
+        calls.clear()
+
+        permit_context_pdf = retry_root / "Разрешение по ГПЗУ.pdf"
+        permit_context_pdf.write_bytes(b"synthetic")
+
+        def permit_context_then_raster(
+            source: Path,
+            dpi: int,
+            pages: int,
+            *,
+            force_ocr: bool = False,
+        ) -> tuple[OCRText, int]:
+            calls.append((dpi, pages, force_ocr))
+            if force_ocr:
+                return OCRText(
+                    f"Номер разрешения на строительство: {number}",
+                    source="raster",
+                ), 16
+            return OCRText("ГПЗУ: градостроительный план земельного участка", source="text_layer"), 16
+
+        try:
+            app.read_ocr = permit_context_then_raster
+            recovered, documents = app.collect(retry_root, 180, 0, pdfs=[permit_context_pdf])
+        finally:
+            app.read_ocr = original_read_ocr
+        if list(recovered) != [number] or calls != [(180, 0, False), (180, 10, True)]:
+            raise RuntimeError("permit basename lost precedence over a strong GPZU text-layer title")
+        if documents[0].get("outcome") != "processed_rns":
+            raise RuntimeError("permit/context fixture did not recover its permit number")
 
         calls.clear()
 
