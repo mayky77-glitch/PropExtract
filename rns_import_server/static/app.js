@@ -42,6 +42,17 @@
     }
   }
 
+  function publicFailure(payload, fallback, fallbackHint = "") {
+    const error = typeof payload?.error === "string" && payload.error.trim() ? payload.error.trim() : fallback;
+    const hint = typeof payload?.hint === "string" && payload.hint.trim() ? payload.hint.trim() : fallbackHint;
+    return {error, hint};
+  }
+
+  function publicFailureText(payload, fallback, fallbackHint = "") {
+    const {error, hint} = publicFailure(payload, fallback, fallbackHint);
+    return hint ? `${error} ${hint}` : error;
+  }
+
   document.querySelectorAll("[data-shutdown]").forEach(button => {
     button.addEventListener("click", async () => {
       if (!window.confirm("Остановить PropExtract? Во время следующего запуска нужно будет открыть файл «Запустить PropExtract.cmd».")) return;
@@ -53,9 +64,13 @@
           body: "{}"
         });
         const payload = await responseJson(response);
-        if (!response.ok) throw new Error(payload.error || "Не удалось остановить программу");
+        if (!response.ok) {
+          showToast(publicFailureText(payload, "Не удалось остановить PropExtract. Повторите попытку."), 6000);
+          button.disabled = false;
+          return;
+        }
         if (shutdownScreen) shutdownScreen.hidden = false;
-      } catch (error) {
+      } catch (_) {
         button.disabled = false;
         showToast("Не удалось остановить PropExtract. Повторите попытку.", 6000);
       }
@@ -231,7 +246,10 @@
           signal: controller.signal
         });
         const payload = await responseJson(response);
-        if (!response.ok) throw new Error(payload.error || "Не удалось открыть окно выбора");
+        if (!response.ok) {
+          showToast(publicFailureText(payload, "Не удалось открыть окно выбора. Вставьте путь вручную или повторите попытку."), 7000);
+          return;
+        }
         if (payload.path) {
           target.value = payload.path;
           target.focus();
@@ -278,8 +296,9 @@
     const allAlreadyPresent = Number(stats.record_count || 0) > 0
       && Number(stats.already_present_count || 0) === Number(stats.record_count || 0)
       && Number(stats.changed_rows || 0) === 0;
-    resultTitle.textContent = allAlreadyPresent ? "Данные уже внесены" : "Реестр обновлён";
-    resultBadge.textContent = allAlreadyPresent ? "Совпадают" : "Готово";
+    const unchangedReview = job.published === false && !allAlreadyPresent;
+    resultTitle.textContent = allAlreadyPresent ? "Данные уже внесены" : unchangedReview ? "Реестр не изменён" : "Реестр обновлён";
+    resultBadge.textContent = allAlreadyPresent ? "Совпадают" : unchangedReview ? "Без изменений" : "Готово";
     const alreadyPresentRatio = `${Number(stats.already_present_count || 0)} из ${Number(stats.record_count || 0)}`;
     const statItems = [
       [stats.pdf_count, "PDF обработано"],
@@ -367,7 +386,11 @@
       const suffix = documentId ? `/documents/${encodeURIComponent(documentId)}/open` : `/proposals/${encodeURIComponent(proposalId)}/approve`;
       const response = await fetch(`/api/jobs/${encodeURIComponent(job.id)}${suffix}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({capability: job.capability})});
       const payload = await responseJson(response);
-      if (!response.ok) throw new Error(payload.error || "Не удалось выполнить действие");
+      if (!response.ok) {
+        button.disabled = false;
+        showToast(publicFailureText(payload, "Не удалось выполнить действие. Обновите результат и повторите попытку."), 6000);
+        return;
+      }
       if (proposalId) { showToast("Изменение перенесено. Резервная копия создана."); poll(job.id); }
       else showToast("Открываем исходный PDF.");
     } catch (error) { button.disabled = false; showToast("Не удалось выполнить действие. Обновите результат и повторите попытку.", 6000); }
@@ -400,7 +423,13 @@
         body: JSON.stringify({capability: job.capability, fields})
       });
       const updatedJob = await responseJson(response);
-      if (!response.ok) throw new Error(updatedJob.error || "Не удалось сохранить исправления.");
+      if (!response.ok) {
+        feedback.textContent = publicFailureText(updatedJob, "Не удалось сохранить исправления. Проверьте данные и повторите попытку.");
+        saveButton.disabled = false;
+        cancelButton.disabled = false;
+        editForm.removeAttribute("aria-busy");
+        return;
+      }
       window.currentPropExtractJob = updatedJob;
       renderResult(updatedJob);
       showToast("Исправления сохранены.");
@@ -416,7 +445,7 @@
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {cache: "no-store"});
       const job = await responseJson(response);
-      if (!response.ok) throw new Error(job.error || "Не удалось получить состояние");
+      if (!response.ok) throw new Error("Не удалось получить состояние");
       setProgress(job);
       window.currentPropExtractJob = job;
       if (job.status === "done" || job.status === "error") {
@@ -447,7 +476,13 @@
         body: JSON.stringify(payload)
       });
       const job = await responseJson(response);
-      if (!response.ok) throw new Error(job.error || "Не удалось запустить импорт");
+      if (!response.ok) {
+        const failure = publicFailure(job, "Не удалось запустить импорт.", "Проверьте подключение к PropExtract и параметры запуска.");
+        startButton.disabled = false;
+        setProgress({progress: 0, stage: "Запуск остановлен", status: "error"});
+        renderResult({status: "error", error: failure.error, error_hint: failure.hint});
+        return;
+      }
       poll(job.id);
     } catch (error) {
       startButton.disabled = false;

@@ -136,7 +136,7 @@ def publish_manual_edit(manager: Any, job_id: str, edit_id: str, capability: obj
                 field_key = field_keys.get(str(public.get("field")))
                 if public.get("field") in changed_labels and field_key:
                     public["status"] = "resolved_manual"; public["action"] = "Исправлено вручную"; public["manual_value"] = refreshed_values[field_key]
-            current.update(edits_internal=edits, row_cards=cards, proposals_internal=proposals, proposals=public_proposals, target_hash=staged_hash, updated_at=datetime.now().isoformat(timespec="seconds"))
+            current.update(edits_internal=edits, row_cards=cards, proposals_internal=proposals, proposals=public_proposals, published=True, target_hash=staged_hash, updated_at=datetime.now().isoformat(timespec="seconds"))
         return manager.public(job_id) or {}
     except Exception:
         with manager._lock:
@@ -212,7 +212,7 @@ def publish_proposal(manager: Any, job_id: str, proposal_id: str, capability: ob
             for item in public:
                 if item.get("id") == proposal_id:
                     item["status"] = "approved"
-            current.update(proposals_internal=proposals, proposals=public, target_hash=staged_hash, updated_at=datetime.now().isoformat(timespec="seconds"))
+            current.update(proposals_internal=proposals, proposals=public, published=True, target_hash=staged_hash, updated_at=datetime.now().isoformat(timespec="seconds"))
         return {"status": "approved", "backup": backup.name}
     except Exception:
         with manager._lock:

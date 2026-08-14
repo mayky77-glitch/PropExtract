@@ -407,6 +407,66 @@ def test_job_with_only_already_present_changes_keeps_workbook_unchanged(tmp_path
     assert finished["backup"] is None
 
 
+def test_stable_review_repeat_preserves_manual_audit_marker_without_publication(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "изменение.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "38-1-1-2026"
+    sheet["D4"] = "Старый объект"
+    book.save(target)
+    review = "Связанные документы требуют проверки."
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        record = _synthetic_record("38-1-1-2026", pdf)
+        record.update(object="Новый объект", merge_issues=[{"field": "issuer", "message": review}])
+        result = apply({"38-1-1-2026": record}, xlsx, output, sha256(xlsx))
+        result.update({
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "selected_records": {
+                "38-1-1-2026": {
+                    "filename": pdf.name,
+                    "pdf": str(pdf),
+                    "object": "Новый объект",
+                    "field_sources": {"object": str(pdf)},
+                    "merge_issues": [{"field": "issuer", "message": review}],
+                }
+            },
+        })
+        return result
+
+    manager = JobManager(runner, error_log=tmp_path / "error.log")
+    first = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    assert first["status"] == "done"
+    backups = target.parent / "Резервные копии PropExtract"
+    first_backups = sorted(item.name for item in backups.glob("*.xlsx"))
+    assert first_backups
+
+    workbook = load_workbook(target)
+    workbook[SHEET]["AA4"] = f"{workbook[SHEET]['AA4'].value}\nИсправлено вручную: подтверждено оператором"
+    workbook.save(target)
+    manual_hash = sha256(target)
+    manual_mtime_ns = target.stat().st_mtime_ns
+
+    second = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+
+    assert second["status"] == "done"
+    assert second["backup"] is None
+    assert second["published"] is False
+    assert manager.public(str(second["id"]))["published"] is False
+    assert sha256(target) == manual_hash
+    assert target.stat().st_mtime_ns == manual_mtime_ns
+    assert sorted(item.name for item in backups.glob("*.xlsx")) == first_backups
+    assert "Исправлено вручную: подтверждено оператором" in str(load_workbook(target)[SHEET]["AA4"].value)
+
+
 def test_disk_report_redacts_source_paths_while_server_retains_capability_path(tmp_path: Path):
     pdf_dir = tmp_path / "private-pdfs"
     pdf_dir.mkdir()
@@ -678,7 +738,8 @@ def test_new_record_style_is_allowed_but_existing_row_style_change_is_rejected(t
     saved_book.save(output)
     repeated = apply({"38-2-2-2026": record}, output, tmp_path / "repeated.xlsx", sha256(output))
     assert repeated["changes"][0]["outcome"] == "already_present"
-    repeated_sheet = load_workbook(tmp_path / "repeated.xlsx")[SHEET]
+    assert repeated["published"] is False
+    repeated_sheet = load_workbook(output)[SHEET]
     assert repeated_sheet["W5"].value == "Старая ссылка"
     assert repeated_sheet["W5"].hyperlink.target == "https://example.invalid/old.pdf"
     assert repeated_sheet["AA5"].value == "Старый статус"

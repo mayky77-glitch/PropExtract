@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 from copy import copy
@@ -33,6 +34,12 @@ HEADERS = {
 }
 DATE_FMT = "dd\\.mm\\.yyyy"
 _STANDARD_CF = re.compile(rb"<conditionalFormatting\b.*?</conditionalFormatting>", re.DOTALL)
+_SYSTEM_STATUS_PREFIXES = (
+    "Не перенесено «",
+    "Не подтверждено «",
+    "В документе не найдено ни одного подтверждённого поля для переноса.",
+    "Связанные изменения содержат разные значения поля «",
+)
 
 
 def iso_date(value: object) -> datetime | None:
@@ -83,6 +90,32 @@ def _change_outcome(new: bool, written: list[str], issues: list[str]) -> str:
     if written:
         return "updated"
     return "already_present"
+
+
+def _status_value(existing: object, issues: list[str]) -> str | None:
+    """Replace generated review lines without discarding operator audit notes."""
+    preserved = [
+        line for line in str(existing).splitlines()
+        if not line.startswith(_SYSTEM_STATUS_PREFIXES)
+    ] if existing not in (None, "") else []
+    lines = list(dict.fromkeys([*issues, *preserved]))
+    return "\n".join(lines) or None
+
+
+def _set_status_presentation(status, reference) -> bool:
+    """Apply the standard AA presentation and report whether it changed."""
+    changed = False
+    for attribute in ("font", "fill", "border", "number_format", "protection"):
+        if copy(getattr(status, attribute)) != copy(getattr(reference, attribute)):
+            setattr(status, attribute, copy(getattr(reference, attribute)))
+            changed = True
+    alignment = copy(reference.alignment)
+    alignment.wrap_text = True
+    alignment.vertical = "top"
+    if copy(status.alignment) != alignment:
+        status.alignment = alignment
+        changed = True
+    return changed
 
 
 _TRANSFER_FIELDS = ("stage", "object", "issue", "end", "changed", "issuer", "builder", "region", "district", "developer")
@@ -387,13 +420,24 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
     try:
         workbook = load_workbook(source)
         sheet = workbook[SHEET]
+        mutated = False
         existing_status_header = sheet.cell(3, STATUS_COLUMN).value
         if existing_status_header not in (None, "", STATUS_HEADER):
             raise RuntimeError(f"status_column_occupied:{sheet.cell(3, STATUS_COLUMN).coordinate}")
         status_header = sheet.cell(3, STATUS_COLUMN)
-        status_header.value = STATUS_HEADER
-        status_header._style = copy(sheet.cell(3, HEADERS["Ссылка на документ"])._style)
-        sheet.column_dimensions[status_header.column_letter].width = 58
+        if status_header.value != STATUS_HEADER:
+            status_header.value = STATUS_HEADER
+            mutated = True
+        header_reference = sheet.cell(3, HEADERS["Ссылка на документ"])
+        header_style = copy(header_reference._style)
+        if (header_reference.has_style and status_header._style != header_style) or (
+            not header_reference.has_style and status_header.has_style
+        ):
+            status_header._style = header_style
+            mutated = True
+        if sheet.column_dimensions[status_header.column_letter].width != 58:
+            sheet.column_dimensions[status_header.column_letter].width = 58
+            mutated = True
         conflicts, changes = [], []
         statuses: dict[str, str | None] = {}
         outcomes: dict[str, str] = {}
@@ -429,12 +473,11 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 ]
                 if row is not None:
                     status = sheet.cell(row, STATUS_COLUMN)
-                    status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
-                    status_alignment = copy(status.alignment)
-                    status_alignment.wrap_text = True
-                    status_alignment.vertical = "top"
-                    status.alignment = status_alignment
-                    status.value = "\n".join(issues)
+                    mutated = _set_status_presentation(status, sheet.cell(row, HEADERS["Примечание"])) or mutated
+                    value = _status_value(status.value, issues)
+                    if status.value != value:
+                        status.value = value
+                        mutated = True
                     statuses[number] = status.value
                 changes.append({"number": number, "row": row, "new": False, "outcome": "review", "written": [], "document": record["filename"], "end": record.get("end"), "status": statuses[number], "issues": issues})
                 continue
@@ -443,6 +486,7 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 _copy_row_style(sheet, row - 1, row)
                 ids = [sheet.cell(item, 1).value for item in range(4, row) if isinstance(sheet.cell(item, 1).value, int)]
                 sheet.cell(row, 1).value = max(ids, default=0) + 1
+                mutated = True
             mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number if new else None, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
             issues, written = list(merge_issue_messages), []
             quality = record.get("field_quality", {})
@@ -460,12 +504,13 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                     # substantively different cell. Server-side quality policy
                     # then exposes it as review-only, never as a proposal.
                     if target.value not in (None, ""):
-                        _put(target, value, label, number, conflicts)
+                        mutated = _put(target, value, label, number, conflicts) or mutated
                     continue
                 if issue := transfer_issue(label, target.value, value):
                     issues.append(issue)
                 if _put(target, value, label, number, conflicts):
                     written.append(target.coordinate)
+                    mutated = True
             outcome = _change_outcome(new, written, issues)
             outcomes[number] = outcome
             link = sheet.cell(row, HEADERS["Ссылка на документ"])
@@ -475,14 +520,16 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
             # by the job capability instead; an explicit proposal approval may
             # still update W later.
             if outcome != "already_present" and (new or written):
-                link.value, link.hyperlink, link.style = str(record["filename"]), Path(str(record["pdf"])).as_uri(), "Hyperlink"
+                link_value, link_target = str(record["filename"]), Path(str(record["pdf"])).as_uri()
+                if link.value != link_value or not link.hyperlink or link.hyperlink.target != link_target or link.style != "Hyperlink":
+                    link.value, link.hyperlink, link.style = link_value, link_target, "Hyperlink"
+                    mutated = True
             if outcome != "already_present":
-                status._style = copy(sheet.cell(row, HEADERS["Примечание"])._style)
-                status_alignment = copy(status.alignment)
-                status_alignment.wrap_text = True
-                status_alignment.vertical = "top"
-                status.alignment = status_alignment
-                status.value = "\n".join(issues) or None
+                mutated = _set_status_presentation(status, sheet.cell(row, HEADERS["Примечание"])) or mutated
+                value = _status_value(status.value, issues)
+                if status.value != value:
+                    status.value = value
+                    mutated = True
             statuses[number] = status.value
             changes.append({
                 "number": number,
@@ -495,6 +542,16 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 "status": status.value,
                 "issues": issues,
             })
+        if not mutated:
+            if sha256(source) != source_hash:
+                raise RuntimeError("source_xlsx_changed")
+            verification = _validate(source, source, records, statuses, outcomes)
+            if source.resolve() != output.resolve():
+                shutil.copy2(source, staged)
+                if sha256(staged) != source_hash:
+                    raise RuntimeError("no_op_copy_changed")
+                os.replace(staged, output)
+            return {"changes": changes, "conflicts": conflicts, "verification": verification, "published": False}
         workbook.save(staged)
         _reinject_native_conditional_formatting(source, staged)
         _reinject_extensions(source, staged)
@@ -502,7 +559,7 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
             raise RuntimeError("source_xlsx_changed")
         verification = _validate(source, staged, records, statuses, outcomes)
         os.replace(staged, output)
-        return {"changes": changes, "conflicts": conflicts, "verification": verification}
+        return {"changes": changes, "conflicts": conflicts, "verification": verification, "published": True}
     finally:
         staged.unlink(missing_ok=True)
 

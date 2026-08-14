@@ -631,11 +631,12 @@ def _verify_admin_edit_contracts() -> str:
         sheet["W4"] = old_pdf.name; sheet["W4"].hyperlink = old_pdf.as_uri()
         sheet["Y4"], sheet["Z4"] = '=IF(A4<>"",ROW(),"")', '=IF(F4<>"",ROW(),"")'
         book.save(target)
+        quality_status = "review"
 
         def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict[str, object]:
             record = {"number": PERMIT_NUMBER, "filename": pdf.name, "pdf": str(pdf), "stage": None, "object": "Новый объект", "issue": None, "end": None, "changed": None, "issuer": None, "builder": None, "region": None, "district": None, "developer": None, "merge_issues": [{"message": "Требуется сверка."}]}
             result = apply({PERMIT_NUMBER: record}, xlsx, output, sha256(xlsx))
-            result.update(input_hashes={"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}}, documents=[{"file": str(pdf)}], logical_records=[PERMIT_NUMBER], selected_records={PERMIT_NUMBER: {**record, "field_sources": {"object": pdf.name}, "field_quality": {"object": {"status": "review", "reason": "low_ocr_confidence"}}}})
+            result.update(input_hashes={"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}}, documents=[{"file": str(pdf)}], logical_records=[PERMIT_NUMBER], selected_records={PERMIT_NUMBER: {**record, "field_sources": {"object": pdf.name}, "field_quality": {"object": {"status": quality_status, "reason": "low_ocr_confidence"}}}})
             return result
 
         manager = JobManager(runner, error_log=root / "error.log")
@@ -660,7 +661,30 @@ def _verify_admin_edit_contracts() -> str:
             raise RuntimeError("manual edit did not refresh the public review card")
         if saved["F4"].value != PERMIT_NUMBER or saved["W4"].hyperlink.target != before_link or saved["Y4"].value != '=IF(A4<>"",ROW(),"")' or saved["Z4"].value != '=IF(F4<>"",ROW(),"")':
             raise RuntimeError("manual edit changed identity, W, or Y:Z invariants")
-    return "invalid-date,outcomes,quality,manual-edit,ooxml"
+
+        book = Workbook(); sheet = book.active; sheet.title = SHEET
+        sheet["F4"], sheet["D4"], sheet["H4"] = PERMIT_NUMBER, "Старый объект", datetime(2025, 12, 31)
+        sheet["W4"] = old_pdf.name; sheet["W4"].hyperlink = old_pdf.as_uri()
+        sheet["Y4"], sheet["Z4"] = '=IF(A4<>"",ROW(),"")', '=IF(F4<>"",ROW(),"")'
+        book.save(target)
+        quality_status = "actionable"
+        actionable = JobManager(runner, error_log=root / "actionable-error.log")
+        actionable_id = str(actionable.start(str(pdf_dir), str(target))["id"])
+        for _ in range(100):
+            job = actionable.get(actionable_id)
+            if job and job.get("status") in {"done", "error"}:
+                break
+            time.sleep(0.02)
+        else:
+            raise RuntimeError("actionable proposal contract job did not finish")
+        public = actionable.public(actionable_id)
+        if not public or public.get("status") != "done" or not public.get("proposals") or public["proposals"][0].get("status") != "pending":
+            raise RuntimeError("actionable proposal did not expose initial pending status")
+        actionable.approve(actionable_id, str(public["proposals"][0]["id"]), public["capability"])
+        approved = actionable.public(actionable_id)
+        if not approved or approved["proposals"][0].get("status") != "approved":
+            raise RuntimeError("actionable proposal approval did not refresh public status")
+    return "invalid-date,outcomes,quality,manual-edit,proposal-status,ooxml"
 
 
 def self_test() -> dict[str, object]:

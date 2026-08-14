@@ -107,6 +107,7 @@ def test_http_manual_edit_current_job_replay_proposal_resolution_and_invariants(
         assert "xlsx" not in job and "target_hash" not in job and "edits_internal" not in job
         card = job["row_cards"][0]  # type: ignore[index]
         proposal = job["proposals"][0]  # type: ignore[index]
+        assert proposal["status"] == "pending"
         edit_id, capability = str(card["edit_id"]), str(job["capability"])
         before = sha256(target)
 

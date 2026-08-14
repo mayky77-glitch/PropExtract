@@ -100,10 +100,13 @@ with sync_playwright() as playwright:
     page.screenshot(path=SCREENSHOTS / "already-present-dark.png", full_page=True)
     page.unroute("**/api/jobs**", mock_job)
 
-    review_state = {"approved": False}
+    review_state = {"approved": False, "approval_failed": True}
 
     def mock_review_job(route):
         if route.request.method == "POST" and route.request.url.endswith("/approve"):
+            if review_state["approval_failed"]:
+                route.fulfill(status=409, content_type="application/json", body='{"error":"Изменение уже обрабатывается.","hint":"Дождитесь завершения и обновите результат."}')
+                return
             review_state["approved"] = True
             route.fulfill(status=200, content_type="application/json", body='{"status":"approved","backup":"backup.xlsx"}')
             return
@@ -118,6 +121,7 @@ with sync_playwright() as playwright:
                 "status": "done",
                 "progress": 100,
                 "stage": "Готово",
+                "published": review_state["approved"],
                 "summary": {
                     "pdf_count": 2,
                     "record_count": 2,
@@ -154,6 +158,8 @@ with sync_playwright() as playwright:
 
     page.route("**/api/jobs**", mock_review_job)
     page.get_by_role("button", name="Перенести данные").click()
+    page.get_by_role("heading", name="Реестр не изменён").wait_for(timeout=5000)
+    expect(page.locator("#result-badge")).to_have_text("Без изменений")
     page.get_by_role("heading", name="Строки для проверки").wait_for(timeout=5000)
     expect(page.locator(".record-value--existing span")).to_have_text("В таблице")
     expect(page.locator(".record-value--existing strong")).to_have_text("31.12.2026")
@@ -163,6 +169,10 @@ with sync_playwright() as playwright:
     assert page.get_by_role("button", name="Перенести в таблицу").is_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
     page.screenshot(path=SCREENSHOTS / "review-comparison-dark.png", full_page=True)
+    page.get_by_role("button", name="Перенести в таблицу").click()
+    expect(page.locator("#toast")).to_have_text("Изменение уже обрабатывается. Дождитесь завершения и обновите результат.")
+    expect(page.get_by_role("button", name="Перенести в таблицу")).to_be_enabled()
+    review_state["approval_failed"] = False
     page.get_by_role("button", name="Перенести в таблицу").click()
     page.get_by_role("heading", name="Изменения перенесены").wait_for(timeout=5000)
     assert page.get_by_role("button", name="Перенести в таблицу").count() == 0
@@ -186,7 +196,7 @@ with sync_playwright() as playwright:
         if route.request.method == "POST" and "/edits/" in route.request.url:
             edit_state["payloads"].append(route.request.post_data_json)
             if edit_state["failed"]:
-                route.fulfill(status=400, content_type="application/json", body='{"error":"Проверьте введённые данные."}')
+                route.fulfill(status=400, content_type="application/json", body='{"error":"Проверьте введённые данные.","hint":"Исправьте поле и повторите попытку."}')
             else:
                 edit_state["saved"] = True
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(manual_edit_job(), ensure_ascii=False))
@@ -215,7 +225,7 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="Исправить данные").click()
     page.locator("[data-edit-input]").first.fill("Ошибка проверки")
     page.get_by_role("button", name="Сохранить исправления").click()
-    expect(page.locator("[data-edit-feedback]")).to_have_text("Не удалось сохранить исправления. Проверьте данные и повторите попытку.")
+    expect(page.locator("[data-edit-feedback]")).to_have_text("Проверьте введённые данные. Исправьте поле и повторите попытку.")
     expect(page.get_by_role("button", name="Сохранить исправления")).to_be_enabled()
     assert "opaque-capability" not in page.locator("#result").inner_text()
     page.unroute("**/api/jobs**", mock_manual_edit)
@@ -243,7 +253,8 @@ with sync_playwright() as playwright:
     page.get_by_role("button", name="Перенести данные").click()
     page.get_by_role("heading", name="Реестр не изменён").wait_for(timeout=5000)
     error_text = page.locator("#result-paths").inner_text()
-    assert "Проверьте подключение к PropExtract и параметры запуска." in error_text
+    assert "Проверьте папку с PDF, файл Excel и параметры операции." in error_text
+    assert "Исправьте данные и повторите действие." in error_text
     assert "/path/that/does/not/exist" not in error_text
     assert page.get_by_role("button", name="Перенести данные").is_enabled()
 

@@ -345,7 +345,10 @@ class JobManager:
             self._update(job_id, progress=98, stage="Создаём резервную копию", current_file=None)
             expected_hash = str(result["input_hashes"]["xlsx"])
             changes = result.get("changes", [])
-            is_noop = all(item.get("outcome") == "already_present" for item in changes)
+            published = result.get("published")
+            is_noop = not published if isinstance(published, bool) else all(
+                item.get("outcome") == "already_present" for item in changes
+            )
             # Imports and delayed proposal approvals publish to the same target.
             # Serialize both paths, then recheck the user's workbook immediately
             # before replacement because Excel/sync tools do not share this lock.
@@ -454,7 +457,7 @@ class JobManager:
                     continue
                 proposal_id = uuid.uuid4().hex
                 proposals_internal[proposal_id] = {"number": number, "field": field, "value": conflict["pdf"], "document_id": document_id, "status": "pending"}
-                public_proposals.append({"id": proposal_id, "number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "review_details": merge_review_details or None, "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
+                public_proposals.append({"id": proposal_id, "number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "status": "pending", "review_details": merge_review_details or None, "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
             edits_internal: dict[str, dict[str, object]] = {}
             row_cards = []
             for change in changes:
@@ -512,6 +515,7 @@ class JobManager:
                 backup=str(backup) if backup else None,
                 report=str(report) if report_error is None else None,
                 warning=" ".join(warnings) or None,
+                published=not is_noop,
                 documents=public_documents,
                 documents_internal=documents_internal,
                 proposals=public_proposals,
