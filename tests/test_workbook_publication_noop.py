@@ -45,6 +45,33 @@ def test_stable_review_is_not_republished_and_preserves_manual_aa_marker(tmp_pat
     assert "Исправлено вручную: «Наименование объекта»." in load_workbook(workbook)[SHEET].cell(4, STATUS_COLUMN).value
 
 
+def test_low_quality_semantic_noop_after_manual_edit_preserves_aa_without_publication(tmp_path: Path):
+    workbook = tmp_path / "register.xlsx"
+    pdf = tmp_path / "review.pdf"
+    _review_workbook(workbook)
+    pdf.touch()
+    sheet = load_workbook(workbook)[SHEET]
+    sheet["D4"] = "Подтверждённый объект"
+    sheet.cell(4, STATUS_COLUMN).value = "Исправлено вручную: «Наименование объекта»."
+    sheet.column_dimensions["AA"].width = 58
+    sheet.parent.save(workbook)
+    before_hash, before_mtime = sha256(workbook), workbook.stat().st_mtime_ns
+
+    result = apply({"38-1-1-2026": {
+        "filename": pdf.name,
+        "pdf": pdf,
+        "object": "Подтверждённый объект",
+        "field_quality": {"object": {"status": "review", "reason": "low_confidence"}},
+    }}, workbook, workbook, before_hash)
+
+    assert result["published"] is False
+    assert result["changes"][0]["physical_mutation"] is False
+    assert result["changes"][0]["issues"] == []
+    assert sha256(workbook) == before_hash
+    assert workbook.stat().st_mtime_ns == before_mtime
+    assert load_workbook(workbook)[SHEET].cell(4, STATUS_COLUMN).value == "Исправлено вручную: «Наименование объекта»."
+
+
 def test_stable_review_rejects_a_stale_source_hash(tmp_path: Path):
     workbook = tmp_path / "register.xlsx"
     pdf = tmp_path / "review.pdf"

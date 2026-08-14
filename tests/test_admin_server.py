@@ -122,6 +122,7 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "failed_pdf_count": 0,
         "record_count": 1,
         "changed_rows": 1,
+        "review_rows": 0,
         "new_rows": 0,
         "already_present_count": 0,
         "already_present_files": [],
@@ -132,6 +133,117 @@ def test_job_replaces_target_only_after_verified_backup(tmp_path: Path):
         "row_numbers": [42],
         "new_row_numbers": [],
     }
+
+
+def test_initial_noop_report_failure_uses_completion_warning_without_claiming_excel_update(monkeypatch, tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"; pdf_dir.mkdir()
+    pdf = pdf_dir / "sample.pdf"; pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"; target.write_bytes(b"original")
+
+    def noop_runner(*_args, **_kwargs):
+        return {
+            "input_hashes": {"xlsx": sha256(target)},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["00-00-00-0000"],
+            "changes": [{"new": False, "row": 42, "issues": [], "outcome": "already_present", "document": pdf.name, "physical_mutation": False}],
+            "conflicts": [],
+            "published": False,
+        }
+
+    monkeypatch.setattr(server, "atomic_json", lambda *_: (_ for _ in ()).throw(OSError("report unavailable")))
+    manager = JobManager(noop_runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+
+    assert finished["status"] == "done"
+    assert finished["published"] is False
+    assert finished["warning"] == "Обработка завершена, но отчёт не записан."
+    assert "Excel обновлён" not in finished["warning"]
+    assert target.read_bytes() == b"original"
+
+
+def test_initial_final_report_is_atomic_before_public_done(monkeypatch, tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"; pdf_dir.mkdir()
+    (pdf_dir / "sample.pdf").write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"; target.write_bytes(b"original")
+    entered, release = threading.Event(), threading.Event()
+    original = server.atomic_json
+
+    def block_report(path: Path, value: dict):
+        entered.set()
+        assert release.wait(timeout=5)
+        original(path, value)
+
+    monkeypatch.setattr(server, "atomic_json", block_report)
+    manager = JobManager(_fake_runner, error_log=tmp_path / "error.log")
+    job_id = str(manager.start(str(pdf_dir), str(target))["id"])
+    assert entered.wait(timeout=5)
+    pending = manager.public(job_id)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    assert pending is not None and pending["status"] != "done"
+    assert not report.exists()
+
+    release.set()
+    finished = _wait(manager, job_id)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+
+    assert finished["status"] == "done"
+    assert payload["final_state"]["status"] == "done"
+    assert payload["final_state"]["workbook_sha256"] == sha256(target)
+
+
+def test_successful_action_report_refresh_clears_only_its_generated_warning(monkeypatch, tmp_path: Path):
+    manager, job, _, _ = _proposal_job(tmp_path, {"object": "Новый объект"})
+    proposal = job["proposals"][0]
+    original = server.write_final_action_report
+    monkeypatch.setattr(server, "write_final_action_report", lambda *_: (_ for _ in ()).throw(OSError("transient")))
+
+    manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
+    with manager._lock:
+        manager._jobs[str(job["id"])]["warning"] = "PDF пропущено: 1. Причины сохранены в отчёте. Excel обновлён, но отчёт не записан."
+
+    monkeypatch.setattr(server, "write_final_action_report", original)
+    manager._write_final_action_report(str(job["id"]))
+    refreshed = manager.get(str(job["id"]))
+
+    assert refreshed["warning"] == "PDF пропущено: 1. Причины сохранены в отчёте."
+    assert refreshed["report"] is not None
+
+
+def test_approval_recreates_failed_noop_report_and_clears_only_generated_warnings(monkeypatch, tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"; pdf_dir.mkdir()
+    pdf = pdf_dir / "sample.pdf"; pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    book = Workbook(); sheet = book.active; sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"; sheet["F4"] = "38-1-1-2026"; sheet["D4"] = "Старый объект"
+    book.save(target)
+
+    def noop_proposal_runner(*_args, **_kwargs):
+        return {
+            "input_hashes": {"xlsx": sha256(target), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "changes": [{"number": "38-1-1-2026", "new": False, "row": 4, "issues": ["Требуется сверка."], "outcome": "review", "document": pdf.name, "physical_mutation": False}],
+            "conflicts": [{"number": "38-1-1-2026", "field": "Наименование объекта", "existing": "Старый объект", "pdf": "Новый объект", "action": "Перенести изменения"}],
+            "selected_records": {"38-1-1-2026": {"object": "Новый объект", "pdf": str(pdf), "field_sources": {"object": pdf.name}}},
+            "published": False,
+        }
+
+    original_atomic = server.atomic_json
+    monkeypatch.setattr(server, "atomic_json", lambda *_: (_ for _ in ()).throw(OSError("report unavailable")))
+    manager = JobManager(noop_proposal_runner, error_log=tmp_path / "error.log")
+    job = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+    assert job["warning"] == "Обработка завершена, но отчёт не записан."
+    proposal = job["proposals"][0]
+    monkeypatch.setattr(server, "atomic_json", original_atomic)
+    with manager._lock:
+        manager._jobs[str(job["id"])]["warning"] = "Обычное предупреждение. Обработка завершена, но отчёт не записан. Excel обновлён, но отчёт не записан."
+
+    manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
+    refreshed = manager.get(str(job["id"]))
+
+    assert refreshed["warning"] == "Обычное предупреждение."
+    assert refreshed["report"] is not None
+    assert load_workbook(target)[SHEET]["D4"].value == "Новый объект"
 
 
 def test_merge_review_issue_is_public_and_ui_groups_it_for_operator_decision(tmp_path: Path):
@@ -249,7 +361,7 @@ def test_merge_review_details_remain_visible_when_same_row_has_a_proposal(tmp_pa
     javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
     assert "Связанные документы требуют проверки" in javascript
     assert "item.review_details" in javascript
-    assert 'item.status !== "approved" || item.review_details' in javascript
+    assert 'item.review_details || (item.status !== "approved" && !manuallyResolvedStatuses.has(item.status))' in javascript
     assert 'item.status === "approved" && !item.review_details' in javascript
     assert "Поле перенесено — нужна проверка" in javascript
 
@@ -299,6 +411,7 @@ def test_approved_field_keeps_unresolved_merge_review_visible_and_in_excel_statu
     finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
     assert finished["status"] == "done" and len(finished["proposals"]) == 1
     proposal = finished["proposals"][0]
+    edit_id = finished["row_cards"][0]["edit_id"]
 
     manager.approve(str(finished["id"]), str(proposal["id"]), str(finished["capability"]))
     public = manager.public(str(finished["id"]))
@@ -309,6 +422,20 @@ def test_approved_field_keeps_unresolved_merge_review_visible_and_in_excel_statu
     assert public["proposals"][0]["review_details"] == message
     assert saved["D4"].value == "Новый объект"
     assert saved["AA4"].value == message
+
+    public = manager.edit(
+        str(finished["id"]), str(edit_id), str(finished["capability"]), {"object": "Проверено вручную"}
+    )
+    proposal = public["proposals"][0]
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    final_state = json.loads(report.read_text(encoding="utf-8"))["final_state"]
+    javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
+
+    assert proposal["status"] == "resolved_manual"
+    assert proposal["review_details"] == message
+    assert public["summary"]["review_rows"] == 1
+    assert final_state["summary"]["review_rows"] == 1
+    assert 'item.review_details || (item.status !== "approved" && !manuallyResolvedStatuses.has(item.status))' in javascript
 
 
 def test_job_refuses_external_edit_after_verified_backup(monkeypatch, tmp_path: Path):
@@ -1234,6 +1361,22 @@ def test_approved_date_proposal_updates_exact_row_link_and_verified_backup(tmp_p
     assert saved["AA4"].value is None
     assert backed_up["H4"].value == datetime(2025, 12, 31)
     assert manager.public(str(job["id"]))["proposals"][0]["status"] == "approved"
+    public = manager.public(str(job["id"]))
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    assert public["summary"]["review_rows"] == 0
+    assert json.loads(report.read_text(encoding="utf-8"))["final_state"]["summary"]["review_rows"] == 0
+
+
+def test_review_rows_remain_once_until_every_same_row_proposal_is_resolved(tmp_path: Path):
+    manager, job, _, _ = _proposal_job(tmp_path, {"object": "Новый объект", "end": "31.12.2026"})
+    proposals = job["proposals"]
+    assert manager.public(str(job["id"]))["summary"]["review_rows"] == 1
+
+    manager.approve(str(job["id"]), str(proposals[0]["id"]), job["capability"])
+    assert manager.public(str(job["id"]))["summary"]["review_rows"] == 1
+
+    manager.approve(str(job["id"]), str(proposals[1]["id"]), job["capability"])
+    assert manager.public(str(job["id"]))["summary"]["review_rows"] == 0
 
 
 def test_distinct_proposals_are_serialized_without_lost_update(tmp_path: Path):

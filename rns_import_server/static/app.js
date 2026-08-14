@@ -332,7 +332,7 @@
       return renderProposalCard({...item, edit_id: rowCard.edit_id, editable_fields: rowCard.editable_fields, editable_values: rowCard.editable_values}, documents);
     };
     const reviewCards = [
-      ...(job.proposals || []).filter(item => (item.status !== "approved" || item.review_details) && !manuallyResolvedStatuses.has(item.status)).map(renderProposal),
+      ...(job.proposals || []).filter(item => item.review_details || (item.status !== "approved" && !manuallyResolvedStatuses.has(item.status))).map(renderProposal),
       ...(job.row_cards || [])
         .filter(item => item.needs_review && !proposalRows.has(`${item.row ?? ""}::${item.number || ""}`))
         .map(item => renderReviewCard(item, documents))

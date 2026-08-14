@@ -329,7 +329,7 @@ def _verify_field_contracts() -> str:
             ".filter(item => item.needs_review",
             "item.details ||",
             "item.review_details",
-            "item.status !== \"approved\" || item.review_details",
+            "item.review_details || (item.status !== \"approved\" && !manuallyResolvedStatuses.has(item.status))",
             "item.status === \"approved\" && !item.review_details",
             "Строки для проверки",
         )
@@ -632,9 +632,10 @@ def _verify_admin_edit_contracts() -> str:
         sheet["Y4"], sheet["Z4"] = '=IF(A4<>"",ROW(),"")', '=IF(F4<>"",ROW(),"")'
         book.save(target)
         quality_status = "review"
+        record_object = "Новый объект"
 
         def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict[str, object]:
-            record = {"number": PERMIT_NUMBER, "filename": pdf.name, "pdf": str(pdf), "stage": None, "object": "Новый объект", "issue": None, "end": None, "changed": None, "issuer": None, "builder": None, "region": None, "district": None, "developer": None, "merge_issues": [{"message": "Требуется сверка."}]}
+            record = {"number": PERMIT_NUMBER, "filename": pdf.name, "pdf": str(pdf), "stage": None, "object": record_object, "issue": None, "end": None, "changed": None, "issuer": None, "builder": None, "region": None, "district": None, "developer": None, "merge_issues": [{"message": "Требуется сверка."}], "field_quality": {"object": {"status": quality_status, "reason": "low_ocr_confidence"}}}
             result = apply({PERMIT_NUMBER: record}, xlsx, output, sha256(xlsx))
             result.update(input_hashes={"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}}, documents=[{"file": str(pdf)}], logical_records=[PERMIT_NUMBER], selected_records={PERMIT_NUMBER: {**record, "field_sources": {"object": pdf.name}, "field_quality": {"object": {"status": quality_status, "reason": "low_ocr_confidence"}}}})
             return result
@@ -661,6 +662,34 @@ def _verify_admin_edit_contracts() -> str:
             raise RuntimeError("manual edit did not refresh the public review card")
         if saved["F4"].value != PERMIT_NUMBER or saved["W4"].hyperlink.target != before_link or saved["Y4"].value != '=IF(A4<>"",ROW(),"")' or saved["Z4"].value != '=IF(F4<>"",ROW(),"")':
             raise RuntimeError("manual edit changed identity, W, or Y:Z invariants")
+        # D-001/D-005: a weak OCR value equal to the manual value is not a
+        # workbook mutation.  Existing review remains visible but no weak
+        # generated AA line, backup, hash, or mtime change is allowed.
+        record_object = "Исправленный объект"
+        before_hash, before_mtime = sha256(target), target.stat().st_mtime_ns
+        manual_aa = str(load_workbook(target, data_only=False)[SHEET]["AA4"].value)
+        if "Исправлено вручную" not in manual_aa:
+            raise RuntimeError("manual edit did not persist AA audit marker")
+        backups = target.parent / "Резервные копии PropExtract"
+        before_backups = sorted(item.name for item in backups.glob("*.xlsx"))
+        repeated_id = str(manager.start(str(pdf_dir), str(target))["id"])
+        for _ in range(100):
+            repeated = manager.get(repeated_id)
+            if repeated and repeated.get("status") in {"done", "error"}:
+                break
+            time.sleep(0.02)
+        else:
+            raise RuntimeError("stable low-quality no-op job did not finish")
+        if not repeated or repeated.get("published") is not False or repeated.get("backup") is not None:
+            raise RuntimeError("manual-equivalent low-quality review republished the workbook")
+        summary = repeated.get("summary", {})
+        if summary.get("changed_rows") != 0 or summary.get("review_rows") != 1:
+            raise RuntimeError("stable review summary does not separate physical and review rows")
+        if sha256(target) != before_hash or target.stat().st_mtime_ns != before_mtime or sorted(item.name for item in backups.glob("*.xlsx")) != before_backups:
+            raise RuntimeError("manual-equivalent low-quality review changed workbook or backups")
+        stable_aa = str(load_workbook(target, data_only=False)[SHEET]["AA4"].value)
+        if stable_aa != manual_aa or "значение PDF требует ручной сверки" in stable_aa:
+            raise RuntimeError("manual-equivalent low-quality review recreated generated AA warning")
 
         book = Workbook(); sheet = book.active; sheet.title = SHEET
         sheet["F4"], sheet["D4"], sheet["H4"] = PERMIT_NUMBER, "Старый объект", datetime(2025, 12, 31)
@@ -680,11 +709,28 @@ def _verify_admin_edit_contracts() -> str:
         public = actionable.public(actionable_id)
         if not public or public.get("status") != "done" or not public.get("proposals") or public["proposals"][0].get("status") != "pending":
             raise RuntimeError("actionable proposal did not expose initial pending status")
+        report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+        initial_report = json.loads(report.read_text(encoding="utf-8"))
+        if not initial_report.get("input_hashes") or not initial_report.get("verification") or initial_report.get("final_state", {}).get("actions") != []:
+            raise RuntimeError("initial final action report is incomplete")
+        edit_id = str(public["row_cards"][0]["edit_id"])
         actionable.approve(actionable_id, str(public["proposals"][0]["id"]), public["capability"])
         approved = actionable.public(actionable_id)
         if not approved or approved["proposals"][0].get("status") != "approved":
             raise RuntimeError("actionable proposal approval did not refresh public status")
-    return "invalid-date,outcomes,quality,manual-edit,proposal-status,ooxml"
+        actionable.edit(actionable_id, edit_id, public["capability"], {"object": "Финальное ручное значение"})
+        final_report = json.loads(report.read_text(encoding="utf-8"))
+        final = final_report.get("final_state", {})
+        expected_actions = [
+            {"type": "proposal_approved", "row": 4, "field": "Наименование объекта", "status": "approved"},
+            {"type": "manual_edit", "row": 4, "field": "Наименование объекта", "status": "edited"},
+        ]
+        if final.get("actions") != expected_actions or final.get("summary", {}).get("changed_rows") is None:
+            raise RuntimeError("final action report did not retain ordered final state")
+        report_text = json.dumps(final_report, ensure_ascii=False)
+        if str(target) in report_text or public["capability"] in report_text or "Финальное ручное значение" in report_text:
+            raise RuntimeError("final action report leaked private path, capability, or raw edit")
+    return "invalid-date,outcomes,quality,manual-edit,proposal-status,report-final-state,review-summary,ooxml"
 
 
 def self_test() -> dict[str, object]:

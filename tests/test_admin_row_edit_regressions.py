@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 
 from rns_import_server.audit import sha256
 from rns_import_server import row_edit
+from rns_import_server import server
 from rns_import_server.server import JobManager
 from rns_import_server.workbook import SHEET, apply
 
@@ -60,10 +61,10 @@ def _review_job(tmp_path: Path, *, quality: dict[str, object] | None = None) -> 
 
     def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict[str, object]:
         record = _record(pdf, object="Новый объект")
+        if quality is not None:
+            record["field_quality"] = quality
         result = apply({NUMBER: record}, xlsx, output, sha256(xlsx))
         selected = {**record, "field_sources": {"object": pdf.name}}
-        if quality is not None:
-            selected["field_quality"] = quality
         result.update(input_hashes={"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf), old_pdf.name: sha256(old_pdf)}}, documents=[{"file": str(pdf)}], logical_records=[NUMBER], selected_records={NUMBER: selected})
         return result
 
@@ -136,7 +137,7 @@ def test_manual_edit_is_current_job_capability_bound_atomic_and_preserves_invari
 
 
 def test_manual_resolution_projects_the_saved_value_not_stale_pdf_proposal(tmp_path: Path):
-    manager, job, _, _ = _review_job(tmp_path)
+    manager, job, target, _ = _review_job(tmp_path)
     public = manager.public(str(job["id"]))
     edit_id, proposal_id = public["row_cards"][0]["edit_id"], public["proposals"][0]["id"]  # type: ignore[index]
     result = manager.edit(str(job["id"]), edit_id, job["capability"], {"object": "Третье ручное значение"})
@@ -144,6 +145,9 @@ def test_manual_resolution_projects_the_saved_value_not_stale_pdf_proposal(tmp_p
     javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
     assert proposal["status"] == "resolved_manual" and proposal["manual_value"] == "Третье ручное значение"
     assert proposal["object"] == "Третье ручное значение"
+    assert result["summary"]["review_rows"] == 0
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    assert __import__("json").loads(report.read_text(encoding="utf-8"))["final_state"]["summary"]["review_rows"] == 0
     assert 'resolved ? "Исправлено" : "В документе"' in javascript
     assert "const displayedValue = resolved ? item.manual_value : item.proposed;" in javascript
 
@@ -207,6 +211,96 @@ def test_manual_edit_can_supersede_an_already_approved_field(tmp_path: Path):
     proposal = next(item for item in updated["proposals"] if item.get("id") == proposal_id)
     assert proposal["status"] == "resolved_manual"
     assert proposal["manual_value"] == "Финальное ручное значение"
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    actions = __import__("json").loads(report.read_text(encoding="utf-8"))["final_state"]["actions"]
+    assert actions == [
+        {"type": "proposal_approved", "row": 4, "field": "Наименование объекта", "status": "approved"},
+        {"type": "manual_edit", "row": 4, "field": "Наименование объекта", "status": "edited"},
+    ]
+
+
+def test_post_manual_low_quality_semantic_noop_has_no_new_backup_or_changed_rows(tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path, quality={"object": {"status": "review", "reason": "low_confidence"}})
+    public = manager.public(str(job["id"]))
+    manager.edit(str(job["id"]), public["row_cards"][0]["edit_id"], job["capability"], {"object": "Новый объект"})
+    before_hash, before_mtime = sha256(target), target.stat().st_mtime_ns
+    manual_aa = str(load_workbook(target)[SHEET]["AA4"].value)
+    backups = target.parent / "Резервные копии PropExtract"
+    before_backups = sorted(item.name for item in backups.glob("*.xlsx"))
+
+    repeated = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+
+    assert repeated["published"] is False
+    assert repeated["backup"] is None
+    assert repeated["summary"]["changed_rows"] == 0
+    assert repeated["summary"]["review_rows"] == 0
+    assert sha256(target) == before_hash
+    assert target.stat().st_mtime_ns == before_mtime
+    assert str(load_workbook(target)[SHEET]["AA4"].value) == manual_aa and "Исправлено вручную" in manual_aa
+    assert sorted(item.name for item in backups.glob("*.xlsx")) == before_backups
+
+
+def test_manual_edit_refreshes_allowlisted_final_report_after_verified_publication(tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    public = manager.public(str(job["id"]))
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    initial = __import__("json").loads(report.read_text(encoding="utf-8"))
+    assert isinstance(initial["input_hashes"]["xlsx"], str)
+    assert initial["verification"]["x14_preserved"] is True
+    assert initial["final_state"]["actions"] == []
+    manager.edit(str(job["id"]), public["row_cards"][0]["edit_id"], job["capability"], {"object": "Проверено вручную"})
+
+    payload = __import__("json").loads(report.read_text(encoding="utf-8"))
+    raw = __import__("json").dumps(payload, ensure_ascii=False)
+    state = manager.get(str(job["id"]))
+
+    final = payload["final_state"]
+    assert final["schema"] == "propextract.final-action.v1"
+    assert final["published"] is True
+    assert final["workbook_sha256"] == sha256(target)
+    assert final["actions"] == [{"type": "manual_edit", "row": 4, "field": "Наименование объекта", "status": "edited"}]
+    assert payload["input_hashes"] == initial["input_hashes"] and payload["verification"] == initial["verification"]
+    assert "capability" not in raw and str(target) not in raw and "Проверено вручную" not in raw
+    assert state["report"] == str(report)
+
+
+def test_report_failure_after_manual_edit_is_a_safe_warning_and_keeps_workbook(monkeypatch, tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    public = manager.public(str(job["id"]))
+    monkeypatch.setattr(server, "write_final_action_report", lambda *_: (_ for _ in ()).throw(OSError("private/path")))
+
+    updated = manager.edit(str(job["id"]), public["row_cards"][0]["edit_id"], job["capability"], {"object": "Сохранено"})
+
+    assert load_workbook(target)[SHEET]["D4"].value == "Сохранено"
+    assert updated["published"] is True
+    assert updated["warning"] == "Excel обновлён, но отчёт не записан."
+    assert "private/path" not in __import__("json").dumps(updated, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("tamper", ["replace", "delete", "symlink"])
+def test_action_report_rebuilds_from_server_safe_base_not_tampered_disk(tamper: str, tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    external = tmp_path / "external.json"
+    external.write_text('{"private":"external-secret"}', encoding="utf-8")
+    if tamper == "replace":
+        report.write_text('{"private":"disk-secret"}', encoding="utf-8")
+    elif tamper == "delete":
+        report.unlink()
+    else:
+        report.unlink()
+        report.symlink_to(external)
+
+    public = manager.public(str(job["id"]))
+    assert "report_base_internal" not in public
+    manager.edit(str(job["id"]), public["row_cards"][0]["edit_id"], job["capability"], {"object": "Сохранено"})
+
+    payload = __import__("json").loads(report.read_text(encoding="utf-8"))
+    raw = __import__("json").dumps(payload, ensure_ascii=False)
+    assert report.is_symlink() is False
+    assert payload["final_state"]["workbook_sha256"] == sha256(target)
+    assert "disk-secret" not in raw and "external-secret" not in raw
+    assert external.read_text(encoding="utf-8") == '{"private":"external-secret"}'
 
 
 @pytest.mark.parametrize("first", ["approve", "edit"])

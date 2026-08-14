@@ -1,6 +1,7 @@
 """Loopback-only admin server with background import jobs."""
 from __future__ import annotations
 
+import copy
 import json
 import errno
 import hashlib
@@ -23,6 +24,7 @@ from urllib.parse import unquote, urlparse
 
 try:
     from rns_import_server.audit import atomic_json, sha256
+    from rns_import_server.job_report import final_report_payload, report_path, write_final_action_report
     from rns_import_server.workbook import EDITABLE_FIELDS, editable_field_values
     from rns_import_server.row_edit import publish_manual_edit, publish_proposal
     from rns_import_server.files import discover_pdfs
@@ -30,6 +32,7 @@ try:
     from rns_import_server.app import safe_report_projection
 except ModuleNotFoundError:
     from audit import atomic_json, sha256
+    from job_report import final_report_payload, report_path, write_final_action_report
     from workbook import EDITABLE_FIELDS, editable_field_values
     from row_edit import publish_manual_edit, publish_proposal
     from files import discover_pdfs
@@ -51,6 +54,8 @@ ASSETS = {
 }
 PICKER_LOCK = threading.Lock()
 ERROR_LOG = Path(__file__).resolve().parents[1] / "propextract-error.log"
+ACTION_REPORT_WARNING = "Excel обновлён, но отчёт не записан."
+INITIAL_REPORT_WARNING = "Обработка завершена, но отчёт не записан."
 
 
 def select_path(kind: str) -> str | None:
@@ -87,6 +92,43 @@ def select_path(kind: str) -> str | None:
         PICKER_LOCK.release()
 def _tool_status() -> dict[str, object]:
     return runtime_status()
+
+
+def _append_warning(value: object, message: str) -> str:
+    warning = str(value or "").strip()
+    return warning if message in warning else " ".join(part for part in (warning, message) if part)
+
+
+def _remove_warning(value: object, message: str) -> str | None:
+    """Remove only the exact generated fragment, preserving other warnings."""
+    warning = re.sub(r"\s{2,}", " ", str(value or "").replace(message, "").strip())
+    return warning or None
+
+
+def _recompute_review_rows(job: dict[str, object]) -> None:
+    """Count distinct rows that still need an operator decision."""
+    summary = job.get("summary")
+    cards = job.get("row_cards")
+    proposals = job.get("proposals")
+    if not isinstance(summary, dict) or not isinstance(cards, list) or not isinstance(proposals, list):
+        return
+    unresolved: set[object] = set()
+    for card in cards:
+        if not isinstance(card, dict) or not card.get("needs_review"):
+            continue
+        row = card.get("row")
+        key = row if isinstance(row, int) else card.get("number")
+        related = [item for item in proposals if isinstance(item, dict) and item.get("row") == row]
+        if not related:
+            unresolved.add(key)
+            continue
+        if any(
+            item.get("review_details")
+            or item.get("status") not in {"approved", "resolved_manual"}
+            for item in related
+        ):
+            unresolved.add(key)
+    summary["review_rows"] = len(unresolved)
 def user_path(value: str) -> Path:
     """Normalize paths pasted from Explorer without changing valid filename characters."""
     text = value.strip()
@@ -277,7 +319,7 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             return None
-        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal", "edits_internal"}
+        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal", "edits_internal", "action_events_internal", "report_base_internal"}
         value = {key: item for key, item in job.items() if key not in hidden}
         for key in ("current_file", "error_file"):
             if key in value:
@@ -376,12 +418,8 @@ class JobManager:
                     temporary = None
             result["output"] = str(target)
             result["backup"] = str(backup) if backup else None
-            report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+            report = report_path(target)
             report_error = None
-            try:
-                atomic_json(report, safe_report_projection(result))
-            except Exception as error:  # Workbook is already safely published and backed up.
-                report_error = str(error)
             documents = result.get("documents", [])
             failed_documents = [item for item in documents if item.get("outcome") in {"unidentified_permit", "processing_failed"} or (not item.get("outcome") and item.get("error"))]
             input_hashes = result.get("input_hashes", {})
@@ -456,8 +494,9 @@ class JobManager:
                     public_proposals.append({"number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "review_details": merge_review_details or _public_issue(quality.get("reason")), "document_id": document_id, "filename": source_name, "quality": "review"})
                     continue
                 proposal_id = uuid.uuid4().hex
-                proposals_internal[proposal_id] = {"number": number, "field": field, "value": conflict["pdf"], "document_id": document_id, "status": "pending"}
-                public_proposals.append({"id": proposal_id, "number": number, "row": next((change.get("row") for change in changes if change.get("number") == number), None), "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "status": "pending", "review_details": merge_review_details or None, "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
+                proposal_row = next((change.get("row") for change in changes if change.get("number") == number), None)
+                proposals_internal[proposal_id] = {"number": number, "row": proposal_row, "field": field, "value": conflict["pdf"], "document_id": document_id, "status": "pending"}
+                public_proposals.append({"id": proposal_id, "number": number, "row": proposal_row, "field": field, "existing": conflict["existing"], "proposed": conflict["pdf"], "object": record.get("object"), "status": "pending", "review_details": merge_review_details or None, "action": "Перенести изменения", "document_id": document_id, "filename": source_name})
             edits_internal: dict[str, dict[str, object]] = {}
             row_cards = []
             for change in changes:
@@ -479,11 +518,20 @@ class JobManager:
                         row_card.update(edit_id=edit_id, editable_fields=[{"key": key, "label": label, "type": "date" if key in {"issue", "end", "changed"} else "text"} for key, label in EDITABLE_FIELDS.items()], editable_values=values)
                 row_cards.append(row_card)
             already_present = [item for item in changes if item.get("outcome") == "already_present"]
+            has_physical_mutation_flags = bool(changes) and all("physical_mutation" in item for item in changes if isinstance(item, dict))
             summary = {
                 "pdf_count": len(documents) - len(failed_documents),
                 "failed_pdf_count": len(failed_documents),
                 "record_count": len(result.get("logical_records", [])),
-                "changed_rows": sum(1 for item in changes if item.get("outcome") != "already_present"),
+                "changed_rows": (
+                    sum(1 for item in changes if item.get("physical_mutation") is True)
+                    if has_physical_mutation_flags else sum(1 for item in changes if item.get("outcome") != "already_present")
+                ) if not is_noop else 0,
+                "review_rows": len({
+                    item.get("row") if item.get("row") is not None else item.get("number")
+                    for item in changes
+                    if item.get("outcome") in {"review", "review_conflict"}
+                }),
                 "new_rows": sum(1 for item in changes if item.get("new")),
                 "already_present_count": len(already_present),
                 "already_present_files": [str(item["document"]) for item in already_present if item.get("document")],
@@ -504,16 +552,17 @@ class JobManager:
             warnings = []
             if failed_documents:
                 warnings.append(f"PDF пропущено: {len(failed_documents)}. Причины сохранены в отчёте.")
-            if report_error:
-                warnings.append("Excel обновлён, но отчёт не записан.")
+            report_base = safe_report_projection(result)
+            if not isinstance(report_base, dict):
+                raise RuntimeError("report_projection_invalid")
             self._update(
                 job_id,
-                status="done",
-                progress=100,
-                stage="Готово",
+                status="running",
+                progress=99,
+                stage="Формируем отчёт",
                 summary=summary,
                 backup=str(backup) if backup else None,
-                report=str(report) if report_error is None else None,
+                report=None,
                 warning=" ".join(warnings) or None,
                 published=not is_noop,
                 documents=public_documents,
@@ -524,7 +573,26 @@ class JobManager:
                 row_cards=row_cards,
                 target_hash=sha256(target),
                 pdf_hashes=pdf_hashes,
+                report_base_internal=copy.deepcopy(report_base),
             )
+            try:
+                # Keep the job non-actionable until the initial safe report has
+                # its fully assembled public final state.
+                with self._publish_lock:
+                    snapshot = self.get(job_id) or {}
+                    snapshot["status"] = "done"
+                    snapshot["progress"] = 100
+                    snapshot["stage"] = "Готово"
+                    atomic_json(report, final_report_payload(snapshot))
+                    self._update(job_id, status="done", progress=100, stage="Готово", report=str(report))
+            except Exception:
+                warnings.append(ACTION_REPORT_WARNING if not is_noop else INITIAL_REPORT_WARNING)
+                report_error = "report_write_failed"
+                self._update(job_id, status="done", progress=100, stage="Готово", report=None)
+            if report_error is None and warnings:
+                self._update(job_id, warning=" ".join(warnings))
+            elif report_error is not None:
+                self._update(job_id, warning=" ".join(warnings))
         except Exception as error:
             failed_job = self.get(job_id) or {}
             error_log = self._write_error_log(job_id, error, failed_job)
@@ -570,10 +638,67 @@ class JobManager:
         os.startfile(str(path))  # type: ignore[attr-defined]  # Windows API; no shell.
 
     def approve(self, job_id: str, proposal_id: str, capability: object) -> dict[str, object]:
-        return publish_proposal(self, job_id, proposal_id, capability, retry_file_operation)
+        result = publish_proposal(self, job_id, proposal_id, capability, retry_file_operation)
+        self._append_action_event(job_id, proposal_id, "proposal_approved")
+        self._refresh_review_rows(job_id)
+        self._write_final_action_report(job_id)
+        return result
 
     def edit(self, job_id: str, edit_id: str, capability: object, fields: object) -> dict[str, object]:
-        return publish_manual_edit(self, job_id, edit_id, capability, fields, retry_file_operation)
+        publish_manual_edit(self, job_id, edit_id, capability, fields, retry_file_operation)
+        self._append_action_event(job_id, edit_id, "manual_edit")
+        self._refresh_review_rows(job_id)
+        self._write_final_action_report(job_id)
+        return self.public(job_id) or {}
+
+    def _append_action_event(self, job_id: str, action_id: str, kind: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            source = job.get("proposals_internal") if kind == "proposal_approved" else job.get("edits_internal")
+            item = dict(source.get(action_id, {})) if isinstance(source, dict) else {}
+            row = item.get("row")
+            fields = (item.get("field"),) if kind == "proposal_approved" else tuple(item.get("field_labels", ()))
+            if not isinstance(row, int):
+                return
+            events = list(job.get("action_events_internal", []))
+            for field in fields:
+                if isinstance(field, str):
+                    events.append({"type": kind, "row": row, "field": field, "status": "approved" if kind == "proposal_approved" else "edited"})
+            job["action_events_internal"] = events
+
+    def _refresh_review_rows(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                _recompute_review_rows(job)
+
+    def _write_final_action_report(self, job_id: str) -> None:
+        """Record final state after a verified XLSX action without rollback."""
+        with self._publish_lock:
+            with self._lock:
+                job = self._jobs.get(job_id)
+                snapshot = dict(job) if job else None
+            if not snapshot:
+                return
+            try:
+                path = write_final_action_report(Path(str(snapshot["xlsx"])), snapshot)
+            except Exception:
+                # The workbook transaction already committed.  Surface only a
+                # safe warning and leave its verified bytes untouched.
+                with self._lock:
+                    current = self._jobs.get(job_id)
+                    if current:
+                        current["warning"] = _append_warning(current.get("warning"), ACTION_REPORT_WARNING)
+                        current["report"] = None
+                return
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current:
+                    current["report"] = str(path)
+                    warning = _remove_warning(current.get("warning"), ACTION_REPORT_WARNING)
+                    current["warning"] = _remove_warning(warning, INITIAL_REPORT_WARNING)
 
 
 def create_server(host: str, port: int, runner: Runner, instance_id: str | None = None) -> ThreadingHTTPServer:

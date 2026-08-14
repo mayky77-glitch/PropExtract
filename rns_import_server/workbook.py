@@ -442,6 +442,9 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
         statuses: dict[str, str | None] = {}
         outcomes: dict[str, str] = {}
         for number, record in records.items():
+            # Keep publication truth per row.  A discovered review is useful to
+            # an operator, but is not itself a workbook mutation.
+            row_mutated = False
             merge_issue_messages = [
                 str(issue["message"])
                 for issue in record.get("merge_issues", [])
@@ -455,14 +458,14 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 conflicts.append({"number": number, "cell": ",".join(f"F{row}" for row in rows), "field": "Номер РНС", "existing": existing, "pdf": number, "action": "review_conflict"})
                 outcomes[number] = "review_conflict"
                 statuses[number] = None
-                changes.append({"number": number, "row": None, "new": False, "outcome": "review_conflict", "written": [], "document": record["filename"], "end": record.get("end"), "status": None, "issues": ["Несколько строк Excel содержат этот номер РНС; перенос не выполнен."]})
+                changes.append({"number": number, "row": None, "new": False, "outcome": "review_conflict", "written": [], "physical_mutation": False, "document": record["filename"], "end": record.get("end"), "status": None, "issues": ["Несколько строк Excel содержат этот номер РНС; перенос не выполнен."]})
                 continue
             row = matches[0] if matches else None
             if record.get("existing_only") and row is None:
                 conflicts.append({"number": number, "cell": "F", "field": "Номер РНС", "existing": "строка Excel не найдена", "pdf": number, "action": "review_conflict"})
                 outcomes[number] = "review_conflict"
                 statuses[number] = None
-                changes.append({"number": number, "row": None, "new": False, "outcome": "review_conflict", "written": [], "document": record["filename"], "end": record.get("end"), "status": None, "issues": ["Изменение/продление содержит номер РНС, но строка Excel не найдена; новая строка не создана."]})
+                changes.append({"number": number, "row": None, "new": False, "outcome": "review_conflict", "written": [], "physical_mutation": False, "document": record["filename"], "end": record.get("end"), "status": None, "issues": ["Изменение/продление содержит номер РНС, но строка Excel не найдена; новая строка не создана."]})
                 continue
             new = row is None
             if not any(record.get(field) is not None for field in _TRANSFER_FIELDS):
@@ -473,13 +476,16 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 ]
                 if row is not None:
                     status = sheet.cell(row, STATUS_COLUMN)
-                    mutated = _set_status_presentation(status, sheet.cell(row, HEADERS["Примечание"])) or mutated
+                    status_changed = _set_status_presentation(status, sheet.cell(row, HEADERS["Примечание"]))
+                    mutated = status_changed or mutated
+                    row_mutated = status_changed or row_mutated
                     value = _status_value(status.value, issues)
                     if status.value != value:
                         status.value = value
                         mutated = True
+                        row_mutated = True
                     statuses[number] = status.value
-                changes.append({"number": number, "row": row, "new": False, "outcome": "review", "written": [], "document": record["filename"], "end": record.get("end"), "status": statuses[number], "issues": issues})
+                changes.append({"number": number, "row": row, "new": False, "outcome": "review", "written": [], "physical_mutation": row_mutated, "document": record["filename"], "end": record.get("end"), "status": statuses[number], "issues": issues})
                 continue
             if new:
                 row = _next_data_row(sheet)
@@ -487,6 +493,7 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 ids = [sheet.cell(item, 1).value for item in range(4, row) if isinstance(sheet.cell(item, 1).value, int)]
                 sheet.cell(row, 1).value = max(ids, default=0) + 1
                 mutated = True
+                row_mutated = True
             mapping = {"Номер этапа": record.get("stage"), "Наименование объекта": record.get("object"), "Номер РНС": number if new else None, "Дата выдачи": iso_date(record.get("issue")), "Срок действия": iso_date(record.get("end")), "Дата последн. измен.": iso_date(record.get("changed")), "Орган выдачи": record.get("issuer"), "Застройщик": record.get("builder"), "Субъект РФ": record.get("region"), "Муниципальный р-н": record.get("district"), "Разработчик ПД": record.get("developer")}
             issues, written = list(merge_issue_messages), []
             quality = record.get("field_quality", {})
@@ -499,18 +506,25 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 field_key = next((key for key, mapped_label in EDITABLE_FIELDS.items() if mapped_label == label), None)
                 quality_item = quality.get(field_key, {}) if isinstance(quality, dict) and field_key else {}
                 if isinstance(quality_item, dict) and quality_item.get("status") != "actionable" and quality_item.get("status") is not None:
-                    issues.append(f"Не перенесено «{label}»: значение PDF требует ручной сверки.")
+                    # A manually confirmed value can match a weak OCR value.
+                    # Do not recreate a generated warning (or publish AA) for
+                    # that semantic no-op; preserve the operator marker.
+                    if target.value in (None, "") or not _same_value(label, target.value, value):
+                        issues.append(f"Не перенесено «{label}»: значение PDF требует ручной сверки.")
                     # Keep the usual conflict projection for an occupied,
                     # substantively different cell. Server-side quality policy
                     # then exposes it as review-only, never as a proposal.
                     if target.value not in (None, ""):
-                        mutated = _put(target, value, label, number, conflicts) or mutated
+                        wrote = _put(target, value, label, number, conflicts)
+                        mutated = wrote or mutated
+                        row_mutated = wrote or row_mutated
                     continue
                 if issue := transfer_issue(label, target.value, value):
                     issues.append(issue)
                 if _put(target, value, label, number, conflicts):
                     written.append(target.coordinate)
                     mutated = True
+                    row_mutated = True
             outcome = _change_outcome(new, written, issues)
             outcomes[number] = outcome
             link = sheet.cell(row, HEADERS["Ссылка на документ"])
@@ -524,12 +538,16 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 if link.value != link_value or not link.hyperlink or link.hyperlink.target != link_target or link.style != "Hyperlink":
                     link.value, link.hyperlink, link.style = link_value, link_target, "Hyperlink"
                     mutated = True
+                    row_mutated = True
             if outcome != "already_present":
-                mutated = _set_status_presentation(status, sheet.cell(row, HEADERS["Примечание"])) or mutated
+                status_changed = _set_status_presentation(status, sheet.cell(row, HEADERS["Примечание"]))
+                mutated = status_changed or mutated
+                row_mutated = status_changed or row_mutated
                 value = _status_value(status.value, issues)
                 if status.value != value:
                     status.value = value
                     mutated = True
+                    row_mutated = True
             statuses[number] = status.value
             changes.append({
                 "number": number,
@@ -537,6 +555,7 @@ def apply(records: dict[str, dict[str, object]], source: Path, output: Path, sou
                 "new": new,
                 "outcome": outcome,
                 "written": written,
+                "physical_mutation": row_mutated,
                 "document": record["filename"],
                 "end": record.get("end"),
                 "status": status.value,
