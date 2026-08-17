@@ -1,6 +1,6 @@
 ---
 card_id: e2e-critical-fixes-e5d9dcf-20260817-responsive-cards
-status: review
+status: done
 version: 2
 supersedes: null
 work_id: e2e-critical-fixes-e5d9dcf-20260817
