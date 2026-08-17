@@ -273,7 +273,8 @@ def test_report_failure_after_manual_edit_is_a_safe_warning_and_keeps_workbook(m
 
     assert load_workbook(target)[SHEET]["D4"].value == "Сохранено"
     assert updated["published"] is True
-    assert updated["warning"] == "Excel обновлён, но отчёт не записан."
+    assert updated["warning"].startswith("Excel обновлён, но отчёт не записан. Причина:")
+    assert "локальный путь" in updated["warning"] or "private/path" in updated["warning"]
     assert "private/path" not in __import__("json").dumps(updated, ensure_ascii=False)
 
 

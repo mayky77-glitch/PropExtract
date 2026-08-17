@@ -156,7 +156,8 @@ def test_initial_noop_report_failure_uses_completion_warning_without_claiming_ex
 
     assert finished["status"] == "done"
     assert finished["published"] is False
-    assert finished["warning"] == "Обработка завершена, но отчёт не записан."
+    assert finished["warning"].startswith("Обработка завершена, но отчёт не записан. Причина: ")
+    assert "report unavailable" in finished["warning"]
     assert "Excel обновлён" not in finished["warning"]
     assert target.read_bytes() == b"original"
 
@@ -232,7 +233,8 @@ def test_approval_recreates_failed_noop_report_and_clears_only_generated_warning
     monkeypatch.setattr(server, "atomic_json", lambda *_: (_ for _ in ()).throw(OSError("report unavailable")))
     manager = JobManager(noop_proposal_runner, error_log=tmp_path / "error.log")
     job = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
-    assert job["warning"] == "Обработка завершена, но отчёт не записан."
+    assert job["warning"].startswith("Обработка завершена, но отчёт не записан. Причина: ")
+    assert "report unavailable" in job["warning"]
     proposal = job["proposals"][0]
     monkeypatch.setattr(server, "atomic_json", original_atomic)
     with manager._lock:
@@ -364,6 +366,74 @@ def test_merge_review_details_remain_visible_when_same_row_has_a_proposal(tmp_pa
     assert 'item.review_details || (item.status !== "approved" && !manuallyResolvedStatuses.has(item.status))' in javascript
     assert 'item.status === "approved" && !item.review_details' in javascript
     assert "Поле перенесено — нужна проверка" in javascript
+
+
+def test_public_documents_include_user_friendly_error_and_hint(tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    in_scope = pdf_dir / "разрешение.pdf"
+    no_id = pdf_dir / "без-номера.pdf"
+    failed = pdf_dir / "ошибка.pdf"
+    in_scope.write_bytes(b"pdf")
+    no_id.write_bytes(b"pdf")
+    failed.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    target.write_bytes(b"original")
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        output.write_bytes(b"updated")
+        return {
+            "input_hashes": {
+                "xlsx": sha256(xlsx),
+                "pdfs": {
+                    in_scope.name: sha256(in_scope),
+                    no_id.name: sha256(no_id),
+                    failed.name: sha256(failed),
+                },
+            },
+            "documents": [
+                {"file": str(in_scope), "outcome": "out_of_scope", "error": "Документ относится к ГПЗУ."},
+                {"file": str(no_id), "outcome": "unidentified_permit", "error": "Номер не найден в тексте"},
+                {"file": str(failed), "outcome": "processing_failed", "error": "pdfinfo_failed", "technical_error": "/tmp/private/report/error.log"},
+            ],
+            "logical_records": [],
+            "selected_records": {},
+            "changes": [],
+            "conflicts": [],
+        }
+
+    manager = JobManager(runner, error_log=tmp_path / "error.log")
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))['id']))
+    public = manager.public(str(finished["id"]))
+
+    assert finished["status"] == "done"
+    assert public is not None
+    documents = {item["filename"]: item for item in public["documents"]}
+    scope_doc = documents[in_scope.name]
+    assert scope_doc["outcome"] == "out_of_scope"
+    assert "ГПЗУ/ГРО/РО" in scope_doc["error"]
+    assert "Исключите" in scope_doc["hint"]
+
+    noid_doc = documents[no_id.name]
+    assert noid_doc["outcome"] == "unidentified_permit"
+    assert "В документе не найден номер РНС" in noid_doc["error"]
+    assert "номер РНС" in noid_doc["hint"]
+
+    failed_doc = documents[failed.name]
+    assert failed_doc["outcome"] == "processing_failed"
+    assert failed_doc["error"] == "Проверьте, что PDF корректный и не открыт другим процессом, затем повторите запуск."
+    assert "повторите запуск" in failed_doc["hint"]
+    assert failed_doc["technical_error"] == "error.log"
+
+
+def test_public_error_maps_document_open_fallbacks():
+    message, hint = server.public_error(RuntimeError("document_open_unavailable"))
+    assert "недоступно" in message
+    assert "Проводник" in hint
+
+    message, hint = server.public_error(RuntimeError("document_unavailable"))
+    assert "Недоступен" in message or "недоступен" in message
+    assert "повтор" in hint.lower()
 
 
 def test_approved_field_keeps_unresolved_merge_review_visible_and_in_excel_status(tmp_path: Path):

@@ -56,6 +56,55 @@ PICKER_LOCK = threading.Lock()
 ERROR_LOG = Path(__file__).resolve().parents[1] / "propextract-error.log"
 ACTION_REPORT_WARNING = "Excel обновлён, но отчёт не записан."
 INITIAL_REPORT_WARNING = "Обработка завершена, но отчёт не записан."
+_DOCUMENT_ERROR_TEXT = {
+    "out_of_scope": "Документ распознан как ГПЗУ/ГРО/РО и не относится к РНС-потоку импорта.",
+    "unidentified_permit": "В документе не найден номер РНС для сопоставления с реестром.",
+    "processing_failed": "Проверьте, что PDF корректный и не открыт другим процессом, затем повторите запуск.",
+}
+_DOCUMENT_ERROR_HINTS = {
+    "out_of_scope": "Исключите его из папки импорта или проверьте, что это разрешение РНС.",
+    "unidentified_permit": "Проверьте, что в документе есть номер РНС (формат «РНС ...»/«№ RU-...») и текст читаемый.",
+    "processing_failed": "Проверьте, что PDF корректный и не открыт другим процессом, затем повторите запуск.",
+}
+
+
+def _public_document_error(item: dict[str, object], outcome: str) -> tuple[str | None, str | None]:
+    """Build user-safe document explanation.
+
+    The base message should explain the document outcome, while the optional hint
+    directs the operator to a concrete next step.
+    """
+    if outcome == "processed_rns":
+        return None, None
+
+    raw_error = item.get("error")
+    if isinstance(raw_error, str):
+        error = safe_report_projection(raw_error, "error")
+        if not isinstance(error, str):
+            error = str(error)
+        error = error.strip()
+    else:
+        error = ""
+    if error:
+        message = _DOCUMENT_ERROR_TEXT.get(outcome, error)
+        if not message:
+            message = error
+        hint = _DOCUMENT_ERROR_HINTS.get(outcome)
+        if not hint and outcome == "processing_failed":
+            hint = "Сохраните лог и повторите запуск."
+        return message, hint
+
+    return _DOCUMENT_ERROR_TEXT.get(outcome), _DOCUMENT_ERROR_HINTS.get(outcome)
+
+
+def _safe_exception_message(error: object, fallback: str) -> str:
+    """Return a short user-safe fallback message from an exception."""
+    value = str(error).strip()
+    value = value or fallback
+    sanitized = safe_report_projection(value, "error")
+    if isinstance(sanitized, str):
+        sanitized = re.sub(r"(?!(?:https?|ftp)://)\S*[\\/]\S*", "[локальный путь]", sanitized)
+    return str(sanitized)
 
 
 def select_path(kind: str) -> str | None:
@@ -198,6 +247,18 @@ def public_error(error: Exception) -> tuple[str, str]:
         return ("Данные изменились после запуска. Реестр не изменён.", "Запустите проверку заново и подтвердите изменение ещё раз.")
     if isinstance(error, BusyError):
         return (str(error), "Дождитесь завершения текущей операции.")
+    if isinstance(error, RuntimeError):
+        message = str(error)
+        if "document_unavailable" in message:
+            return (
+                "Файл из обработки недоступен для открытия.",
+                "Повторите импорт после проверки, что файл не перемещён и не переименован.",
+            )
+        if "document_open_unavailable" in message:
+            return (
+                "Открытие PDF недоступно в текущем окружении.",
+                "Откройте документ вручную через Проводник или повторите запуск.",
+            )
     if isinstance(error, (ValueError, TypeError)):
         return ("Проверьте папку с PDF, файл Excel и параметры операции.", "Исправьте данные и повторите действие.")
     if isinstance(error, PermissionError):
@@ -438,7 +499,22 @@ class JobManager:
                 outcome = str(item.get("outcome", ""))
                 if outcome not in {"processed_rns", "out_of_scope", "unidentified_permit", "processing_failed"}:
                     outcome = "processing_failed" if item.get("error") else "processed_rns"
-                public_documents.append({"id": document_id, "filename": raw.name, "outcome": outcome, "ocr_source": item.get("ocr_source") if item.get("ocr_source") in {"text_layer", "raster"} else None, "error": "PDF не обработан." if outcome == "processing_failed" else None})
+                doc_error, doc_hint = _public_document_error(item, outcome)
+                technical_error = item.get("technical_error")
+                if isinstance(technical_error, str):
+                    technical_error = safe_report_projection(technical_error, "technical_error")
+                    technical_error = technical_error if isinstance(technical_error, str) and technical_error.strip() else None
+                public_documents.append(
+                    {
+                        "id": document_id,
+                        "filename": raw.name,
+                        "outcome": outcome,
+                        "ocr_source": item.get("ocr_source") if item.get("ocr_source") in {"text_layer", "raster"} else None,
+                        "error": doc_error,
+                        "hint": doc_hint,
+                        "technical_error": technical_error,
+                    }
+                )
 
             def document_reference(source: object) -> tuple[str | None, str | None]:
                 candidate = Path(str(source or ""))
@@ -585,8 +661,10 @@ class JobManager:
                     snapshot["stage"] = "Готово"
                     atomic_json(report, final_report_payload(snapshot))
                     self._update(job_id, status="done", progress=100, stage="Готово", report=str(report))
-            except Exception:
-                warnings.append(ACTION_REPORT_WARNING if not is_noop else INITIAL_REPORT_WARNING)
+            except Exception as error:
+                reason = _safe_exception_message(error, "ошибка сохранения отчёта")
+                base = ACTION_REPORT_WARNING if not is_noop else INITIAL_REPORT_WARNING
+                warnings.append(f"{base} Причина: {reason}")
                 report_error = "report_write_failed"
                 self._update(job_id, status="done", progress=100, stage="Готово", report=None)
             if report_error is None and warnings:
@@ -684,13 +762,17 @@ class JobManager:
                 return
             try:
                 path = write_final_action_report(Path(str(snapshot["xlsx"])), snapshot)
-            except Exception:
+            except Exception as error:
+                reason = _safe_exception_message(error, "ошибка сохранения отчёта после действия")
                 # The workbook transaction already committed.  Surface only a
                 # safe warning and leave its verified bytes untouched.
                 with self._lock:
                     current = self._jobs.get(job_id)
                     if current:
-                        current["warning"] = _append_warning(current.get("warning"), ACTION_REPORT_WARNING)
+                        current["warning"] = _append_warning(
+                            current.get("warning"),
+                            f"{ACTION_REPORT_WARNING} Причина: {reason}",
+                        )
                         current["report"] = None
                 return
             with self._lock:

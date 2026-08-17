@@ -101,6 +101,12 @@
   const editableFieldKeys = new Set(["type", "stage", "object", "issue", "end", "changed", "issuer", "builder", "region", "district", "developer"]);
   const dateFieldKeys = new Set(["issue", "end", "changed"]);
   const manuallyResolvedStatuses = new Set(["resolved", "resolved_manual"]);
+  const documentOutcomeLabels = {
+    processed_rns: "Обработан",
+    out_of_scope: "Не относится к РНС",
+    unidentified_permit: "Нет номера РНС",
+    processing_failed: "Ошибка обработки"
+  };
 
   const sourceName = (item, documents) => {
     const document = documents[item.document_id] || {};
@@ -147,6 +153,26 @@
 
   function recordSource(item, documents) {
     return `<div class="record-source"><span class="record-label">Источник PDF</span><strong>${escapeText(sourceName(item, documents))}</strong></div>`;
+  }
+
+  function renderDocumentIssueCard(item, documents) {
+    const outcome = item.outcome || "processing_failed";
+    const label = documentOutcomeLabels[outcome] || "Требует внимания";
+    const docName = escapeText(item.filename || sourceName(item, documents));
+    const error = item.error || "Документ не обработан.";
+    const hint = item.hint || "Проверьте документ вручную и повторите запуск.";
+    const technical = item.technical_error ? `<p class=\"record-verdict\"><strong>Техническая причина:</strong> <span>${escapeText(item.technical_error)}</span></p>` : "";
+    return `<article class="record-card record-card--review">
+      <div class="record-card-main">
+        <div class="record-card-heading">
+          <div><span class="record-label">PDF</span><h4>${docName}</h4></div>
+          <span class="record-status record-status--review">${escapeText(label)}</span>
+        </div>
+        <div class="record-verdict record-verdict--review"><strong>${escapeText(error)}</strong><span>${escapeText(hint)}</span></div>
+        ${technical}
+        <div class="record-card-footer">${openDocumentButton(item)}<div class="document-open-spacer"></div></div>
+      </div>
+    </article>`;
   }
 
   function renderProposalCard(item, documents) {
@@ -319,6 +345,7 @@
     const issueRows = (stats.rows_with_issues || []).join(", ") || "нет";
     resultPaths.innerHTML = `<p><strong>Обработанные строки Excel:</strong> ${escapeText(rows)}</p><p><strong>Добавленные строки Excel:</strong> ${escapeText(newRows)}</p><p><strong>Строки со статусом:</strong> ${escapeText(issueRows)}</p>${job.warning ? `<p><strong>Предупреждение:</strong> ${escapeText(job.warning)}</p>` : ""}`;
     const documents = Object.fromEntries((job.documents || []).map(item => [item.id, item]));
+    const documentIssues = Object.values(documents).filter(item => typeof item.outcome === "string" && item.outcome !== "processed_rns");
     const proposalRows = new Set((job.proposals || []).map(item => `${item.row ?? ""}::${item.number || ""}`));
     const editableCards = new Map((job.row_cards || [])
       .filter(item => editableFields(item).length)
@@ -347,6 +374,7 @@
     const matchedCards = (job.row_cards || []).filter(item => item.outcome === "already_present").map(item => renderMatchedCard(item, documents));
     resultRows.innerHTML = [
       renderCardGroup("review-group-title", "Нужно ваше решение", "Строки для проверки", "Сверьте исходный PDF с таблицей и переносите только подтверждённые предложения.", reviewCards, "review"),
+      renderCardGroup("document-issues-title", "Требуют внимания", "Документы с проблемами", "Проверьте указанные PDF вручную, затем перезапустите импорт.", documentIssues.map(item => renderDocumentIssueCard(item, documents)), "review"),
       renderCardGroup("matched-group-title", "Без изменений", "Уже заполнены", "Данные PDF совпадают с реестром. Можно открыть исходный файл для проверки.", matchedCards, "matched"),
       renderCardGroup("approved-group-title", "Одобрено", "Изменения перенесены", "Для каждого изменения создана проверенная резервная копия.", approvedCards, "approved"),
       renderCardGroup("processed-group-title", "Готово", "Обработанные строки", "Данные перенесены и проверены.", processedCards, "processed")
