@@ -24,6 +24,7 @@ from urllib.parse import unquote, urlparse
 
 try:
     from rns_import_server.audit import atomic_json, sha256
+    from rns_import_server.action_history import load as load_action_history
     from rns_import_server.job_report import final_report_payload, report_path, write_final_action_report
     from rns_import_server.workbook import EDITABLE_FIELDS, editable_field_values
     from rns_import_server.row_edit import publish_manual_edit, publish_proposal
@@ -32,6 +33,7 @@ try:
     from rns_import_server.app import safe_report_projection
 except ModuleNotFoundError:
     from audit import atomic_json, sha256
+    from action_history import load as load_action_history
     from job_report import final_report_payload, report_path, write_final_action_report
     from workbook import EDITABLE_FIELDS, editable_field_values
     from row_edit import publish_manual_edit, publish_proposal
@@ -360,32 +362,45 @@ class JobManager:
         self.error_log = error_log
         self._jobs: dict[str, dict[str, object]] = {}
         self._lock = threading.Lock()
-        self._publish_lock = threading.Lock()
+        # Action publication needs to re-enter this lock for final-state report
+        # writing.  A separate gate preserves concurrent action reservations
+        # while preventing a new import from observing the XLSX before its audit.
+        self._publish_lock = threading.RLock()
+        self._action_reservation_lock = threading.Lock()
 
     def start(self, pdf_dir: str, xlsx: str, dpi: int = 180) -> dict[str, object]:
         pdf_path, xlsx_path = validated_job_paths(pdf_dir, xlsx)
         pdf_value, xlsx_value = str(pdf_path), str(xlsx_path)
         if dpi < 120 or dpi > 400:
             raise ValueError("DPI должен быть от 120 до 400")
-        with self._lock:
-            if any(job["status"] in {"queued", "running"} for job in self._jobs.values()):
-                raise BusyError("Уже выполняется другой импорт")
-            job_id = uuid.uuid4().hex
-            now = datetime.now().isoformat(timespec="seconds")
-            job: dict[str, object] = {
-                "id": job_id,
-                "status": "queued",
-                "progress": 0,
-                "stage": "В очереди",
-                "current_file": None,
-                "created_at": now,
-                "updated_at": now,
-                "pdf_dir": pdf_value,
-                "xlsx": xlsx_value,
-                "capability": secrets.token_urlsafe(32),
-            }
-            self._jobs[job_id] = job
-            self._trim_locked()
+        # Take the gate before publication lock, matching row_edit reservation.
+        # Thus history is sampled only before an action reserves publication or
+        # after its replacement, state recomputation, and report are complete.
+        with self._action_reservation_lock:
+            with self._publish_lock:
+                action_events_internal, history_warning = load_action_history(xlsx_path)
+                with self._lock:
+                    if any(job["status"] in {"queued", "running"} for job in self._jobs.values()):
+                        raise BusyError("Уже выполняется другой импорт")
+                    job_id = uuid.uuid4().hex
+                    now = datetime.now().isoformat(timespec="seconds")
+                    job: dict[str, object] = {
+                        "id": job_id,
+                        "status": "queued",
+                        "progress": 0,
+                        "stage": "В очереди",
+                        "current_file": None,
+                        "created_at": now,
+                        "updated_at": now,
+                        "pdf_dir": pdf_value,
+                        "xlsx": xlsx_value,
+                        "capability": secrets.token_urlsafe(32),
+                        "action_events_internal": action_events_internal,
+                        "startup_warnings_internal": [history_warning] if history_warning else [],
+                        "warning": history_warning,
+                    }
+                    self._jobs[job_id] = job
+                    self._trim_locked()
         threading.Thread(target=self._execute, args=(job_id, pdf_path, xlsx_path, dpi), daemon=True).start()
         return self.get(job_id) or {}
 
@@ -398,7 +413,7 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             return None
-        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal", "edits_internal", "action_events_internal", "report_base_internal"}
+        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal", "edits_internal", "action_events_internal", "startup_warnings_internal", "report_base_internal"}
         value = {key: item for key, item in job.items() if key not in hidden}
         for key in ("current_file", "error_file"):
             if key in value:
@@ -644,7 +659,9 @@ class JobManager:
                     unidentified_permit_count=sum(1 for item in public_documents if item.get("outcome") == "unidentified_permit"),
                     processing_failed_count=sum(1 for item in public_documents if item.get("outcome") == "processing_failed"),
                 )
-            warnings = []
+            current_job = self.get(job_id) or {}
+            startup_warnings = current_job.get("startup_warnings_internal")
+            warnings = [item for item in startup_warnings if isinstance(item, str)] if isinstance(startup_warnings, list) else []
             if failed_documents:
                 warnings.append(f"PDF пропущено: {len(failed_documents)}. Причины сохранены в отчёте.")
             report_base = safe_report_projection(result)
@@ -715,6 +732,11 @@ class JobManager:
             raise ValueError("Действие недоступно. Запустите перенос заново.")
         return job
 
+    def _reject_actions_during_import_locked(self) -> None:
+        """Actions may not reserve a workbook while an import is queued/running."""
+        if any(job.get("status") in {"queued", "running"} for job in self._jobs.values()):
+            raise BusyError("Нельзя изменять реестр, пока выполняется импорт")
+
     def open_document(self, job_id: str, document_id: str, capability: object) -> None:
         job = self._authorized(job_id, capability)
         if job.get("status") != "done":
@@ -735,18 +757,20 @@ class JobManager:
         os.startfile(str(path))  # type: ignore[attr-defined]  # Windows API; no shell.
 
     def approve(self, job_id: str, proposal_id: str, capability: object) -> dict[str, object]:
-        result = publish_proposal(self, job_id, proposal_id, capability, retry_file_operation)
-        self._append_action_event(job_id, proposal_id, "proposal_approved")
-        self._refresh_review_rows(job_id)
-        self._write_final_action_report(job_id)
-        return result
+        def finalize() -> None:
+            self._append_action_event(job_id, proposal_id, "proposal_approved")
+            self._refresh_review_rows(job_id)
+            self._write_final_action_report(job_id)
+
+        return publish_proposal(self, job_id, proposal_id, capability, retry_file_operation, finalize)
 
     def edit(self, job_id: str, edit_id: str, capability: object, fields: object) -> dict[str, object]:
-        publish_manual_edit(self, job_id, edit_id, capability, fields, retry_file_operation)
-        self._append_action_event(job_id, edit_id, "manual_edit")
-        self._refresh_review_rows(job_id)
-        self._write_final_action_report(job_id)
-        return self.public(job_id) or {}
+        def finalize() -> None:
+            self._append_action_event(job_id, edit_id, "manual_edit")
+            self._refresh_review_rows(job_id)
+            self._write_final_action_report(job_id)
+
+        return publish_manual_edit(self, job_id, edit_id, capability, fields, retry_file_operation, finalize)
 
     def _append_action_event(self, job_id: str, action_id: str, kind: str) -> None:
         with self._lock:

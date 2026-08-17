@@ -52,6 +52,13 @@ def _safe_actions(value: object) -> list[dict[str, object]]:
     return actions
 
 
+def _safe_warning(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    warning = " ".join(value.split())[:4000]
+    return warning or None
+
+
 def _safe_proposals(value: object) -> list[dict[str, object]]:
     return [
         {key: item[key] for key in ("row", "field", "status", "quality") if key in item and isinstance(item[key], (int, str, bool))}
@@ -87,6 +94,7 @@ def final_report_payload(job: dict[str, object]) -> dict[str, Any]:
         "proposals": _safe_proposals(job.get("proposals")),
         "row_cards": _safe_row_cards(job.get("row_cards")),
         "actions": _safe_actions(job.get("action_events_internal")),
+        "warning": _safe_warning(job.get("warning")),
     }
     return payload
 

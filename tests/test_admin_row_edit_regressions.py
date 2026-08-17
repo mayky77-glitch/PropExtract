@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import json
 import threading
 import time
 
@@ -10,6 +11,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from rns_import_server.audit import sha256
+from rns_import_server import action_history
 from rns_import_server import row_edit
 from rns_import_server import server
 from rns_import_server.server import JobManager
@@ -238,6 +240,257 @@ def test_post_manual_low_quality_semantic_noop_has_no_new_backup_or_changed_rows
     assert target.stat().st_mtime_ns == before_mtime
     assert str(load_workbook(target)[SHEET]["AA4"].value) == manual_aa and "Исправлено вручную" in manual_aa
     assert sorted(item.name for item in backups.glob("*.xlsx")) == before_backups
+
+
+def test_action_history_persists_after_noop_rerun(tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    initial = json.loads(report.read_text(encoding="utf-8"))
+    assert initial["final_state"]["actions"] == []
+
+    public = manager.public(str(job["id"]))
+    proposal_id = public["proposals"][0]["id"]  # type: ignore[index]
+    edit_id = public["row_cards"][0]["edit_id"]  # type: ignore[index]
+
+    manager.approve(str(job["id"]), str(proposal_id), job["capability"])
+    manager.edit(str(job["id"]), edit_id, job["capability"], {"object": "Новый объект"})
+    with_actions = json.loads(report.read_text(encoding="utf-8"))
+    actions = with_actions["final_state"]["actions"]
+    assert actions == [
+        {"type": "proposal_approved", "row": 4, "field": "Наименование объекта", "status": "approved"},
+        {"type": "manual_edit", "row": 4, "field": "Наименование объекта", "status": "edited"},
+    ]
+
+    noop = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+    with manager._lock:
+        current = manager._jobs.get(str(noop["id"])) or {}
+    assert current.get("action_events_internal") == actions
+    replayed = json.loads(report.read_text(encoding="utf-8"))
+    assert replayed["final_state"]["actions"] == actions
+    assert noop["published"] is False
+    assert noop["backup"] is None
+
+
+def test_action_history_rejects_stale_or_tampered_report_with_public_warning(tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["final_state"]["actions"] = [
+        {"type": "manual_edit", "row": 4, "field": "Секретное поле", "status": "edited"}
+    ]
+    report.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    rejected = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+    assert rejected["action_events_internal"] == []
+    assert "повреждён или имеет неподдерживаемый формат" in str(rejected["warning"])
+    saved = json.loads(report.read_text(encoding="utf-8"))
+    assert saved["final_state"]["actions"] == []
+    assert "повреждён или имеет неподдерживаемый формат" in saved["final_state"]["warning"]
+
+    payload = saved
+    payload["final_state"]["workbook_sha256"] = "0" * 64
+    report.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    stale = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+    assert stale["action_events_internal"] == []
+    assert "Excel изменён после создания отчёта" in str(stale["warning"])
+
+
+def test_action_history_does_not_follow_report_symlink(tmp_path: Path):
+    manager, _, target, _ = _review_job(tmp_path)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    external = tmp_path / "external.json"
+    external.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
+    report.unlink()
+    report.symlink_to(external)
+    before = external.read_bytes()
+
+    rejected = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+
+    assert rejected["action_events_internal"] == []
+    assert "не удалось безопасно прочитать отчёт" in str(rejected["warning"])
+    assert external.read_bytes() == before
+    assert report.is_file() and not report.is_symlink()
+
+
+def test_action_history_rejects_swap_to_symlink_before_open(monkeypatch, tmp_path: Path):
+    manager, _, target, _ = _review_job(tmp_path)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    external = tmp_path / "external.json"
+    external.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
+    external_before = external.read_bytes()
+    original_open = action_history.open_descriptor
+    swapped = False
+
+    def swap_before_open(path):
+        nonlocal swapped
+        if Path(path) == report and not swapped:
+            swapped = True
+            report.unlink()
+            report.symlink_to(external)
+        return original_open(path)
+
+    monkeypatch.setattr(action_history, "open_descriptor", swap_before_open)
+    rejected = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+
+    assert swapped is True
+    assert rejected["action_events_internal"] == []
+    assert "не удалось безопасно прочитать отчёт" in str(rejected["warning"])
+    assert external.read_bytes() == external_before
+
+
+def test_windows_report_open_rejects_same_inode_reparse_point(tmp_path: Path):
+    report = tmp_path / "report.json"
+    report.write_text("{}", encoding="utf-8")
+    renamed = tmp_path / "renamed.json"
+    report.rename(renamed)
+    original_inode = renamed.stat().st_ino
+    report.symlink_to(renamed)
+    assert renamed.stat().st_ino == original_inode
+
+    calls: dict[str, object] = {}
+
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    class Kernel32:
+        def __init__(self):
+            self.CreateFileW = Function(self.create_file)
+            self.GetFileInformationByHandle = Function(self.get_information)
+            self.CloseHandle = Function(self.close_handle)
+
+        @staticmethod
+        def create_file(*args):
+            calls["flags"] = args[5]
+            return 123
+
+        @staticmethod
+        def get_information(handle, pointer):
+            calls["inspected"] = handle
+            pointer._obj.dwFileAttributes = 0x00000400
+            return 1
+
+        @staticmethod
+        def close_handle(handle):
+            calls["closed"] = handle
+            return 1
+
+    def must_not_convert(handle: int, flags: int) -> int:
+        raise AssertionError("reparse-point handle must never become a readable descriptor")
+
+    with pytest.raises(OSError, match="reparse point"):
+        action_history.open_windows_descriptor(
+            report,
+            kernel32=Kernel32(),
+            open_osfhandle=must_not_convert,
+        )
+
+    assert int(calls["flags"]) & 0x00200000
+    assert calls["inspected"] == 123
+    assert calls["closed"] == 123
+
+
+def test_action_history_bounded_reader_accepts_short_regular_file_reads(monkeypatch, tmp_path: Path):
+    _, _, target, _ = _review_job(tmp_path)
+    original_read = server.os.read
+
+    def short_read(descriptor: int, size: int) -> bytes:
+        return original_read(descriptor, min(size, 7))
+
+    monkeypatch.setattr(server.os, "read", short_read)
+    actions, warning = action_history.load(target)
+
+    assert actions == []
+    assert warning is None
+
+
+def test_action_history_rejects_oversize_report(monkeypatch, tmp_path: Path):
+    manager, _, target, _ = _review_job(tmp_path)
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    monkeypatch.setattr(action_history, "MAX_REPORT_SIZE", 128)
+    report.write_bytes(b" " * 129)
+
+    rejected = _wait(manager, str(manager.start(str(target.parent / "pdf"), str(target))["id"]))
+
+    assert rejected["action_events_internal"] == []
+    assert "повреждён или имеет неподдерживаемый формат" in str(rejected["warning"])
+
+
+def test_start_waits_for_action_final_report_before_loading_action_history(monkeypatch, tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    public = manager.public(str(job["id"]))
+    edit_id = public["row_cards"][0]["edit_id"]  # type: ignore[index]
+    entered, release = threading.Event(), threading.Event()
+    action_errors: list[Exception] = []
+    start_result: list[dict[str, object]] = []
+    start_errors: list[Exception] = []
+    original_write = server.write_final_action_report
+
+    def pause_report_write(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(server, "write_final_action_report", pause_report_write)
+    action_thread = threading.Thread(
+        target=lambda: _capture(action_errors, lambda: manager.edit(str(job["id"]), edit_id, job["capability"], {"object": "Новый объект"}))
+    )
+    action_thread.start()
+    assert entered.wait(timeout=5)  # XLSX is already atomically replaced.
+
+    def start_again() -> None:
+        try:
+            start_result.append(manager.start(str(target.parent / "pdf"), str(target)))
+        except Exception as error:
+            start_errors.append(error)
+
+    start_thread = threading.Thread(target=start_again)
+    start_thread.start()
+    time.sleep(0.1)
+    assert start_thread.is_alive(), "start read stale report while action publication was incomplete"
+    release.set()
+    action_thread.join(timeout=10); start_thread.join(timeout=10)
+
+    assert not action_errors and not start_errors and len(start_result) == 1
+    repeated = _wait(manager, str(start_result[0]["id"]))
+    actions = [
+        {"type": "manual_edit", "row": 4, "field": "Наименование объекта", "status": "edited"}
+    ]
+    assert repeated["action_events_internal"] == actions
+    assert repeated["published"] is False
+    assert repeated["backup"] is None
+    assert repeated["warning"] is None
+    payload = json.loads(target.with_name(f"{target.stem} — отчет PropExtract.json").read_text(encoding="utf-8"))
+    assert payload["final_state"]["actions"] == actions
+
+
+def test_manual_action_is_rejected_while_import_is_running(tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    edit_id = manager.public(str(job["id"]))["row_cards"][0]["edit_id"]  # type: ignore[index]
+    original_runner = manager.runner
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_runner(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_runner(*args, **kwargs)
+
+    manager.runner = slow_runner
+    active = manager.start(str(target.parent / "pdf"), str(target))
+    assert entered.wait(timeout=5)
+    before = sha256(target)
+    try:
+        with pytest.raises(server.BusyError, match="пока выполняется импорт"):
+            manager.edit(str(job["id"]), edit_id, job["capability"], {"object": "Не записывать"})
+        assert sha256(target) == before
+    finally:
+        release.set()
+    assert _wait(manager, str(active["id"]))["status"] == "done"
 
 
 def test_manual_edit_refreshes_allowlisted_final_report_after_verified_publication(tmp_path: Path):

@@ -109,13 +109,17 @@
   };
 
   const sourceName = (item, documents) => {
-    const document = documents[item.document_id] || {};
+    const key = item.document_id || item.id;
+    const document = documents[key] || {};
     return item.filename || document.filename || "PDF";
   };
 
-  const openDocumentButton = item => item.document_id
-    ? `<button class="row-action row-action--secondary" type="button" data-open-document="${escapeText(item.document_id)}">Открыть PDF</button>`
-    : "";
+  const openDocumentButton = item => {
+    const key = item.document_id || item.id;
+    return key
+      ? `<button class="row-action row-action--secondary" type="button" data-open-document="${escapeText(key)}">Открыть PDF</button>`
+      : "";
+  };
 
   function editableFields(item) {
     if (typeof item.edit_id !== "string" || !item.edit_id) return [];
@@ -167,7 +171,7 @@
     const error = item.error || "Документ не обработан.";
     const hint = item.hint || "Проверьте документ вручную и повторите запуск.";
     const technical = item.technical_error ? `<p class=\"record-verdict\"><strong>Техническая причина:</strong> <span>${escapeText(item.technical_error)}</span></p>` : "";
-    return `<article class="record-card record-card--review">
+    return `<article class="record-card record-card--review record-card--document">
       <div class="record-card-main">
         <div class="record-card-heading">
           <div><span class="record-label">PDF</span><h4>${docName}</h4></div>
@@ -359,13 +363,21 @@
     const editableCards = new Map((job.row_cards || [])
       .filter(item => editableFields(item).length)
       .map(item => [`${item.row ?? ""}::${item.number || ""}`, item]));
+    const rowCards = new Map((job.row_cards || [])
+      .map(item => [`${item.row ?? ""}::${item.number || ""}`, item]));
     const renderedEditRows = new Set();
     const renderProposal = item => {
       const key = `${item.row ?? ""}::${item.number || ""}`;
-      const rowCard = editableCards.get(key);
+      const rowCard = editableCards.get(key) || rowCards.get(key);
       if (!rowCard || renderedEditRows.has(key)) return renderProposalCard(item, documents);
       renderedEditRows.add(key);
-      return renderProposalCard({...item, edit_id: rowCard.edit_id, editable_fields: rowCard.editable_fields, editable_values: rowCard.editable_values}, documents);
+      return renderProposalCard({
+        ...item,
+        edit_id: rowCard.edit_id,
+        editable_fields: rowCard.editable_fields,
+        editable_values: rowCard.editable_values,
+        edit_error: rowCard.edit_error,
+      }, documents);
     };
     const reviewCards = [
       ...(job.proposals || []).filter(item => item.review_details || (item.status !== "approved" && !manuallyResolvedStatuses.has(item.status))).map(renderProposal),

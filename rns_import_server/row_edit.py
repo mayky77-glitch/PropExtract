@@ -47,30 +47,51 @@ def _normalize_fields(fields: object) -> dict[str, object]:
     return normalized
 
 
-def publish_manual_edit(manager: Any, job_id: str, edit_id: str, capability: object, fields: object, retry: Callable[[Callable[[], Any]], Any]) -> dict[str, object]:
+def publish_manual_edit(
+    manager: Any,
+    job_id: str,
+    edit_id: str,
+    capability: object,
+    fields: object,
+    retry: Callable[[Callable[[], Any]], Any],
+    finalize: Callable[[], None] | None = None,
+) -> dict[str, object]:
     """Consume one edit id only after its verified staged workbook is published."""
     normalized = _normalize_fields(fields)
-    with manager._lock:
-        job = manager._jobs.get(job_id)
-        if not job or not _capability_matches(job.get("capability", ""), capability):
-            raise ValueError("Действие недоступно. Запустите перенос заново.")
-        if job.get("status") != "done":
-            raise ValueError("Исправление доступно только после завершения переноса.")
-        edits = dict(job.get("edits_internal", {}))
-        edit = dict(edits.get(edit_id, {}))
-        if not edit or edit.get("status") != "pending":
-            raise ValueError("Исправление недоступно или уже выполнено.")
-        expected = str(job.get("target_hash", ""))
-        if not expected:
-            raise RuntimeError("manual_target_stale")
-        reservation_order = int(job.get("publication_order", 0)) + 1
-        job["publication_order"] = reservation_order
-        edit["status"] = "publishing"; edit["expected_target_hash"] = expected
-        edit["reservation_order"] = reservation_order
-        edit["field_labels"] = tuple(EDITABLE_FIELDS[key] for key in normalized)
-        edits[edit_id] = edit; job["edits_internal"] = edits
+    # Hold the reservation gate until this publisher owns publication.  Another
+    # action can still reserve while this one works; a new import cannot sample
+    # a report between reservation and final audit publication.
+    manager._action_reservation_lock.acquire()
+    reservation_gate_held = True
+    try:
+        with manager._lock:
+            manager._reject_actions_during_import_locked()
+            job = manager._jobs.get(job_id)
+            if not job or not _capability_matches(job.get("capability", ""), capability):
+                raise ValueError("Действие недоступно. Запустите перенос заново.")
+            if job.get("status") != "done":
+                raise ValueError("Исправление доступно только после завершения переноса.")
+            edits = dict(job.get("edits_internal", {}))
+            edit = dict(edits.get(edit_id, {}))
+            if not edit or edit.get("status") != "pending":
+                raise ValueError("Исправление недоступно или уже выполнено.")
+            expected = str(job.get("target_hash", ""))
+            if not expected:
+                raise RuntimeError("manual_target_stale")
+            reservation_order = int(job.get("publication_order", 0)) + 1
+            job["publication_order"] = reservation_order
+            edit["status"] = "publishing"; edit["expected_target_hash"] = expected
+            edit["reservation_order"] = reservation_order
+            edit["field_labels"] = tuple(EDITABLE_FIELDS[key] for key in normalized)
+            edits[edit_id] = edit; job["edits_internal"] = edits
+        manager._publish_lock.acquire()
+        manager._action_reservation_lock.release()
+        reservation_gate_held = False
+    except Exception:
+        if reservation_gate_held:
+            manager._action_reservation_lock.release()
+        raise
     staged: Path | None = None
-    manager._publish_lock.acquire()
     try:
         target = Path(str(job["xlsx"]))
         row, number = edit.get("row"), str(edit.get("number", ""))
@@ -137,6 +158,8 @@ def publish_manual_edit(manager: Any, job_id: str, edit_id: str, capability: obj
                 if public.get("field") in changed_labels and field_key:
                     public["status"] = "resolved_manual"; public["action"] = "Исправлено вручную"; public["manual_value"] = refreshed_values[field_key]
             current.update(edits_internal=edits, row_cards=cards, proposals_internal=proposals, proposals=public_proposals, published=True, target_hash=staged_hash, updated_at=datetime.now().isoformat(timespec="seconds"))
+        if finalize:
+            finalize()
         return manager.public(job_id) or {}
     except Exception:
         with manager._lock:
@@ -152,25 +175,42 @@ def publish_manual_edit(manager: Any, job_id: str, edit_id: str, capability: obj
         manager._publish_lock.release()
 
 
-def publish_proposal(manager: Any, job_id: str, proposal_id: str, capability: object, retry: Callable[[Callable[[], Any]], Any]) -> dict[str, object]:
+def publish_proposal(
+    manager: Any,
+    job_id: str,
+    proposal_id: str,
+    capability: object,
+    retry: Callable[[Callable[[], Any]], Any],
+    finalize: Callable[[], None] | None = None,
+) -> dict[str, object]:
     """Publish one approved proposal, rebasing only non-overlapping internal work."""
-    with manager._lock:
-        job = manager._jobs.get(job_id)
-        if not job or not _capability_matches(job.get("capability", ""), capability):
-            raise ValueError("Действие недоступно. Запустите перенос заново.")
-        if job.get("status") != "done":
-            raise ValueError("Подтверждение доступно только после завершения переноса.")
-        proposals = dict(job.get("proposals_internal", {})); proposal = dict(proposals.get(proposal_id, {}))
-        if not proposal or proposal.get("status") != "pending":
-            raise ValueError("Предложение недоступно или уже обработано.")
-        if not job.get("target_hash"):
-            raise RuntimeError("proposal_target_stale")
-        proposal["status"] = "approving"; proposal["expected_target_hash"] = job["target_hash"]
-        proposal["reservation_order"] = int(job.get("publication_order", 0)) + 1
-        job["publication_order"] = proposal["reservation_order"]
-        proposals[proposal_id] = proposal; job["proposals_internal"] = proposals
+    manager._action_reservation_lock.acquire()
+    reservation_gate_held = True
+    try:
+        with manager._lock:
+            manager._reject_actions_during_import_locked()
+            job = manager._jobs.get(job_id)
+            if not job or not _capability_matches(job.get("capability", ""), capability):
+                raise ValueError("Действие недоступно. Запустите перенос заново.")
+            if job.get("status") != "done":
+                raise ValueError("Подтверждение доступно только после завершения переноса.")
+            proposals = dict(job.get("proposals_internal", {})); proposal = dict(proposals.get(proposal_id, {}))
+            if not proposal or proposal.get("status") != "pending":
+                raise ValueError("Предложение недоступно или уже обработано.")
+            if not job.get("target_hash"):
+                raise RuntimeError("proposal_target_stale")
+            proposal["status"] = "approving"; proposal["expected_target_hash"] = job["target_hash"]
+            proposal["reservation_order"] = int(job.get("publication_order", 0)) + 1
+            job["publication_order"] = proposal["reservation_order"]
+            proposals[proposal_id] = proposal; job["proposals_internal"] = proposals
+        manager._publish_lock.acquire()
+        manager._action_reservation_lock.release()
+        reservation_gate_held = False
+    except Exception:
+        if reservation_gate_held:
+            manager._action_reservation_lock.release()
+        raise
     staged: Path | None = None
-    manager._publish_lock.acquire()
     try:
         target = Path(str(job["xlsx"])); proposal_label = str(proposal.get("field", "")); proposal_order = int(proposal["reservation_order"])
         with manager._lock:
@@ -213,6 +253,8 @@ def publish_proposal(manager: Any, job_id: str, proposal_id: str, capability: ob
                 if item.get("id") == proposal_id:
                     item["status"] = "approved"
             current.update(proposals_internal=proposals, proposals=public, published=True, target_hash=staged_hash, updated_at=datetime.now().isoformat(timespec="seconds"))
+        if finalize:
+            finalize()
         return {"status": "approved", "backup": backup.name}
     except Exception:
         with manager._lock:

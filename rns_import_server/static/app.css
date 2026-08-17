@@ -163,6 +163,7 @@ h1 { max-width: 920px; margin: 0 0 30px; font-family: "Aptos Display", "Segoe UI
 .result-group--review .result-group-heading > strong { color: var(--signal); background: color-mix(in srgb, var(--signal) 10%, var(--canvas)); border-color: color-mix(in srgb, var(--signal) 30%, var(--line)); }
 .result-card-list { display: grid; gap: 12px; }
 .record-card { display: grid; grid-template-columns: 82px minmax(0, 1fr); overflow: hidden; background: var(--canvas); border: 1px solid var(--line); border-radius: 14px; transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
+.record-card--document { grid-template-columns: 1fr; }
 .record-card:hover { border-color: color-mix(in srgb, var(--lake) 30%, var(--line)); box-shadow: 0 12px 30px color-mix(in srgb, var(--ink) 7%, transparent); transform: translateY(-1px); }
 .record-card--review { border-color: color-mix(in srgb, var(--signal) 38%, var(--line)); }
 .record-card--review:hover { border-color: color-mix(in srgb, var(--signal) 62%, var(--line)); }
