@@ -150,10 +150,18 @@ def _append_warning(value: object, message: str) -> str:
     return warning if message in warning else " ".join(part for part in (warning, message) if part)
 
 
-def _remove_warning(value: object, message: str) -> str | None:
-    """Remove only the exact generated fragment, preserving other warnings."""
-    warning = re.sub(r"\s{2,}", " ", str(value or "").replace(message, "").strip())
-    return warning or None
+def _remove_warning_fragment(value: object, message: str) -> str | None:
+    """Remove one tracked generated warning without changing other warning bytes."""
+    warning = str(value or "")
+    if warning == message:
+        return None
+    suffix = f" {message}"
+    if warning.endswith(suffix):
+        return warning[:-len(suffix)] or None
+    prefix = f"{message} "
+    if warning.startswith(prefix):
+        return warning[len(prefix):] or None
+    return warning.replace(message, "", 1) or None
 
 
 def _recompute_review_rows(job: dict[str, object]) -> None:
@@ -413,7 +421,7 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             return None
-        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal", "edits_internal", "action_events_internal", "startup_warnings_internal", "report_base_internal"}
+        hidden = {"pdf_dir", "xlsx", "backup", "report", "error_log", "documents_internal", "target_hash", "pdf_hashes", "proposals_internal", "edits_internal", "action_events_internal", "startup_warnings_internal", "report_write_warnings_internal", "report_base_internal"}
         value = {key: item for key, item in job.items() if key not in hidden}
         for key in ("current_file", "error_file"):
             if key in value:
@@ -700,9 +708,17 @@ class JobManager:
             except Exception as error:
                 reason = _safe_exception_message(error, "ошибка сохранения отчёта")
                 base = ACTION_REPORT_WARNING if not is_noop else INITIAL_REPORT_WARNING
-                warnings.append(f"{base} Причина: {reason}")
+                report_warning = f"{base} Причина: {reason}"
+                warnings.append(report_warning)
                 report_error = "report_write_failed"
-                self._update(job_id, status="done", progress=100, stage="Готово", report=None)
+                self._update(
+                    job_id,
+                    status="done",
+                    progress=100,
+                    stage="Готово",
+                    report=None,
+                    report_write_warnings_internal=[report_warning],
+                )
             if report_error is None and warnings:
                 self._update(job_id, warning=" ".join(warnings))
             elif report_error is not None:
@@ -801,12 +817,19 @@ class JobManager:
             with self._lock:
                 job = self._jobs.get(job_id)
                 snapshot = dict(job) if job else None
+                tracked_warnings = list(job.get("report_write_warnings_internal", [])) if isinstance(job, dict) else []
             if not snapshot:
                 return
+            clean_warning = snapshot.get("warning")
+            for warning in tracked_warnings:
+                if isinstance(warning, str):
+                    clean_warning = _remove_warning_fragment(clean_warning, warning)
+            snapshot["warning"] = clean_warning
             try:
                 path = write_final_action_report(Path(str(snapshot["xlsx"])), snapshot)
             except Exception as error:
                 reason = _safe_exception_message(error, "ошибка сохранения отчёта после действия")
+                report_warning = f"{ACTION_REPORT_WARNING} Причина: {reason}"
                 # The workbook transaction already committed.  Surface only a
                 # safe warning and leave its verified bytes untouched.
                 with self._lock:
@@ -814,16 +837,20 @@ class JobManager:
                     if current:
                         current["warning"] = _append_warning(
                             current.get("warning"),
-                            f"{ACTION_REPORT_WARNING} Причина: {reason}",
+                            report_warning,
                         )
+                        warnings = list(current.get("report_write_warnings_internal", []))
+                        if report_warning not in warnings:
+                            warnings.append(report_warning)
+                        current["report_write_warnings_internal"] = warnings
                         current["report"] = None
                 return
             with self._lock:
                 current = self._jobs.get(job_id)
                 if current:
                     current["report"] = str(path)
-                    warning = _remove_warning(current.get("warning"), ACTION_REPORT_WARNING)
-                    current["warning"] = _remove_warning(warning, INITIAL_REPORT_WARNING)
+                    current["warning"] = clean_warning
+                    current.pop("report_write_warnings_internal", None)
 
 
 def create_server(host: str, port: int, runner: Runner, instance_id: str | None = None) -> ThreadingHTTPServer:

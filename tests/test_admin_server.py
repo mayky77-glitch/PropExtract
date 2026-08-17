@@ -199,8 +199,10 @@ def test_successful_action_report_refresh_clears_only_its_generated_warning(monk
     monkeypatch.setattr(server, "write_final_action_report", lambda *_: (_ for _ in ()).throw(OSError("transient")))
 
     manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
+    report_warning = "Excel обновлён, но отчёт не записан. Причина: transient"
     with manager._lock:
-        manager._jobs[str(job["id"])]["warning"] = "PDF пропущено: 1. Причины сохранены в отчёте. Excel обновлён, но отчёт не записан."
+        manager._jobs[str(job["id"])]["warning"] = f"PDF пропущено: 1. Причины сохранены в отчёте. {report_warning}"
+        manager._jobs[str(job["id"])]["report_write_warnings_internal"] = [report_warning]
 
     monkeypatch.setattr(server, "write_final_action_report", original)
     manager._write_final_action_report(str(job["id"]))
@@ -238,7 +240,7 @@ def test_approval_recreates_failed_noop_report_and_clears_only_generated_warning
     proposal = job["proposals"][0]
     monkeypatch.setattr(server, "atomic_json", original_atomic)
     with manager._lock:
-        manager._jobs[str(job["id"])]["warning"] = "Обычное предупреждение. Обработка завершена, но отчёт не записан. Excel обновлён, но отчёт не записан."
+        manager._jobs[str(job["id"])]["warning"] = f"Обычное предупреждение. {job['warning']}"
 
     manager.approve(str(job["id"]), str(proposal["id"]), job["capability"])
     refreshed = manager.get(str(job["id"]))
