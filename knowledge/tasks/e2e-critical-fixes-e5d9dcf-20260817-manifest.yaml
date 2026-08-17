@@ -1,0 +1,32 @@
+status: frozen
+work_id: e2e-critical-fixes-e5d9dcf-20260817
+objective: Исправить только PE-E2E-001 и PE-E2E-002 с exact-base регрессиями, полной локальной приёмкой и exact-main Windows проверкой.
+project_root: /Users/x/.codex/worktrees/40b0/Отдел организации работ с недвижимым имуществом
+planning_parent_sha: e5d9dcf4ede1d43b7c32976df5d0b542d5e384cc
+published_base_sha: e5d9dcf4ede1d43b7c32976df5d0b542d5e384cc
+wave_base_sha: runtime-envelope
+shared_contract_sha: e5d9dcf4ede1d43b7c32976df5d0b542d5e384cc
+wave: 1
+max_parallel: 2
+max_spawns: 4
+max_retries: 1
+merge_method: merge-no-ff
+baseline_commands:
+  - python3 -m pytest -q
+  - python3 -m compileall -q rns_import_server tests
+  - node --check rns_import_server/static/app.js
+  - ruby -e 'require "yaml"; ARGV.each { |p| YAML.load_stream(File.read(p)) }' $(git ls-files '*.yaml' '*.yml')
+  - python3 scripts/windows_end_to_end_smoke.py --self-test
+  - git diff --check
+baseline_results:
+  - 222 passed, 1 expected OpenPyXL synthetic x14 warning
+  - passed
+  - passed
+  - 1 tracked YAML file parsed
+  - status ok; temporary fixture deleted
+  - clean
+shared_paths_owner: integration
+data_classification: restricted
+external_evidence_ref: sha256:4e4ac6d9ea26d560b773632aa43f9dffc1e46f1bb7aa16a5f3375049cfe4071c
+excluded_finding: PE-E2E-003
+created_at: 2026-08-17T15:03:49+08:00
