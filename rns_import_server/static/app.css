@@ -283,6 +283,7 @@ code { padding: 2px 5px; background: var(--soft); border-radius: 4px; font-size:
   .guide-grid article:nth-child(3), .guide-grid article:nth-child(4) { border-bottom: 0; }
   .result-stats { grid-template-columns: 1fr 1fr; }
   .record-card { grid-template-columns: 72px minmax(0, 1fr); }
+  .record-card--document { grid-template-columns: 1fr; }
   .record-card-footer { align-items: start; flex-direction: column; }
   .row-actions { justify-content: start; }
   .lifecycle-state { display: none; }
