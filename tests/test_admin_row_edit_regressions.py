@@ -531,6 +531,43 @@ def test_report_failure_after_manual_edit_is_a_safe_warning_and_keeps_workbook(m
     assert "private/path" not in __import__("json").dumps(updated, ensure_ascii=False)
 
 
+def test_later_action_report_removes_full_stale_write_warning_from_state_and_disk(monkeypatch, tmp_path: Path):
+    manager, job, target, _ = _review_job(tmp_path)
+    job_id = str(job["id"])
+    unrelated_warning = "PDF пропущено: 1. Причины сохранены в отчёте."
+    original = server.write_final_action_report
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("transient report writer failure")
+        return original(*args, **kwargs)
+
+    with manager._lock:
+        manager._jobs[job_id]["warning"] = unrelated_warning
+    monkeypatch.setattr(server, "write_final_action_report", fail_once)
+
+    first_public = manager.public(job_id)
+    assert first_public is not None
+    failed = manager.edit(job_id, str(first_public["row_cards"][0]["edit_id"]), job["capability"], {"object": "Первое исправление"})
+    stale_warning = "Excel обновлён, но отчёт не записан. Причина: transient report writer failure"
+    assert failed["warning"] == f"{unrelated_warning} {stale_warning}"
+    assert manager.public(job_id)["warning"] == failed["warning"]
+
+    second_public = manager.public(job_id)
+    assert second_public is not None
+    refreshed = manager.edit(job_id, str(second_public["row_cards"][0]["edit_id"]), job["capability"], {"object": "Второе исправление"})
+    report = target.with_name(f"{target.stem} — отчет PropExtract.json")
+    persisted = __import__("json").loads(report.read_text(encoding="utf-8"))["final_state"]
+
+    assert refreshed["warning"] == unrelated_warning
+    assert manager.public(job_id)["warning"] == unrelated_warning
+    assert persisted["warning"] == unrelated_warning
+    assert stale_warning not in __import__("json").dumps(persisted, ensure_ascii=False)
+
+
 @pytest.mark.parametrize("tamper", ["replace", "delete", "symlink"])
 def test_action_report_rebuilds_from_server_safe_base_not_tampered_disk(tamper: str, tmp_path: Path):
     manager, job, target, _ = _review_job(tmp_path)
