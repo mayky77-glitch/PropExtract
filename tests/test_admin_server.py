@@ -291,16 +291,18 @@ def test_merge_review_issue_is_public_and_ui_groups_it_for_operator_decision(tmp
 
     assert public is not None and public["status"] == "done"
     assert public["proposals"] == []
-    assert public["row_cards"] == [{
-        "row": 42,
-        "number": "38-1-1-2026",
-        "object": "Этап 1. Проверочный объект",
-        "details": message,
-        "outcome": "review",
-        "needs_review": True,
-        "filename": pdf.name,
-        "document_id": public["documents"][0]["id"],
-    }]
+    assert public["row_cards"][0]["row"] == 42
+    assert public["row_cards"][0]["number"] == "38-1-1-2026"
+    assert public["row_cards"][0]["object"] == "Этап 1. Проверочный объект"
+    assert public["row_cards"][0]["details"] == message
+    assert public["row_cards"][0]["outcome"] == "review"
+    assert public["row_cards"][0]["needs_review"] is True
+    assert public["row_cards"][0]["filename"] == pdf.name
+    assert public["row_cards"][0]["document_id"] == public["documents"][0]["id"]
+    assert public["row_cards"][0]["edit_error"] in {
+        "Строка для ручной правки недоступна после импорта. Запустите проверку заново.",
+        "Не удалось подготовить поля для ручного редактирования.",
+    } or "Не удалось прочитать файл реестра для редактирования" in public["row_cards"][0]["edit_error"]
     javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
     assert "function renderReviewCard" in javascript
     assert ".filter(item => item.needs_review" in javascript
@@ -1540,6 +1542,106 @@ def test_http_serves_admin_help_health_and_security_headers():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_system_status_exposes_runtime_issues_for_ui_feedback(monkeypatch: pytest.MonkeyPatch):
+    port = _unused_port()
+
+    monkeypatch.setattr(
+        server,
+        "runtime_status",
+        lambda: {
+            "ready": False,
+            "commands": {
+                "tesseract": False,
+                "pdfinfo": True,
+                "pdftoppm": False,
+                "pdftotext": True,
+            },
+            "languages": [],
+            "models": {"rus": {"valid": True}, "eng": {"valid": True}},
+            "tesseract_version": None,
+            "issues": [
+                {"code": "runtime_command_missing", "message": "Не найдены команды: pdftoppm, tesseract"},
+                {"code": "runtime_tesseract_version", "message": "Неподдерживаемая версия"},
+            ],
+            "issue_codes": ["runtime_command_missing", "runtime_tesseract_version"],
+        },
+    )
+
+    server_instance = create_server("127.0.0.1", port, _fake_runner)
+    thread = threading.Thread(target=server_instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body, _ = _get(f"http://127.0.0.1:{port}/api/system")
+        payload = json.loads(body)
+        assert status == 200
+        assert payload["ready"] is False
+        assert payload["issue_codes"] == ["runtime_command_missing", "runtime_tesseract_version"]
+        assert len(payload["issues"]) == 2
+        assert payload["issues"][0]["code"] == "runtime_command_missing"
+    finally:
+        server_instance.shutdown()
+        server_instance.server_close()
+        thread.join(timeout=5)
+
+
+def test_edit_row_error_is_returned_for_manual_field_preview_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    pdf_dir = tmp_path / "pdf"
+    pdf_dir.mkdir()
+    pdf = pdf_dir / "sample.pdf"
+    pdf.write_bytes(b"pdf")
+    target = tmp_path / "register.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = SHEET
+    sheet["W3"] = "Ссылка на документ"
+    sheet["F4"] = "38-1-1-2026"
+    sheet["D4"] = "Старый объект"
+    book.save(target)
+
+    def runner(pdf_root: Path, xlsx: Path, output: Path, dpi: int, max_pages: int, progress=None) -> dict:
+        output.write_bytes(xlsx.read_bytes() + b"-updated")
+        return {
+            "input_hashes": {"xlsx": sha256(xlsx), "pdfs": {pdf.name: sha256(pdf)}},
+            "documents": [{"file": str(pdf)}],
+            "logical_records": ["38-1-1-2026"],
+            "changes": [
+                {
+                    "number": "38-1-1-2026",
+                    "new": True,
+                    "row": 4,
+                    "issues": [],
+                    "outcome": "added",
+                    "document": pdf.name,
+                    "physical_mutation": True,
+                },
+            ],
+            "conflicts": [],
+            "selected_records": {
+                "38-1-1-2026": {
+                    "filename": pdf.name,
+                    "pdf": str(pdf),
+                    "object": "Старый объект",
+                    "field_sources": {"object": str(pdf)},
+                },
+            },
+        }
+
+    def broken_editable_values(*_args) -> dict:
+        raise RuntimeError("manual_row_unavailable")
+
+    monkeypatch.setattr(server, "editable_field_values", broken_editable_values)
+    manager = JobManager(runner)
+    finished = _wait(manager, str(manager.start(str(pdf_dir), str(target))["id"]))
+
+    public = manager.public(str(finished["id"]))
+    assert public is not None
+    assert public["status"] == "done"
+    row_card = public["row_cards"][0]
+    assert row_card["outcome"] == "added"
+    assert row_card["edit_error"] == "Строка для ручной правки недоступна после импорта. Запустите проверку заново."
+    assert "edit_id" not in row_card
 
 
 def test_invalid_job_request_is_rejected():

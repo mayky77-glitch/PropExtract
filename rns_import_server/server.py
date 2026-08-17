@@ -277,6 +277,24 @@ def _public_issue(value: object) -> str:
     if text and " " not in text and "_" in text:
         return "Строка требует ручной проверки."
     return text
+
+
+def _manual_edit_error(value: object) -> str:
+    """Return a clear reason when manual edit values cannot be prepared."""
+    raw = str(value or "").strip()
+    if raw == "manual_row_unavailable":
+        return "Строка для ручной правки недоступна после импорта. Запустите проверку заново."
+    if "manual_row_unavailable" in raw:
+        return "Строка для ручной правки недоступна после импорта. Запустите проверку заново."
+    if "not a zip file" in raw.lower():
+        return "Не удалось прочитать файл реестра для редактирования. Проверьте, что это корректный Excel (.xlsx)."
+    if "badzipfile" in raw.lower():
+        return "Не удалось прочитать файл реестра для редактирования. Проверьте, что это корректный Excel (.xlsx)."
+    if "No such file" in raw or "FileNotFound" in raw:
+        return "Не удалось прочитать файл реестра для редактирования. Проверьте, что файл доступен."
+    if "permission" in raw.lower():
+        return "Нет прав на чтение реестра для редактирования. Проверьте права доступа."
+    return _safe_exception_message(value, "Не удалось подготовить поля для ручного редактирования.")
 def _capability_matches(expected: object, candidate: object) -> bool:
     """Compare opaque ASCII capabilities without leaking TypeError for Unicode input."""
     return (
@@ -586,8 +604,9 @@ class JobManager:
                 if isinstance(row, int) and row >= 4 and (bool(change.get("new")) or outcome in {"review", "review_conflict"}):
                     try:
                         values = editable_field_values(target, row, number)
-                    except Exception:
+                    except Exception as error:
                         values = None
+                        row_card["edit_error"] = _manual_edit_error(error)
                     if values is not None:
                         edit_id = uuid.uuid4().hex
                         edits_internal[edit_id] = {"row": row, "number": number, "status": "pending"}

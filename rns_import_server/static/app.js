@@ -143,6 +143,11 @@
     </div>`;
   }
 
+  function renderEditErrorNotice(item) {
+    if (!item.edit_error) return "";
+    return `<div class="record-verdict record-verdict--review"><strong>Редактирование:</strong><span>${escapeText(item.edit_error)}</span></div>`;
+  }
+
   function recordHeader(item, status, tone) {
     return `<div class="record-card-heading"><div><span class="record-label">РНС</span><h4>${escapeText(item.number || "Не определён")}</h4></div><span class="record-status record-status--${tone}">${status}</span></div>`;
   }
@@ -202,6 +207,7 @@
             <div class="record-value record-value--proposed"><span>${proposedLabel}</span><strong>${escapeText(displayedValue ?? "Не заполнено")}</strong></div>
           </div>
         </div>
+        ${renderEditErrorNotice(item)}
         <div class="record-card-footer">
           ${recordSource(item, documents)}
           <div class="row-actions">${openDocumentButton(item)}${canApprove ? `<button class="row-action row-action--primary" type="button" data-approve-proposal="${escapeText(item.id)}">Перенести в таблицу</button>` : ""}${resolved ? `<span class="row-action row-action--resolved" aria-label="Исправлено вручную">Исправлено вручную</span>` : ""}${renderEditControls(item)}</div>
@@ -217,6 +223,7 @@
         ${recordHeader(item, "Совпадает", "matched")}
         ${item.object ? `<p class="record-object">${escapeText(item.object)}</p>` : ""}
         <div class="record-verdict"><strong>Данные уже есть в таблице</strong><span>Строка оставлена без изменений. При открытии Excel обновятся только родные цветовые маркеры сроков.</span></div>
+        ${renderEditErrorNotice(item)}
         <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}${renderEditControls(item)}</div></div>
       </div>
     </article>`;
@@ -228,6 +235,7 @@
       <div class="record-card-main">
         ${recordHeader(item, "Обработано", "processed")}
         <p class="record-object">${escapeText(item.object || item.details || "Данные обработаны.")}</p>
+        ${renderEditErrorNotice(item)}
         <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}${renderEditControls(item)}</div></div>
       </div>
     </article>`;
@@ -240,6 +248,7 @@
         ${recordHeader(item, "Требует проверки", "review")}
         ${item.object ? `<p class="record-object">${escapeText(item.object)}</p>` : ""}
         <div class="record-verdict record-verdict--review"><strong>Автоматический перенос ограничен</strong><span>${escapeText(item.details || "Строка содержит неоднозначные данные. Сверьте исходный PDF и таблицу.")}</span></div>
+        ${renderEditErrorNotice(item)}
         <div class="record-card-footer">${recordSource(item, documents)}<div class="row-actions">${openDocumentButton(item)}${renderEditControls(item)}</div></div>
       </div>
     </article>`;
@@ -523,9 +532,22 @@
     .then(responseJson)
     .then(state => {
       systemState.className = `system-state ${state.ready ? "ready" : "error"}`;
-      systemState.querySelector("span:last-child").textContent = state.ready
-        ? "OCR-компоненты готовы"
-        : "Не хватает Tesseract, Poppler или языков rus+eng — откройте инструкцию";
+      const issues = Array.isArray(state.issues) ? state.issues : [];
+      const issueMessages = issues
+        .map(item => typeof item === "object" ? String(item.message || "") : "")
+        .map(value => value.trim())
+        .filter(Boolean);
+      if (state.ready) {
+        systemState.querySelector("span:last-child").textContent = "OCR-компоненты готовы";
+        systemState.title = "";
+      } else {
+        const summary = issueMessages.slice(0, 2).join(" | ");
+        const statusText = summary || "Не хватает Tesseract, Poppler или языков rus+eng — откройте инструкцию";
+        systemState.querySelector("span:last-child").textContent = statusText;
+        systemState.title = issueMessages.length
+          ? `Проблемы: ${issueMessages.join("; ")}`
+          : statusText;
+      }
     })
     .catch(() => {
       systemState.className = "system-state error";
