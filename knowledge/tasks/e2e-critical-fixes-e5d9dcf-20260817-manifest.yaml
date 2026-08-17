@@ -1,4 +1,4 @@
-status: verification
+status: frozen
 work_id: e2e-critical-fixes-e5d9dcf-20260817
 objective: Исправить только PE-E2E-001 и PE-E2E-002 с exact-base регрессиями, полной локальной приёмкой и exact-main Windows проверкой.
 project_root: /Users/x/.codex/worktrees/40b0/Отдел организации работ с недвижимым имуществом
@@ -32,3 +32,5 @@ excluded_finding: PE-E2E-003
 created_at: 2026-08-17T15:03:49+08:00
 implementation_sha: 152783e1bc28929af57bcd39965f1664c715ddbb
 local_acceptance: 223 passed; responsive 1440/768/480 passed; compileall, Node, YAML, portable Windows self-test, diff check passed
+final_review: ACCEPT at e4ed16431caa0cfd9726b58a801dacaede501e81; no substantive findings
+release_gate: exact-main hosted Windows smoke after push
