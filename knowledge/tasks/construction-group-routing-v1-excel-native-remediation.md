@@ -65,3 +65,4 @@ acceptance_commands:
 - Hosted macOS has no desktop Excel; real COM insert/recalculate/save/reopen is intentionally unexecuted and remains the blocking Windows gate.
 - Risk: process/HWND ownership checks are unit-mocked here and need real Windows API evidence before enabling production middle insertion.
 - Recovery cycle: recorder and concrete process probe are required before spawn; ACK/lease use atomic BOM-free UTF-8 writes and the parser accepts/strips accidental BOM. Timeout retains primary plus cleanup cause.
+- Final bounded cycle: lease-aware cleanup rereads nonce evidence and re-probes exact Excel PID/start/HWND before termination; 9 adapter contract tests now include user/reused-PID preservation and authoritative source/template/group bounds.
