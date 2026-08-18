@@ -61,33 +61,27 @@ class ObjectRoute:
 
 
 _BOUNDARY_CHARS = frozenset(".,;:!?)]}>»\"'/\\-—–")
-_TAIL_BOUNDARY_CHARS = frozenset(".,;:-—–")
-
-
 def _normalized_with_raw_offsets(value: str) -> tuple[str, tuple[int, ...]]:
     """Return registry-compatible normalized text and raw end offsets.
 
     Offsets make it possible to compare normalized Unicode safely while still
     returning the tail from the original raw source, including its casing.
     """
-    output: list[str] = []
+    normalized = ""
     offsets: list[int] = []
-    pending_space_end: int | None = None
-    for raw_index, character in enumerate(value, start=1):
-        expanded = unicodedata.normalize("NFKC", character).replace("\u00a0", " ")
-        expanded = expanded.replace("ё", "е").replace("Ё", "Е")
-        for normalized_character in expanded:
-            if normalized_character.isspace():
-                pending_space_end = raw_index
-                continue
-            if pending_space_end is not None and output:
-                output.append(" ")
-                offsets.append(pending_space_end)
-            pending_space_end = None
-            for folded_character in normalized_character.casefold():
-                output.append(folded_character)
-                offsets.append(raw_index)
-    return "".join(output), tuple(offsets)
+    for raw_index in range(1, len(value) + 1):
+        # Normalize each complete prefix.  NFKC may compose a character with a
+        # following combining mark, so normalizing character-by-character
+        # cannot match an official precomposed name such as ``Йод``.
+        updated = normalize_text(value[:raw_index]) or ""
+        unchanged = 0
+        for previous, current in zip(normalized, updated):
+            if previous != current:
+                break
+            unchanged += 1
+        offsets[unchanged:] = [raw_index] * (len(updated) - unchanged)
+        normalized = updated
+    return normalized, tuple(offsets)
 
 
 def _snapshot_conflicts(snapshot: ConstructionRegistrySnapshot) -> bool:
@@ -123,8 +117,17 @@ def _matched_construction(normalized_object: str, constructions: Iterable[Constr
 
 
 def _raw_tail(raw_object: str, offsets: tuple[int, ...], prefix_length: int) -> str:
-    raw_tail = raw_object[offsets[prefix_length - 1]:]
-    return raw_tail.lstrip(" \t\r\n\u00a0" + "".join(_TAIL_BOUNDARY_CHARS))
+    """Return raw tail after one validated separator, without over-stripping."""
+    tail = raw_object[offsets[prefix_length - 1]:]
+    position = 0
+
+    while position < len(tail) and tail[position].isspace():
+        position += 1
+    if position < len(tail) and unicodedata.normalize("NFKC", tail[position]) in _BOUNDARY_CHARS:
+        position += 1
+        while position < len(tail) and tail[position].isspace():
+            position += 1
+    return tail[position:]
 
 
 def _outcome_for(construction: Construction, snapshot: ConstructionRegistrySnapshot, raw_object: str | None, *,

@@ -76,3 +76,11 @@ Set card to `review`. Record requested vs actual route, feature SHA, changed pat
 - Evidence: `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_object_group_routing.py tests/test_construction_registry.py` → `11 passed`; `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server tests` → passed; `git diff --check` → passed.
 - Risk: this deliberately pure router requires a future consumer to obtain and pass a coherent immutable registry snapshot; it does not read SQLite or decide workbook placement. Archived existing-row context is identity-only and always keeps new-row creation disabled.
 - Proposed knowledge delta: document the `construction-object-route-v1` snapshot-only contract, stable outcome codes, raw-tail preservation, and archived/draft fail-closed semantics after integration acceptance.
+
+## Review remediation — 2026-08-18
+
+- Fixed whole-string NFKC-equivalent prefix mapping. Decomposed `И\u0306од` now matches official `Йод` while retaining raw input and exact tail.
+- Tail removal now consumes one accepted punctuation separator plus adjacent separator whitespace. It accepts `!` and fullwidth `：`; it preserves meaningful leading punctuation such as `-Объект` in `Йод: -Объект`.
+- Duplicate code prefixes now have explicit distinct-name deterministic `CONFLICTING_SNAPSHOT` coverage.
+- Evidence: card acceptance rerun after remediation: `13 passed`; compileall and `git diff --check` passed. Focused repros covered decomposed `Йод`, `：`, `!`, `-Объект`, and same-code conflict.
+- Remaining risk: prefix-offset construction normalizes complete raw prefixes to preserve NFKC composition mapping; runtime cost grows with raw-object length, but router inputs are single object labels.

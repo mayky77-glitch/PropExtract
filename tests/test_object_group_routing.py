@@ -34,6 +34,21 @@ def test_exact_unicode_boundary_and_longest_prefix_preserve_raw_tail() -> None:
     assert route.can_create_new_row is True
 
 
+def test_nfkc_equivalent_matched_span_and_single_boundary_preserve_raw_tail() -> None:
+    item = construction("iodine", "Йод")
+    decomposed = route_object("И\u0306од: Объект", snapshot(item))
+    fullwidth = route_object("Йод：Объект", snapshot(item))
+    exclamation = route_object("Йод! Объект", snapshot(item))
+    hyphen = route_object("Йод: -Объект", snapshot(item))
+
+    assert decomposed.code is ObjectRouteCode.ROUTED
+    assert decomposed.raw_object == "И\u0306од: Объект"
+    assert decomposed.object_tail == "Объект"
+    assert fullwidth.object_tail == "Объект"
+    assert exclamation.object_tail == "Объект"
+    assert hyphen.object_tail == "-Объект"
+
+
 def test_prefix_like_text_is_not_a_match_and_empty_tail_fails_closed() -> None:
     item = construction("one", "Стройка")
     assert route_object("СтройкаЭтап 1", snapshot(item)).code is ObjectRouteCode.UNKNOWN_CONSTRUCTION
@@ -49,6 +64,16 @@ def test_unknown_conflicting_and_stale_snapshots_fail_closed() -> None:
     duplicate = construction("two", "Стройка", code="123-1234568")
     assert route_object("Стройка: объект", snapshot(item, duplicate)).code is ObjectRouteCode.CONFLICTING_SNAPSHOT
     assert route_object("Стройка: объект", snapshot(item), expected_generation=6).code is ObjectRouteCode.STALE_REGISTRY
+
+
+def test_distinct_names_with_same_code_prefix_are_conflicting_snapshot() -> None:
+    first = construction("first", "Стройка А")
+    second = construction("second", "Стройка Б")
+    forward = route_object("Стройка А: объект", snapshot(first, second))
+    reverse = route_object("Стройка А: объект", snapshot(second, first))
+
+    assert forward.code is ObjectRouteCode.CONFLICTING_SNAPSHOT
+    assert reverse == forward
 
 
 def test_draft_is_never_routable_and_archived_is_existing_only() -> None:
