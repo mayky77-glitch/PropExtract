@@ -1,6 +1,6 @@
 ---
 card_id: construction-group-routing-v1-excel-native-remediation
-status: frozen
+status: review
 version: 1
 work_id: construction-group-routing-v1-row-remediation
 task_id: excel-native-remediation
@@ -9,9 +9,9 @@ role: developer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
-launch_status: planned
-actual_model: pending
-actual_reasoning_effort: pending
+launch_status: completed
+actual_model: gpt-5.6-terra
+actual_reasoning_effort: high
 fallback_reason: null
 card_path: knowledge/tasks/construction-group-routing-v1-excel-native-remediation.md
 card_commit_sha: runtime-envelope
@@ -56,3 +56,11 @@ acceptance_commands:
 - Mock lease lifecycle: truthful PID/HWND/start/build, durable-recorder-before-ACK ordering, ACK refusal, PID reuse/image/HWND mismatch, bounded cleanup, timeout, and user Excel preservation.
 - Mock successful explicit-sheet insert at rows 6, 10 and 104; reject wrong sheet, non-allowlisted fields, invalid template/formula/hyperlink contract; assert exactly one insert.
 - Real Windows Excel remains a blocking external gate and must be reported unavailable on non-Windows. Set card `review`, record immutable SHA/evidence/risks, commit/push normally; no merge/amend/rebase/force-push.
+
+## Handoff evidence
+
+- Actual route: P4 developer, `gpt-5.6-terra` / high; no fallback.
+- Changed only the four card-owned implementation/test paths plus this card.
+- Passed: `pytest -q tests/test_excel_native_contract.py` (7 passed); `compileall -q rns_import_server tests`; `git diff --check`.
+- Hosted macOS has no desktop Excel; real COM insert/recalculate/save/reopen is intentionally unexecuted and remains the blocking Windows gate.
+- Risk: process/HWND ownership checks are unit-mocked here and need real Windows API evidence before enabling production middle insertion.
