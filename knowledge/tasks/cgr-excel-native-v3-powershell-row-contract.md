@@ -53,3 +53,11 @@ acceptance_commands:
 ## Windows gate risk
 
 - `pwsh` is absent on this host and Pester reports explicit `windows_powershell_contract_unavailable`; no Windows/Excel execution is claimed. The mocked Pester lifecycle cases cover 6/10/104 and open/insert/calc/save/cleanup paths, but a real Windows Excel run remains required before release.
+
+## Bounded P6 recovery evidence
+
+- Recovery SHA: `fc1a2f08212d7fa5a18b60b89e99ad043835b443`.
+- Atomic writer disposes both writer and stream after `Flush(true)` before replace. The contract now creates exactly one final result/error artifact after independent close/owned-quit/reverse proxy release, and carries the exact post-cleanup envelope through the wrapper.
+- Strict request validation includes lease/ACK paths, exact group→next-header relation, worksheet capacity, source/template membership, field schema and unique ordinal targets. Cleanup retains its first error without masking primary.
+- Pester qualification is explicitly blocking (`exit 2`) without Windows; macOS `pwsh` is unavailable, so real qualification remains unperformed.
+- Recovery validation: focused `6 passed`; full `292 passed, 1 warning` (existing OpenPyXL x14 warning); compileall and diff check pass.
