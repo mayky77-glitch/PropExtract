@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 from typing import Any
 
 
@@ -46,6 +47,9 @@ class NativeInsertRequest:
     insertion_row: int
     lease_file: Path
     ack_file: Path
+    sheet: str
+    fields: dict[int, object]
+    hyperlink: str | None
 
     def payload(self) -> dict[str, Any]:
         value = asdict(self)
@@ -54,6 +58,20 @@ class NativeInsertRequest:
 
 def native_excel_available() -> bool:
     return os.name == "nt" and bool(os.environ.get("ProgramFiles"))
+
+
+def _lease_from_file(request: NativeInsertRequest, timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + min(timeout, 20.0)
+    while time.monotonic() < deadline:
+        try:
+            value = json.loads(request.lease_file.read_text(encoding="utf-8"))
+            if (value.get("operation_id"), value.get("owner_nonce"), value.get("pair_nonce")) == (request.operation_id, request.owner_nonce, request.pair_nonce):
+                required = {"excel_adapter", "excel_pid", "excel_hwnd", "excel_process_started_at", "excel_build"}
+                if required <= value.keys(): return value
+            raise NativeExcelError("excel_lease_invalid", stage="lease")
+        except FileNotFoundError:
+            time.sleep(0.05)
+    raise NativeExcelError("excel_lease_timeout", stage="lease")
 
 
 def run_native_insert(request: NativeInsertRequest, *, script: Path, timeout: float = 120.0) -> dict[str, Any]:
@@ -66,20 +84,25 @@ def run_native_insert(request: NativeInsertRequest, *, script: Path, timeout: fl
     request_file = request.lease_file.with_name("excel-request.json")
     request_file.write_text(json.dumps(request.payload(), ensure_ascii=False), encoding="utf-8")
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Request", str(request_file)],
-            capture_output=True, text=True, timeout=timeout, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+        lease = _lease_from_file(request, timeout)
+        request.ack_file.write_text(json.dumps({"operation_id": request.operation_id, "owner_nonce": request.owner_nonce, "pair_nonce": request.pair_nonce}), encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
+        process.kill()
         raise NativeExcelError("excel_timeout", stage="adapter", cause=error) from error
     except OSError as error:
         raise NativeExcelError("excel_adapter_launch_failed", stage="adapter", cause=error) from error
-    if completed.returncode:
-        raise NativeExcelError("excel_native_failed", stage="adapter", cause=RuntimeError(completed.stderr.strip() or completed.stdout.strip()))
+    if process.returncode:
+        raise NativeExcelError("excel_native_failed", stage="adapter", cause=RuntimeError(stderr.strip() or stdout.strip()))
     try:
-        result = json.loads(completed.stdout)
+        result = json.loads(stdout)
     except json.JSONDecodeError as error:
         raise NativeExcelError("excel_adapter_protocol_invalid", stage="adapter", cause=error) from error
     if not isinstance(result, dict) or result.get("status") != "ok":
         raise NativeExcelError("excel_adapter_protocol_invalid", stage="adapter")
+    result["lease"] = lease
     return result

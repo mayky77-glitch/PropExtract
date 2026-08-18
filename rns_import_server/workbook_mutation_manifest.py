@@ -62,3 +62,11 @@ def validate_insertion(control: MutationManifest, candidate: MutationManifest, r
                 expected = Translator(value, origin=coordinate).translate_formula(mapped)
             if target.get(mapped) != expected and not (column == "A" and source_row >= row):
                 raise RuntimeError(f"mutation_manifest_changed:{coordinate}")
+
+
+def validate_control(original: MutationManifest, control: MutationManifest) -> None:
+    """A control can normalize caches, but cannot change semantic workbook data."""
+    if original.sheet != control.sheet or original.max_row != control.max_row:
+        raise RuntimeError("control_manifest_structure_changed")
+    if original.values != control.values or original.formulas != control.formulas or original.hyperlinks != control.hyperlinks:
+        raise RuntimeError("control_manifest_semantic_changed")
