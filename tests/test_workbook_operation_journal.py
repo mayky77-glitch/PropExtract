@@ -358,7 +358,7 @@ def test_v3_owned_lease_preserves_adapter_identity_and_concurrent_exact_replay(t
     assert outcomes == [PHASE_EXCEL_OWNED, PHASE_EXCEL_OWNED]
 
 
-def test_v3_cleanup_failure_is_write_once_with_concurrent_exact_replay(tmp_path: Path) -> None:
+def test_v3_cleanup_failure_is_write_once_with_concurrent_exact_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     storage = RegistryStorage.bootstrap(tmp_path)
     path = storage.path
     cleanup = {"stage": "cleanup", "code": "terminate_timeout", "message": "timeout", "hresult": None, "winerror": 1460}
@@ -373,11 +373,19 @@ def test_v3_cleanup_failure_is_write_once_with_concurrent_exact_replay(tmp_path:
 
     barrier = threading.Barrier(2)
     outcomes: list[object] = []
+    original_get = WorkbookOperationJournal.get
+    local = threading.local()
+
+    def pause_after_initial_read(self: WorkbookOperationJournal, requested_operation_id: str):
+        value = original_get(self, requested_operation_id)
+        if requested_operation_id == operation_id and not getattr(local, "cleanup_read", False):
+            local.cleanup_read = True
+            barrier.wait(timeout=3)
+        return value
 
     def cleanup_writer() -> None:
         worker = RegistryStorage(path)
         try:
-            barrier.wait(timeout=3)
             outcomes.append(WorkbookOperationJournal(worker).record_cleanup_failure(
                 operation_id, cleanup_failure=cleanup
             )["cleanup_failure_code"])
@@ -386,9 +394,11 @@ def test_v3_cleanup_failure_is_write_once_with_concurrent_exact_replay(tmp_path:
         finally:
             worker.close()
 
-    first, second = threading.Thread(target=cleanup_writer), threading.Thread(target=cleanup_writer)
-    first.start(); second.start(); first.join(timeout=4); second.join(timeout=4)
-    assert not first.is_alive() and not second.is_alive()
+    with monkeypatch.context() as context:
+        context.setattr(WorkbookOperationJournal, "get", pause_after_initial_read)
+        first, second = threading.Thread(target=cleanup_writer), threading.Thread(target=cleanup_writer)
+        first.start(); second.start(); first.join(timeout=4); second.join(timeout=4)
+        assert not first.is_alive() and not second.is_alive()
     assert outcomes == ["terminate_timeout", "terminate_timeout"]
     reopened = RegistryStorage(path)
     try:
@@ -397,6 +407,62 @@ def test_v3_cleanup_failure_is_write_once_with_concurrent_exact_replay(tmp_path:
                 operation_id,
                 cleanup_failure={**cleanup, "code": "different", "message": "different"},
             )
+    finally:
+        reopened.close()
+
+
+def test_v3_cleanup_failure_differing_concurrent_writers_conflict_and_keep_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    path = storage.path
+    first_cleanup = {"stage": "cleanup", "code": "terminate_timeout", "message": "timeout", "hresult": None, "winerror": 1460}
+    second_cleanup = {"stage": "cleanup", "code": "terminate_denied", "message": "denied", "hresult": None, "winerror": 5}
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        journal.record_failure(operation_id, expected_phase="planned", primary_failure={
+            "stage": "open", "code": "open_failed", "message": "open", "hresult": -1, "winerror": 5,
+        })
+    finally:
+        storage.close()
+
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+    original_get = WorkbookOperationJournal.get
+    local = threading.local()
+
+    def pause_after_initial_read(self: WorkbookOperationJournal, requested_operation_id: str):
+        value = original_get(self, requested_operation_id)
+        if requested_operation_id == operation_id and not getattr(local, "cleanup_read", False):
+            local.cleanup_read = True
+            barrier.wait(timeout=3)
+        return value
+
+    def cleanup_writer(value: dict[str, object]) -> None:
+        worker = RegistryStorage(path)
+        try:
+            outcomes.append(WorkbookOperationJournal(worker).record_cleanup_failure(
+                operation_id, cleanup_failure=value
+            )["cleanup_failure_code"])
+        except BaseException as error:
+            outcomes.append(error)
+        finally:
+            worker.close()
+
+    with monkeypatch.context() as context:
+        context.setattr(WorkbookOperationJournal, "get", pause_after_initial_read)
+        first = threading.Thread(target=cleanup_writer, args=(first_cleanup,))
+        second = threading.Thread(target=cleanup_writer, args=(second_cleanup,))
+        first.start(); second.start(); first.join(timeout=4); second.join(timeout=4)
+        assert not first.is_alive() and not second.is_alive()
+    assert len([value for value in outcomes if isinstance(value, str)]) == 1
+    assert len([value for value in outcomes if isinstance(value, RegistryConflictError)]) == 1
+    reopened = RegistryStorage(path)
+    try:
+        stored = WorkbookOperationJournal(reopened).get(operation_id)
+        assert stored and stored["cleanup_failure_code"] in {"terminate_timeout", "terminate_denied"}
+        assert stored["cleanup_failure_code"] == next(value for value in outcomes if isinstance(value, str))
     finally:
         reopened.close()
 

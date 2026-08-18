@@ -59,7 +59,8 @@ _LEGACY_EXCEL_LEASE_FIELDS = frozenset({
 _ADAPTER_LEASE_FIELDS = frozenset({"excel_adapter", "adapter_pid", "adapter_image", "adapter_process_started_at"})
 _EXCEL_LEASE_FIELDS = frozenset({"excel_pid", "excel_hwnd", "excel_image", "excel_process_started_at", "excel_build"})
 _V3_LEASE_FIELDS = _ADAPTER_LEASE_FIELDS | _EXCEL_LEASE_FIELDS
-_FAILURE_FIELDS = frozenset({"stage", "code", "message", "hresult", "winerror"})
+_FAILURE_FIELD_ORDER = ("stage", "code", "message", "hresult", "winerror")
+_FAILURE_FIELDS = frozenset(_FAILURE_FIELD_ORDER)
 
 
 class JournalTransitionError(RegistryConflictError):
@@ -475,18 +476,27 @@ class WorkbookOperationJournal:
             if existing == cleanup:
                 return current
             raise RegistryConflictError("Cleanup failure уже записан и не может быть заменён")
-        assignments = [f"cleanup_failure_{field}=?" for field in cleanup] + ["updated_at=?"]
-        values: list[object] = [*cleanup.values(), _now(), operation_id]
-        where = "operation_id=?"
-        if expected_phase is not None:
-            where += " AND phase=?"
-            values.append(expected_phase)
+        # A cleanup envelope is durable write-once evidence. Predicate every
+        # field rather than merely the operation ID, so a second concurrent
+        # writer can only be an exact replay or a typed conflict.
+        cleanup_columns = tuple(f"cleanup_failure_{field}" for field in _FAILURE_FIELD_ORDER)
+        assignments = [f"{field}=?" for field in cleanup_columns] + ["updated_at=?"]
+        phase = expected_phase or current.phase
+        values: list[object] = [*(cleanup[field] for field in _FAILURE_FIELD_ORDER), _now(), operation_id, phase]
+        where = "operation_id=? AND phase=?" + "".join(f" AND {field} IS NULL" for field in cleanup_columns)
         self.storage.connection.execute("PRAGMA synchronous=FULL")
         with self.storage.transaction() as connection:
             updated = connection.execute(
                 f"UPDATE workbook_operation_journal SET {', '.join(assignments)} WHERE {where}", values
             ).rowcount
             if updated != 1:
+                replayed = self.get(operation_id)
+                if replayed is not None and replayed.phase == phase:
+                    persisted = {field.removeprefix("cleanup_failure_"): replayed[field] for field in cleanup_columns}
+                    if persisted == cleanup:
+                        return replayed
+                    if any(value is not None for value in persisted.values()):
+                        raise RegistryConflictError("Cleanup failure уже записан и не может быть заменён")
                 raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
         return self.get(operation_id)  # type: ignore[return-value]
 
