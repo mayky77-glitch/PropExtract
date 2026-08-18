@@ -1,6 +1,6 @@
 ---
 card_id: construction-group-routing-v1-workbook-groups
-status: frozen
+status: review
 version: 1
 supersedes: null
 work_id: construction-group-routing-v1
@@ -10,10 +10,10 @@ role: developer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
-launch_status: planned
-actual_model: pending
-actual_reasoning_effort: pending
-fallback_reason: null
+launch_status: resumed
+actual_model: inherited
+actual_reasoning_effort: inherited
+fallback_reason: runtime did not expose an agent-model override; requested P4 route retained as task requirement
 card_path: knowledge/tasks/construction-group-routing-v1-workbook-groups.md
 card_commit_sha: runtime-envelope
 planning_parent_sha: 9c1d6ffeeb640cc8c72f72e502ae39ae158cc746
@@ -69,3 +69,12 @@ acceptance_commands:
 ## Handoff
 
 Set card to `review`. Record requested vs actual route, feature SHA, changed paths, exact commands/results, remaining risk and proposed knowledge delta. Commit and push feature branch. Do not merge, amend, rebase or force-push after handoff.
+
+## Review handoff — 2026-08-18
+
+- Route: requested `P4`, `gpt-5.6-terra`/`high`; actual runtime route inherited (override not exposed).
+- Feature SHA: pending human commit; worker did not commit or push.
+- Changed paths: `rns_import_server/workbook_groups.py`, `tests/test_workbook_group_routing.py`, this card.
+- Checks: `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_workbook_group_routing.py tests/test_construction_registry.py` — `18 passed`; `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server tests` — passed; `git diff --check` — passed.
+- Remaining risk: caller must project authoritative construction-header names and revalidate plan identity/hash/generation under publication lock; native mutation remains Wave 2B scope.
+- Proposed knowledge delta: record `workbook_groups.py` as pure A:F semantic block resolver; no `knowledge/INDEX.md` exists in this frozen worktree, so no shared vault index changed.
