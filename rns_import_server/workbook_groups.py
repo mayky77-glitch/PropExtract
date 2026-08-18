@@ -14,7 +14,9 @@ from typing import Iterable
 from rns_import_server.normalization import canonical_rns_identity, field_comparison_equal
 
 
-_FULL_OBJECT_CODE = re.compile(r"^(\d{3}-\d{7})\.\d{4}$")
+_FULL_OBJECT_CODE = re.compile(r"^([0-9]{3}-[0-9]{7})\.[0-9]{4}$")
+_LEGACY_OBJECT_CODE = re.compile(r"^([0-9]{3}-[0-9]{7})$")
+_CODE_SHAPED = re.compile(r"^\d{3}-\d{7}")
 _EMPTY = (None, "")
 
 
@@ -135,10 +137,18 @@ def _is_header(row: SheetRow, official_name: str) -> bool:
 
 
 def _canonical_child_prefix(value: object) -> str | None:
+    """Return a valid ASCII prefix, or ``""`` for malformed code-shaped C."""
     if not isinstance(value, str) or value in {"", "-"}:
         return None
     match = _FULL_OBJECT_CODE.fullmatch(value)
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+    match = _LEGACY_OBJECT_CODE.fullmatch(value)
+    if match:
+        return match.group(1)
+    # ``\d`` is deliberate here: non-ASCII decimal digits look code-shaped but
+    # cannot be accepted as a workbook construction code.
+    return "" if _CODE_SHAPED.match(value) else None
 
 
 def _is_blank_slot(row: SheetRow, *, last_group: bool) -> bool:

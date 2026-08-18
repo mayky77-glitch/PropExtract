@@ -84,3 +84,9 @@ Set card to `review`. Record requested vs actual route, feature SHA, changed pat
 - Full C recognition is now exact `^[0-9]{3}-[0-9]{7}\.[0-9]{4}$`; foreign `999-1234567.0001` is a structural conflict and leading-zero suffixes remain raw strings.
 - An immutable official-header catalogue is required. Missing/empty/incomplete catalogues return `header_catalogue_required`; a complete catalogue keeps adjacent-group RNS as `rns_wrong_block`.
 - Checks: focused registry acceptance — `19 passed`; compileall and whitespace checks — passed.
+
+## Recovery remediation — 2026-08-18
+
+- C classification accepts only ASCII full `^[0-9]{3}-[0-9]{7}\.[0-9]{4}$` and legacy bare `^[0-9]{3}-[0-9]{7}$` values. Blank and `-` remain allowed.
+- Foreign full/bare values and malformed ASCII or non-ASCII code-shaped values return `block_code_conflict`; no insertion plan is emitted.
+- Checks: focused registry acceptance — `19 passed`; compileall and whitespace checks — passed.

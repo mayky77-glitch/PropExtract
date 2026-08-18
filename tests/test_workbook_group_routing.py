@@ -58,10 +58,18 @@ def test_outside_only_duplicate_inside_and_absence_have_distinct_results() -> No
     assert absent.code is WorkbookGroupCode.INSERTION_PLANNED and absent.plan.target_row == 10
 
 
-def test_foreign_structured_c_conflicts_but_blank_and_legacy_dash_are_allowed() -> None:
+def test_foreign_or_malformed_c_conflicts_but_blank_and_legacy_dash_are_allowed() -> None:
     foreign = resolve(projection(header(4), row(5, c="999-1234567.0001"), header(6, "Другая")))
+    foreign_legacy = resolve(projection(header(4), row(5, c="999-1234567"), header(6, "Другая")))
+    malformed = resolve(projection(header(4), row(5, c="999-1234567-0001"), header(6, "Другая")))
+    unicode_digits = resolve(projection(header(4), row(5, c="٩٩٩-١٢٣٤٥٦٧.٠٠٠١"), header(6, "Другая")))
+    legacy_same_prefix = resolve(projection(header(4), row(5, c=CODE), header(6, "Другая")))
     allowed = resolve(projection(header(4), row(5), row(6, c="-"), header(10, "Другая")))
     assert foreign.code is WorkbookGroupCode.BLOCK_CODE_CONFLICT
+    assert foreign_legacy.code is WorkbookGroupCode.BLOCK_CODE_CONFLICT
+    assert malformed.code is WorkbookGroupCode.BLOCK_CODE_CONFLICT
+    assert unicode_digits.code is WorkbookGroupCode.BLOCK_CODE_CONFLICT
+    assert legacy_same_prefix.code is WorkbookGroupCode.INSERTION_PLANNED
     assert allowed.code is WorkbookGroupCode.INSERTION_PLANNED
 
 
