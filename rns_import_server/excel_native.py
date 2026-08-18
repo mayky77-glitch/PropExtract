@@ -18,9 +18,10 @@ from typing import Any, Callable, Mapping
 class NativeExcelError(RuntimeError):
     """Typed pre-publication failure; its ``code`` is stable for recovery UI."""
 
-    def __init__(self, code: str, *, stage: str, cause: BaseException | None = None):
-        self.code, self.stage, self.cause = code, stage, cause
+    def __init__(self, code: str, *, stage: str, cause: BaseException | None = None, cleanup: BaseException | None = None):
+        self.code, self.stage, self.cause, self.cleanup = code, stage, cause, cleanup
         detail = f": {cause}" if cause else ""
+        if cleanup: detail += f"; cleanup: {cleanup}"
         super().__init__(f"{code}@{stage}{detail}")
 
 
@@ -73,15 +74,23 @@ def validate_request(request: NativeInsertRequest) -> None:
     if request.hyperlink is not None and (not isinstance(request.hyperlink, str) or not request.hyperlink.startswith(("file:", "https:"))):
         raise NativeExcelError("native_hyperlink_invalid", stage="pre_open")
     formulas = request.template_formula_r1c1 or {}
-    if set(formulas) - {25, 26} or any(not isinstance(value, str) or not value.startswith("=") for value in formulas.values()):
+    if set(formulas) != {25, 26} or any(not isinstance(value, str) or not value.startswith("=") for value in formulas.values()):
         raise NativeExcelError("native_template_formula_invalid", stage="pre_open")
+
+
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with temporary.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary, path)
 
 
 def _lease_from_file(request: NativeInsertRequest, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + min(timeout, 20.0)
     while time.monotonic() < deadline:
         try:
-            value = json.loads(request.lease_file.read_text(encoding="utf-8"))
+            value = json.loads(request.lease_file.read_text(encoding="utf-8-sig"))
             if (value.get("operation_id"), value.get("owner_nonce"), value.get("pair_nonce")) == (request.operation_id, request.owner_nonce, request.pair_nonce):
                 required = {"excel_adapter", "adapter_pid", "adapter_started_at", "excel_pid", "excel_hwnd", "excel_process_started_at", "excel_image", "excel_build"}
                 if required <= value.keys(): return value
@@ -108,28 +117,38 @@ def run_native_insert(request: NativeInsertRequest, *, script: Path, timeout: fl
                       lease_recorder: Callable[[Mapping[str, Any]], None] | None = None,
                       process_probe: Callable[[int], Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """Run exactly the native helper or fail before either staged file changes."""
+    if lease_recorder is None or process_probe is None:
+        raise NativeExcelError("excel_concrete_lease_authority_required", stage="authorize")
     if not native_excel_available():
         raise NativeExcelError("excel_required_for_middle_insert", stage="pre_open")
     validate_request(request)
     request.lease_file.parent.mkdir(parents=True, exist_ok=True)
     request_file = request.lease_file.with_name("excel-request.json")
-    request_file.write_text(json.dumps(request.payload(), ensure_ascii=False), encoding="utf-8")
+    _atomic_json(request_file, request.payload())
+    process = None
     try:
         process = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Request", str(request_file)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         lease = _lease_from_file(request, timeout); validate_lease(lease, request, process_probe=process_probe)
-        if lease_recorder is None:
-            raise NativeExcelError("excel_lease_recorder_required", stage="lease")
+        adapter = process_probe(process.pid)
+        if adapter.get("started_at") != lease.get("adapter_started_at"):
+            raise NativeExcelError("excel_adapter_process_mismatch", stage="lease")
         lease_recorder(lease)
-        request.ack_file.write_text(json.dumps({"operation_id": request.operation_id, "owner_nonce": request.owner_nonce, "pair_nonce": request.pair_nonce}), encoding="utf-8")
+        _atomic_json(request.ack_file, {"operation_id": request.operation_id, "owner_nonce": request.owner_nonce, "pair_nonce": request.pair_nonce})
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        process.kill()
-        raise NativeExcelError("excel_timeout", stage="adapter", cause=error) from error
+        cleanup = None
+        try:
+            if process: process.kill(); process.communicate(timeout=5)
+        except BaseException as cleanup_error: cleanup = cleanup_error
+        raise NativeExcelError("excel_timeout", stage="adapter", cause=error, cleanup=cleanup) from error
     except OSError as error:
         raise NativeExcelError("excel_adapter_launch_failed", stage="adapter", cause=error) from error
+    except NativeExcelError:
+        if process: process.communicate(timeout=5)
+        raise
     if process.returncode:
         raise NativeExcelError("excel_native_failed", stage="adapter", cause=RuntimeError(stderr.strip() or stdout.strip()))
     try:

@@ -13,14 +13,14 @@ def _request(tmp_path: Path, row: int = 6, **kwargs) -> NativeInsertRequest:
 
 
 def test_hosted_non_windows_is_a_typed_safe_negative_path(tmp_path: Path) -> None:
-    request = _request(tmp_path)
+    request = _request(tmp_path, template_formula_r1c1={25: "=RC[-1]", 26: "=RC[-1]"})
     if not native_excel_available():
         with pytest.raises(NativeExcelError, match="excel_required_for_middle_insert"):
-            run_native_insert(request, script=tmp_path / "helper.ps1")
+            run_native_insert(request, script=tmp_path / "helper.ps1", lease_recorder=lambda lease: None, process_probe=lambda pid: {})
 
 
 def test_native_request_carries_pair_and_lease_paths(tmp_path: Path) -> None:
-    request = _request(tmp_path, 10)
+    request = _request(tmp_path, 10, template_formula_r1c1={25: "=RC[-1]", 26: "=RC[-1]"})
     assert request.payload()["pair_nonce"] == "pair"
     assert request.payload()["insertion_row"] == 10
 
