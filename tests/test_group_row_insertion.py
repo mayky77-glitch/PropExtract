@@ -5,7 +5,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from rns_import_server.audit import sha256
-from rns_import_server.group_row_insertion import GroupRowInsertionError, GroupRowRequest, PublicationContext, publish_group_row
+from rns_import_server.group_row_insertion import GroupRowInsertionError, GroupRowRequest, PublicationContext, publish_group_row, recover_group_row
 from rns_import_server.workbook_groups import MutationPlan
 
 
@@ -52,3 +52,10 @@ def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, 
     with pytest.raises(GroupRowInsertionError, match="excel_required_for_middle_insert"):
         publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {}, context=context), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert source.exists() and not output.exists()
+
+
+def test_third_hash_recovery_is_manual_repair(tmp_path: Path) -> None:
+    source = tmp_path / "source.xlsx"; _book(source); journal = Journal()
+    journal.phase = "staged"; context = PublicationContext(lambda: nullcontext(), lambda current: current, journal, 1, "book")
+    assert recover_group_row(context=context, operation={"operation_id": "op", "phase": "staged", "pre_hash": "old", "post_hash": "new"}, source=source) == "manual_repair"
+    assert journal.calls[-1][0] == "manual_repair"

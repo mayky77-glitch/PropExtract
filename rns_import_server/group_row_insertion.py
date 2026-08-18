@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 from uuid import uuid4
 
 from rns_import_server.audit import sha256
@@ -54,6 +54,22 @@ class GroupRowRequest:
     fields: dict[int, object]
     hyperlink: str | None = None
     context: PublicationContext | None = None
+
+
+def recover_group_row(*, context: PublicationContext, operation: object, source: Path) -> str:
+    """Hash-only recovery: finalise post-hash, re-resolve pre-hash, never overwrite a third hash."""
+    values = operation if isinstance(operation, Mapping) else getattr(operation, "values", operation)
+    if not isinstance(values, Mapping):
+        raise GroupRowInsertionError("recovery_operation_invalid", stage="recovery")
+    current, phase = sha256(source), str(values.get("phase"))
+    operation_id, pre_hash, post_hash = str(values.get("operation_id")), values.get("pre_hash"), values.get("post_hash")
+    if post_hash and current == post_hash:
+        if phase == "published": _finalize(context, operation_id)
+        return "finalize_only"
+    if pre_hash and current == pre_hash and phase in {"planned", "staged", "native", "validated", "backup_verified"}:
+        return "re_resolve_required"
+    _manual_repair(context, operation_id, phase, "workbook_third_hash_manual_repair")
+    return "manual_repair"
 
 
 def _fsync(path: Path) -> None:

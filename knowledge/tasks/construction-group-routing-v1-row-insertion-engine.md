@@ -88,3 +88,9 @@ acceptance_commands:
 - Windows evidence: unavailable on this macOS hosted runner. The safe negative middle-insertion contract is tested and raises `excel_required_for_middle_insert` before staging/mutation. Real desktop Excel insert/recalculate/save/reopen remains a blocking gate.
 - Remaining risk: the PowerShell COM helper requires an integration-owned lease ACK writer and real Excel 365 x64 validation before native middle insertion can be enabled.
 - Proposed knowledge delta: document the immutable no-fallback `excel_required_for_middle_insert` behavior and the Windows-only gate in the workbook-publication component note.
+
+## Review remediation cycle 2
+
+- Added locked authoritative re-resolution, journaled UUID operation/owner/pair lifecycle, paired staged hashes/fsync/backup/replace, hash-only recovery and manual-repair third-hash handling.
+- Added pre-open lease/ACK protocol in the helper and Python adapter, plus injected native contract seam for hosted fault tests.
+- Re-ran the exact card regression suite after remediation: 30 passed; compileall, Windows self-test and diff check passed. Native Excel 365 remains unexecuted/unavailable on this macOS host.
