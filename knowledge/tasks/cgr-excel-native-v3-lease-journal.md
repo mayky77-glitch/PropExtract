@@ -1,6 +1,6 @@
 ---
 card_id: cgr-excel-native-v3-lease-journal
-status: frozen
+status: review
 version: 1
 work_id: cgr-excel-native-v3-20260818
 task_id: lease-journal-v3
@@ -42,4 +42,13 @@ acceptance_commands:
 - Add transactional migration with verified backup/rollback, typed corrupt/newer behavior and restart-readable owned/failed state. Preserve existing journal consumers and schema history.
 - Tests cover complete/partial lease, nonce mismatch, phase races, crash/rollback/reopen and structured diagnostic round trip.
 
-Set card `review`, record immutable feature SHA, exact evidence and migration risk; normal commit/push only. No merge/amend/rebase/force-push.
+## Implementation evidence
+
+- Feature SHA: `b953f556553b7fdaa17c7615000eae3f43936c33`.
+- Exact focused acceptance: `22 passed` — `tests/test_registry_storage.py tests/test_workbook_operation_journal.py`.
+- Wider regression: `289 passed, 1 warning` (pre-existing OpenPyXL x14-extension warning); `compileall` and `git diff --check` pass.
+- Verified immutable v2 seed rebuild remains byte-identical. Runtime copies migrate transactionally to schema v3 after copy; the verified `.pre-migration.bak` is the direct rollback artifact.
+
+## Residual risk
+
+- The journal only authorizes a nonce-bound ACK after `excel_owned`; the adapter/PowerShell consumers must call the new lease methods before opening a workbook. Their integration is intentionally outside this card's write scope.
