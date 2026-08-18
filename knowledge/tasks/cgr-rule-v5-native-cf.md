@@ -45,3 +45,21 @@ Input is `(worksheet_part, worksheet_xml)`; output immutable ordered typed model
 - Scope is parsing only: it does not write XLSX files or touch production data.
   Native CF extensions are deliberately rejected rather than discarded; a
   dedicated extension reader must own them before they can be accepted.
+
+## P6 recovery review — 2026-08-18
+
+- Aligned the reader to the native 2006 vocabulary: the 12 native comparison
+  operators are accepted, while x14-only `autoMin`, `3Stars`, `gradient`, and
+  `axisPosition` are rejected in native elements.
+- Native `extLst` is now an immutable opaque model at container, rule, and
+  CFVO owner paths.  This preserves x14 coexistence without treating foreign
+  extension children as native payloads.
+- Formula particles have native order/cardinality checks; `expression`,
+  `cellIs` (including between/notBetween), and payload rules are validated.
+  All owned composites reject non-whitespace text/tails.  `priority`/`dxfId`/
+  `stdDev` use Int32 and rank/data-bar/color index fields use UInt32 bounds;
+  top10 rank applies its 0..100 percentage and 1..1000 count semantics.
+- Recovery evidence: focused suite 50 passed; full suite 336 passed with the
+  same unrelated OpenPyXL x14 warning; compileall and diff checks passed.
+- Residual risk: foreign extension XML is retained as opaque serialized XML,
+  not interpreted; its URI-specific semantics remain owned by the x14 reader.

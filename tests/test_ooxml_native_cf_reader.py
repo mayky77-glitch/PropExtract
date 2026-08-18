@@ -1,196 +1,130 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-
 import pytest
 
 from rns_import_server.ooxml_native_cf_reader import (
-    MAIN_NS,
-    XR_NS,
-    NativeCfParseError,
-    NativeColorScale,
-    NativeDataBar,
-    NativeIconSet,
-    read_native_conditional_formatting,
+    INT32_MAX, MAIN_NS, UINT32_MAX, XR_NS, NativeCfParseError, NativeColorScale,
+    NativeDataBar, NativeIconSet, read_native_conditional_formatting,
 )
 
-
-def _worksheet(contents: str) -> str:
-    return f'<worksheet xmlns="{MAIN_NS}" xmlns:xr="{XR_NS}">{contents}</worksheet>'
-
-
+X14 = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+def _ws(body: str) -> str:
+    return f'<worksheet xmlns="{MAIN_NS}" xmlns:xr="{XR_NS}" xmlns:x14="{X14}">{body}</worksheet>'
+def _ext(label: str) -> str:
+    return f'<extLst><ext uri="{{{label}}}"><x14:payload>{label}</x14:payload></ext></extLst>'
 def _rules(row: int) -> str:
-    return f"""
-      <conditionalFormatting sqref="A{row} B{row}:C{row}" pivot="1" xr:uid="{{01234567-89AB-CDEF-0123-456789ABCDEF}}">
-        <cfRule type="expression" priority="1" dxfId="2" stopIfTrue="0" aboveAverage="true" percent="false" bottom="1" operator="equal" text="hello" timePeriod="today" rank="10" stdDev="2" equalAverage="false">
-          <formula>A{row}=1</formula><formula>B{row}=2</formula>
-        </cfRule>
-        <cfRule type="colorScale" priority="2"><colorScale>
-          <cfvo type="min"/><cfvo type="percentile" val="50" gte="false"/><cfvo type="max"/>
-          <color rgb="FF0000FF"/><color theme="1" tint="-0.5"/><color indexed="64"/>
-        </colorScale></cfRule>
-        <cfRule type="dataBar" priority="3"><dataBar minLength="1" maxLength="99" showValue="false" gradient="true" border="0" negativeBarColorSameAsPositive="1" negativeBarBorderColorSameAsPositive="false" axisPosition="middle" direction="rightToLeft">
-          <cfvo type="min"/><cfvo type="max"/><color auto="1"/>
-        </dataBar></cfRule>
-        <cfRule type="iconSet" priority="4"><iconSet iconSet="3Arrows" showValue="true" percent="0" reverse="false">
-          <cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/>
-        </iconSet></cfRule>
-      </conditionalFormatting>
-      <conditionalFormatting sqref="D{row}" pivot="0"/>
-    """
+    return f'''
+    <conditionalFormatting sqref="A{row} B{row}:C{row}" pivot="true" xr:uid="{{01234567-89AB-CDEF-0123-456789ABCDEF}}">
+      <cfRule type="expression" priority="1" dxfId="2" stopIfTrue="false"><formula>A{row}=1</formula>{_ext("rule")}</cfRule>
+      <cfRule type="cellIs" priority="2" dxfId="3" operator="equal"><formula>1</formula></cfRule>
+      <cfRule type="top10" priority="3" dxfId="4" rank="10" percent="false" bottom="true"/>
+      <cfRule type="aboveAverage" priority="4" dxfId="5" aboveAverage="true" stdDev="2" equalAverage="false"/>
+      <cfRule type="containsText" priority="5" dxfId="6" text="hello"><formula>SEARCH("hello",A{row})</formula></cfRule>
+      <cfRule type="colorScale" priority="6"><colorScale>
+        <cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>
+        <color rgb="FF0000FF"/><color theme="1" tint="-0.5"/><color indexed="64"/>
+      </colorScale></cfRule>
+      <cfRule type="dataBar" priority="7"><dataBar minLength="1" maxLength="99" showValue="false">
+        <cfvo type="min"/><cfvo type="max"/><color auto="1"/>
+      </dataBar></cfRule>
+      <cfRule type="iconSet" priority="8"><iconSet iconSet="3Arrows" showValue="true" percent="false" reverse="false">
+        <cfvo type="percent" val="0" gte="true"/><cfvo type="percent" val="33" gte="false"/><cfvo type="percent" val="67"/>
+      </iconSet></cfRule>
+      {_ext("container")}
+    </conditionalFormatting>
+    <conditionalFormatting sqref="D{row}" pivot="false"/>'''
 
-
-@pytest.mark.parametrize("sheet_name", ("Sheet1", "Dashboard"))
+@pytest.mark.parametrize("sheet", ("Sheet1", "Dashboard"))
 @pytest.mark.parametrize("row", (6, 10, 104))
-def test_reads_ordered_complete_native_cf_matrix(sheet_name: str, row: int):
-    result = read_native_conditional_formatting(f"xl/worksheets/{sheet_name}.xml", _worksheet(_rules(row)))
-
-    assert result.findings == ()
-    assert len(result.containers) == 2
+def test_complete_native_matrix_preserves_typed_ordered_models(sheet: str, row: int):
+    result = read_native_conditional_formatting(f"xl/worksheets/{sheet}.xml", _ws(_rules(row)))
     group, empty = result.containers
-    assert group.owner_path == f"xl/worksheets/{sheet_name}.xml#worksheet/conditionalFormatting[1]"
-    assert group.sqref == (f"A{row}", f"B{row}:C{row}")
-    assert group.pivot is True
+    assert result.findings == () and group.owner_path == f"xl/worksheets/{sheet}.xml#worksheet/conditionalFormatting[1]"
+    assert group.sqref == (f"A{row}", f"B{row}:C{row}") and group.pivot is True
+    assert empty.rules == () and empty.pivot is False and empty.extension_list is None
     assert group.uid == "{01234567-89AB-CDEF-0123-456789ABCDEF}"
-    assert empty.sqref == (f"D{row}",)
-    assert empty.pivot is False
-    assert empty.uid is None
-    assert empty.rules == ()
+    assert group.extension_list and group.extension_list.extensions[0].uri == "{container}"
+    expression, cell_is, top10, above, text, color, data, icon = group.rules
+    assert expression.formulas == (f"A{row}=1",) and expression.extension_list
+    assert cell_is.operator == "equal" and cell_is.formulas == ("1",)
+    assert (top10.rank, top10.percent, top10.bottom) == (10, False, True)
+    assert (above.above_average, above.standard_deviation, above.equal_average) == (True, 2, False)
+    assert text.text == "hello" and text.formulas[0].startswith("SEARCH")
+    assert isinstance(color.payload, NativeColorScale) and color.payload.thresholds[1].value == "50"
+    assert isinstance(data.payload, NativeDataBar) and (data.payload.min_length, data.payload.max_length, data.payload.show_value) == (1,99,False)
+    assert isinstance(icon.payload, NativeIconSet) and icon.payload.thresholds[1].greater_than_or_equal is False
+    with pytest.raises(FrozenInstanceError): group.pivot = False  # type: ignore[misc]
 
-    expression, color_scale_rule, data_bar_rule, icon_set_rule = group.rules
-    assert expression.owner_path.endswith("conditionalFormatting[1]/cfRule[1]")
-    assert expression.type == "expression"
-    assert expression.priority == 1 and expression.dxf_id == 2
-    assert expression.stop_if_true is False
-    assert expression.above_average is True
-    assert expression.percent is False
-    assert expression.bottom is True
-    assert expression.operator == "equal"
-    assert expression.text == "hello" and expression.time_period == "today"
-    assert expression.rank == 10 and expression.standard_deviation == 2
-    assert expression.equal_average is False
-    assert expression.formulas == (f"A{row}=1", f"B{row}=2")
-    assert expression.payload is None
+@pytest.mark.parametrize(("attr","value"), (("",None), ('pivot="false"',False), ('pivot="true"',True)))
+def test_pivot_tri_state_and_zero_containers(attr: str, value: bool | None):
+    result=read_native_conditional_formatting("xl/worksheets/s.xml",_ws(f'<conditionalFormatting sqref="A1" {attr}/>'))
+    assert result.containers[0].pivot is value
+    assert read_native_conditional_formatting("xl/worksheets/s.xml",_ws("")).containers == ()
 
-    assert isinstance(color_scale_rule.payload, NativeColorScale)
-    assert [value.type for value in color_scale_rule.payload.thresholds] == ["min", "percentile", "max"]
-    assert color_scale_rule.payload.thresholds[1].value == "50"
-    assert color_scale_rule.payload.thresholds[1].greater_than_or_equal is False
-    assert color_scale_rule.payload.colors[0].rgb == "FF0000FF"
-    assert color_scale_rule.payload.colors[1].theme == 1
-    assert color_scale_rule.payload.colors[1].tint == -0.5
-    assert color_scale_rule.payload.colors[2].indexed == 64
+@pytest.mark.parametrize("operator", ("between","notBetween","equal","notEqual","greaterThan","lessThan","greaterThanOrEqual","lessThanOrEqual","containsText","notContains","beginsWith","endsWith"))
+def test_all_twelve_native_operators_are_preserved(operator: str):
+    formulas = "<formula>1</formula><formula>2</formula>" if operator in ("between","notBetween") else "<formula>1</formula>"
+    xml=f'<conditionalFormatting sqref="A1"><cfRule type="cellIs" priority="1" operator="{operator}">{formulas}</cfRule></conditionalFormatting>'
+    assert read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml)).containers[0].rules[0].operator == operator
 
-    assert isinstance(data_bar_rule.payload, NativeDataBar)
-    assert data_bar_rule.payload.min_length == 1 and data_bar_rule.payload.max_length == 99
-    assert data_bar_rule.payload.show_value is False and data_bar_rule.payload.gradient is True
-    assert data_bar_rule.payload.border is False
-    assert data_bar_rule.payload.negative_bar_color_same_as_positive is True
-    assert data_bar_rule.payload.negative_bar_border_color_same_as_positive is False
-    assert data_bar_rule.payload.axis_position == "middle" and data_bar_rule.payload.direction == "rightToLeft"
-    assert data_bar_rule.payload.color.auto is True
+@pytest.mark.parametrize(("xml","code"), (
+    ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"/></conditionalFormatting>',"invalid_formula_cardinality"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>1</formula><formula>2</formula></cfRule></conditionalFormatting>',"invalid_formula_cardinality"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="cellIs" priority="1" operator="between"><formula>1</formula></cfRule></conditionalFormatting>',"invalid_formula_cardinality"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="cellIs" priority="1" operator="equal"><formula>1</formula><formula>2</formula></cfRule></conditionalFormatting>',"invalid_formula_cardinality"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="dataBar" priority="1"><formula>1</formula><formula>2</formula><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/></dataBar></cfRule></conditionalFormatting>',"invalid_formula_cardinality"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="dataBar" priority="1"><dataBar gradient="true"><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/></dataBar></cfRule></conditionalFormatting>',"unknown_attribute"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="iconSet" priority="1"><iconSet iconSet="3Stars"><cfvo type="percent" val="0"/><cfvo type="percent" val="50"/><cfvo type="percent" val="90"/></iconSet></cfRule></conditionalFormatting>',"invalid_enum"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="autoMin"/><cfvo type="max"/><color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale></cfRule></conditionalFormatting>',"invalid_enum"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="dataBar" priority="1"><dataBar axisPosition="middle"><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/></dataBar></cfRule></conditionalFormatting>',"unknown_attribute"),
+    ('<conditionalFormatting sqref="A1">unexpected<cfRule type="expression" priority="1"><formula>1</formula></cfRule></conditionalFormatting>',"mixed_content"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>1</formula></cfRule>tail</conditionalFormatting>',"mixed_content"),
+))
+def test_formula_particles_x14_fields_and_mixed_owned_content_fail_closed(xml: str, code: str):
+    with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml))
+    assert error.value.code == code
 
-    assert isinstance(icon_set_rule.payload, NativeIconSet)
-    assert icon_set_rule.payload.icon_set == "3Arrows"
-    assert icon_set_rule.payload.show_value is True
-    assert icon_set_rule.payload.percent is False and icon_set_rule.payload.reverse is False
-    assert [item.value for item in icon_set_rule.payload.thresholds] == ["0", "33", "67"]
-    with pytest.raises(FrozenInstanceError):
-        group.pivot = False  # type: ignore[misc]
+def test_extlst_is_owned_at_container_rule_and_cfvo_paths_with_x14_payload():
+    xml=f'''<conditionalFormatting sqref="A1">{_ext("container")}
+      <cfRule type="colorScale" priority="1"><colorScale>
+      <cfvo type="min">{_ext("cfvo")}</cfvo><cfvo type="max"/>
+      <color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale>{_ext("rule")}</cfRule></conditionalFormatting>'''
+    # extLst must follow cfRule at container level; moving it proves order too.
+    xml=xml.replace(_ext("container"),"").replace("</conditionalFormatting>",_ext("container")+"</conditionalFormatting>")
+    item=read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml)).containers[0]
+    assert item.extension_list.owner_path.endswith("/extLst")
+    assert item.rules[0].extension_list.extensions[0].uri == "{rule}"
+    assert item.rules[0].payload.thresholds[0].extension_list.extensions[0].uri == "{cfvo}"  # type: ignore[union-attr]
 
+@pytest.mark.parametrize(("rank","percent","ok"), (("0","true",True),("100","true",True),("101","true",False),("1","false",True),("1000","false",True),("0","false",False),("1001","false",False)))
+def test_top10_rank_uses_uint32_with_percent_semantics(rank: str, percent: str, ok: bool):
+    xml=f'<conditionalFormatting sqref="A1"><cfRule type="top10" priority="1" rank="{rank}" percent="{percent}"/></conditionalFormatting>'
+    if ok: assert read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml)).containers[0].rules[0].rank == int(rank)
+    else:
+        with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml))
+        assert error.value.code == "integer_out_of_range"
 
-@pytest.mark.parametrize(
-    ("attribute", "expected"),
-    (("", None), ('pivot="false"', False), ('pivot="true"', True)),
-)
-def test_pivot_is_tri_state(attribute: str, expected: bool | None):
-    result = read_native_conditional_formatting(
-        "xl/worksheets/sheet1.xml",
-        _worksheet(f'<conditionalFormatting sqref="A1" {attribute}/><conditionalFormatting sqref="B1"/>'),
-    )
-    assert result.containers[0].pivot is expected
-    assert result.containers[1].pivot is None
+@pytest.mark.parametrize(("attribute","value","code"), (
+    ("priority",str(INT32_MAX+1),"integer_out_of_range"),("dxfId",str(INT32_MAX+1),"integer_out_of_range"),
+    ("rank",str(UINT32_MAX+1),"integer_out_of_range"),("stdDev",str(INT32_MAX+1),"integer_out_of_range"),
+))
+def test_field_specific_int32_uint32_boundaries(attribute: str, value: str, code: str):
+    typ = "aboveAverage" if attribute=="stdDev" else "top10" if attribute=="rank" else "expression"
+    formula="<formula>1</formula>" if typ=="expression" else ""
+    rule_attribute = f'priority="{value}"' if attribute == "priority" else f'priority="1" {attribute}="{value}"'
+    xml=f'<conditionalFormatting sqref="A1"><cfRule type="{typ}" {rule_attribute}>{formula}</cfRule></conditionalFormatting>'
+    with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml))
+    assert error.value.code == code
 
-
-def test_preserves_zero_rule_container_and_empty_worksheet_collection():
-    part = "xl/worksheets/sheet1.xml"
-    only_empty = read_native_conditional_formatting(part, _worksheet('<conditionalFormatting sqref="A1"/>'))
-    no_containers = read_native_conditional_formatting(part, _worksheet(""))
-    assert only_empty.containers[0].rules == ()
-    assert no_containers.containers == ()
-
-
-@pytest.mark.parametrize(
-    ("fragment", "code"),
-    (
-        ('<conditionalFormatting><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "missing_sqref"),
-        ('<conditionalFormatting sqref=" "><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "missing_sqref"),
-        ('<conditionalFormatting sqref="A0"><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "malformed_sqref"),
-        ('<conditionalFormatting sqref="XFE1"><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "sqref_out_of_bounds"),
-        ('<conditionalFormatting sqref="A1" pivot="maybe"><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "invalid_boolean"),
-        ('<conditionalFormatting sqref="A1" xr:uid="not-a-guid"><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "invalid_uid"),
-        ('<conditionalFormatting sqref="A1" bogus="1"><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "unknown_attribute"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="x"><formula>A1=1</formula></cfRule></conditionalFormatting>', "invalid_integer"),
-        ('<conditionalFormatting sqref="A1"><cfRule priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>', "missing_required_attribute"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="madeUp" priority="1"/></conditionalFormatting>', "invalid_enum"),
-        ('<conditionalFormatting sqref="A1"><bogus/></conditionalFormatting>', "unknown_owned_content"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1=1</formula><bogus/></cfRule></conditionalFormatting>', "unknown_owned_content"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="colorScale" priority="1"/></conditionalFormatting>', "missing_required_payload"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="percent"/><cfvo type="max"/><color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale></cfRule></conditionalFormatting>', "missing_required_attribute"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000"/><color rgb="FFFFFFFF"/></colorScale></cfRule></conditionalFormatting>', "unexpected_payload"),
-        ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula/></cfRule></conditionalFormatting>', "invalid_formula"),
-    ),
-)
-def test_fails_closed_for_every_owned_field_family(fragment: str, code: str):
-    with pytest.raises(NativeCfParseError) as failure:
-        read_native_conditional_formatting("xl/worksheets/sheet1.xml", _worksheet(fragment))
-    assert failure.value.code == code
-    assert failure.value.owner_path.startswith("xl/worksheets/sheet1.xml#worksheet/")
-
-
-@pytest.mark.parametrize(
-    ("needle", "replacement", "code"),
-    (
-        ('dxfId="2"', 'dxfId="-1"', "invalid_integer"),
-        ('stopIfTrue="0"', 'stopIfTrue="2"', "invalid_boolean"),
-        ('operator="equal"', 'operator="inside"', "invalid_enum"),
-        ('rank="10"', 'rank="0"', "integer_out_of_range"),
-        ('stdDev="2"', 'stdDev="bad"', "invalid_integer"),
-        ('equalAverage="false"', 'equalAverage="yes"', "invalid_boolean"),
-        ('type="percentile"', 'type="bad"', "invalid_enum"),
-        ('rgb="FF0000FF"', 'rgb="bad"', "invalid_color"),
-        ('minLength="1"', 'minLength="101"', "integer_out_of_range"),
-        ('axisPosition="middle"', 'axisPosition="bad"', "invalid_enum"),
-        ('iconSet="3Arrows"', 'iconSet="bad"', "invalid_enum"),
-    ),
-)
-def test_every_typed_rule_and_payload_field_rejects_invalid_mutation(needle: str, replacement: str, code: str):
-    with pytest.raises(NativeCfParseError) as failure:
-        read_native_conditional_formatting("xl/worksheets/sheet1.xml", _worksheet(_rules(6).replace(needle, replacement, 1)))
-    assert failure.value.code == code
-
-
-def test_duplicate_xml_attribute_is_a_deterministic_invalid_xml_fault():
-    xml = _worksheet('<conditionalFormatting sqref="A1" sqref="B1"/>')
-    with pytest.raises(NativeCfParseError) as failure:
-        read_native_conditional_formatting("xl/worksheets/sheet1.xml", xml)
-    assert failure.value.code == "invalid_xml"
-
-
-def test_duplicate_rule_priority_is_rejected_across_container_boundaries():
-    xml = _worksheet(
-        '<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1=1</formula></cfRule></conditionalFormatting>'
-        '<conditionalFormatting sqref="B1"><cfRule type="expression" priority="1"><formula>B1=1</formula></cfRule></conditionalFormatting>'
-    )
-    with pytest.raises(NativeCfParseError) as failure:
-        read_native_conditional_formatting("xl/worksheets/sheet1.xml", xml)
-    assert failure.value.code == "duplicate_priority"
-
-
-def test_conflicting_color_sources_and_icon_set_cardinality_fail_closed():
-    conflicting_color = '<conditionalFormatting sqref="A1"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FF000000" theme="1"/><color rgb="FFFFFFFF"/></colorScale></cfRule></conditionalFormatting>'
-    wrong_icon_count = '<conditionalFormatting sqref="A1"><cfRule type="iconSet" priority="1"><iconSet iconSet="4Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>'
-    for fragment, code in ((conflicting_color, "invalid_color"), (wrong_icon_count, "invalid_payload_cardinality")):
-        with pytest.raises(NativeCfParseError) as failure:
-            read_native_conditional_formatting("xl/worksheets/sheet1.xml", _worksheet(fragment))
-        assert failure.value.code == code
+@pytest.mark.parametrize(("xml","code"), (
+    ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1" rank="1"><formula>1</formula></cfRule></conditionalFormatting>',"invalid_attribute_for_rule_type"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1" text="x"><formula>1</formula></cfRule></conditionalFormatting>',"invalid_attribute_for_rule_type"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="aboveAverage" priority="1" stdDev="-1"/></conditionalFormatting>',"invalid_attribute_combination"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="aboveAverage" priority="1" equalAverage="true" stdDev="1"/></conditionalFormatting>',"invalid_attribute_combination"),
+    ('<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>1</formula></cfRule></conditionalFormatting><conditionalFormatting sqref="B1"><cfRule type="expression" priority="1"><formula>1</formula></cfRule></conditionalFormatting>',"duplicate_priority"),
+    ('<conditionalFormatting sqref="A1" sqref="B1"/>',"invalid_xml"),
+))
+def test_rule_relations_duplicate_and_xml_faults_are_deterministic(xml: str, code: str):
+    with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml))
+    assert error.value.code == code
