@@ -10,7 +10,7 @@ SHEET = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 DOC_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
-def write_workbook(path, mutate=None):
+def write_workbook(path, mutate=None, boundary=6):
     parts = {
         "[Content_Types].xml": f'''<Types xmlns="{CONTENT}"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>''',
         "_rels/.rels": f'''<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{DOC_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>''',
@@ -22,6 +22,8 @@ def write_workbook(path, mutate=None):
         "xl/worksheets/_rels/sheet6.xml.rels": f'''<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{DOC_REL}/hyperlink" Target="https://example.test/x" TargetMode="External"/></Relationships>''',
         "xl/worksheets/sheet104.xml": f'''<worksheet xmlns="{SHEET}"><dimension ref="A1:A1"/><sheetData><row r="104"><c r="A104" t="s"><v>1</v></c></row></sheetData></worksheet>''',
     }
+    parts["xl/workbook.xml"] = parts["xl/workbook.xml"].replace('name="First"', f'name="First-{boundary}"')
+    parts["xl/worksheets/sheet6.xml"] = parts["xl/worksheets/sheet6.xml"].replace('ref="A1:D10"', f'ref="A{boundary}:D{boundary + 4}"')
     if mutate:
         mutate(parts)
     with ZipFile(path, "w", ZIP_DEFLATED) as archive:
