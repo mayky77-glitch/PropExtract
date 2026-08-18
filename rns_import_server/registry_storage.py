@@ -7,7 +7,6 @@ future migration and reconciliation work occurs transactionally.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -27,8 +26,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 1
-SEED_REVISION = "construction-registry-v1"
+SCHEMA_VERSION = 2
+SEED_REVISION = "construction-registry-v2"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -114,7 +113,8 @@ def validate_seed(seed_path: Path = DEFAULT_SEED_PATH, manifest_path: Path = DEF
 class RegistryStorage:
     """A short-transaction SQLite registry with optimistic generation checks."""
 
-    def __init__(self, path: str | os.PathLike[str], *, read_only: bool = False, timeout_ms: int = BUSY_TIMEOUT_MS):
+    def __init__(self, path: str | os.PathLike[str], *, read_only: bool = False, timeout_ms: int = BUSY_TIMEOUT_MS,
+                 allow_uninitialized: bool = False):
         self.path = Path(path)
         self.read_only = read_only
         self.timeout_ms = timeout_ms
@@ -131,7 +131,7 @@ class RegistryStorage:
         if not read_only:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
-        self._verify_open()
+        self._verify_open(allow_uninitialized=allow_uninitialized)
 
     @classmethod
     def create_seed(
@@ -145,7 +145,7 @@ class RegistryStorage:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             target.unlink()
-        storage = cls(target)
+        storage = cls(target, allow_uninitialized=True)
         # Seed bytes are a release artifact, so its timestamps must not make a
         # rebuild differ.  Runtime records continue to use real UTC time.
         storage._fixed_now = "2026-08-18T00:00:00Z"
@@ -187,7 +187,7 @@ class RegistryStorage:
     def close(self) -> None:
         self.connection.close()
 
-    def _verify_open(self) -> None:
+    def _verify_open(self, *, allow_uninitialized: bool = False) -> None:
         try:
             result = self.connection.execute("PRAGMA integrity_check").fetchone()[0]
         except sqlite3.DatabaseError as error:
@@ -198,9 +198,9 @@ class RegistryStorage:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry_meta'"
         ).fetchone()
         if not has_meta:
-            if self.read_only:
-                raise RegistrySchemaError("Поставляемый справочник не содержит обязательную схему")
-            return
+            if allow_uninitialized and not self.read_only:
+                return
+            raise RegistrySchemaError("Локальный справочник не содержит обязательную схему")
         version = self.connection.execute("SELECT schema_version FROM registry_meta WHERE id=1").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
@@ -315,9 +315,13 @@ class RegistryStorage:
                     phase TEXT NOT NULL,
                     failure_code TEXT,
                     capability_finalized INTEGER NOT NULL DEFAULT 0 CHECK (capability_finalized IN (0, 1)),
+                    capability_finalized_at TEXT,
                     binding_finalized INTEGER NOT NULL DEFAULT 0 CHECK (binding_finalized IN (0, 1)),
+                    binding_finalized_at TEXT,
                     history_finalized INTEGER NOT NULL DEFAULT 0 CHECK (history_finalized IN (0, 1)),
+                    history_finalized_at TEXT,
                     report_finalized INTEGER NOT NULL DEFAULT 0 CHECK (report_finalized IN (0, 1)),
+                    report_finalized_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     staged_at TEXT,
@@ -329,6 +333,7 @@ class RegistryStorage:
                 CREATE INDEX constructions_status_name_idx ON constructions(status, normalized_name);
                 CREATE INDEX construction_bindings_construction_idx ON construction_bindings(construction_id);
                 CREATE INDEX journal_phase_idx ON workbook_operation_journal(phase, updated_at);
+                CREATE UNIQUE INDEX registry_conflict_identity_idx ON registry_conflicts(seed_entry_id, construction_id, kind);
             """
         )
         with self.transaction() as connection:
@@ -338,9 +343,7 @@ class RegistryStorage:
             )
 
     def _migrate(self, version: int) -> None:
-        # Every migration starts from a verified, recoverable file copy.  v0
-        # was the pre-release layout with the v1 tables already present but no
-        # finalized version marker; later migrations must add explicit steps.
+        # Every migration starts from a verified, recoverable file copy.
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         if backup.exists():
             backup.unlink()
@@ -351,9 +354,18 @@ class RegistryStorage:
         self.connection.execute(f"PRAGMA busy_timeout={int(self.timeout_ms)}")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA synchronous=FULL")
-        if version != 0:
+        if version not in {0, 1}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         with self.transaction() as connection:
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(workbook_operation_journal)")}
+            for flag in ("capability", "binding", "history", "report"):
+                column = f"{flag}_finalized_at"
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE workbook_operation_journal ADD COLUMN {column} TEXT")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS registry_conflict_identity_idx "
+                "ON registry_conflicts(seed_entry_id, construction_id, kind)"
+            )
             connection.execute(
                 "UPDATE registry_meta SET schema_version=?, updated_at=? WHERE id=1",
                 (SCHEMA_VERSION, utc_now()),
@@ -425,11 +437,9 @@ class RegistryStorage:
         seed_entry_id: str | None = None,
         expected_generation: int | None = None,
     ) -> Construction:
-        if origin not in {"seed", "local"}:
-            raise ConstructionValidationError("Недопустимое происхождение стройки")
+        if origin != "local" or seed_entry_id is not None:
+            raise ConstructionValidationError("Только внутренняя seed-загрузка может задавать seed ID или seed origin")
         code, normalized = validate_construction_values(code_prefix, official_name, status)
-        if origin == "seed" and not seed_entry_id:
-            raise ConstructionValidationError("Поставляемая запись требует stable seed ID")
         with self.transaction() as connection:
             self._assert_generation(expected_generation)
             now = utc_now()
@@ -445,17 +455,56 @@ class RegistryStorage:
         return self.get_construction(construction_id)  # type: ignore[return-value]
 
     def update_status(self, construction_id: str, status: str, *, expected_generation: int) -> Construction:
-        if status not in {"active", "archived"}:
-            raise ConstructionValidationError("Черновик нельзя активировать обычным изменением статуса")
         with self.transaction() as connection:
             self._assert_generation(expected_generation)
             current = self.get_construction(construction_id)
             if not current:
                 raise RegistryError("Стройка не найдена")
+            allowed = {"active": {"archived"}, "archived": {"active"}, "draft": set()}
+            if status not in allowed[current.status]:
+                raise ConstructionValidationError("Недопустимый обычный переход статуса стройки")
             connection.execute(
                 "UPDATE constructions SET status=?, row_revision=row_revision+1, updated_at=? WHERE id=?",
                 (status, utc_now(), construction_id),
             )
+            self._increment_generation(connection)
+        return self.get_construction(construction_id)  # type: ignore[return-value]
+
+    def update_construction(
+        self,
+        construction_id: str,
+        *,
+        code_prefix: str,
+        official_name: str,
+        expected_generation: int,
+        expected_row_revision: int,
+    ) -> Construction:
+        """CAS-update an unbound local record; bound identity is immutable."""
+        code, normalized = validate_construction_values(code_prefix, official_name, "draft")
+        with self.transaction() as connection:
+            self._assert_generation(expected_generation)
+            current = self.get_construction(construction_id)
+            if not current:
+                raise RegistryError("Стройка не найдена")
+            if current.origin != "local" or current.seed_entry_id is not None:
+                raise RegistryConflictError("Поставляемая запись не редактируется обычным обновлением")
+            if connection.execute("SELECT 1 FROM construction_bindings WHERE construction_id=?", (construction_id,)).fetchone():
+                if current.code_prefix != code or current.official_name != official_name:
+                    raise RegistryConflictError("Изменение кода или названия bound стройки требует alignment migration")
+            if current.row_revision != expected_row_revision:
+                raise RegistryStaleError("Стройка изменилась; повторите операцию")
+            if current.code_prefix == code and current.official_name == official_name:
+                return current
+            try:
+                updated = connection.execute(
+                    """UPDATE constructions SET code_prefix=?, official_name=?, normalized_name=?, row_revision=row_revision+1,
+                       updated_at=? WHERE id=? AND row_revision=?""",
+                    (code, official_name, normalized, utc_now(), construction_id, expected_row_revision),
+                ).rowcount
+            except sqlite3.IntegrityError as error:
+                raise RegistryConflictError("Наименование или код стройки уже существуют") from error
+            if updated != 1:
+                raise RegistryStaleError("Стройка изменилась; повторите операцию")
             self._increment_generation(connection)
         return self.get_construction(construction_id)  # type: ignore[return-value]
 
@@ -503,7 +552,7 @@ class RegistryStorage:
 
     def _record_conflict(self, connection: sqlite3.Connection, seed_id: str, construction_id: str | None, kind: str) -> None:
         connection.execute(
-            "INSERT INTO registry_conflicts(seed_entry_id, construction_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO registry_conflicts(seed_entry_id, construction_id, kind, detail, created_at) VALUES (?, ?, ?, ?, ?)",
             (seed_id, construction_id, kind, kind, utc_now()),
         )
 
@@ -528,7 +577,7 @@ class RegistryStorage:
                     continue
                 if state is None:
                     self._record_conflict(connection, seed_id, current["id"], "missing_seed_state")
-                    changed = True
+                    changed = changed or connection.execute("SELECT changes()").fetchone()[0] == 1
                     continue
                 base = (state["base_code_prefix"], state["base_official_name"], state["base_status"])
                 local = (current["code_prefix"], current["official_name"], current["status"])
@@ -537,7 +586,7 @@ class RegistryStorage:
                     bound = connection.execute("SELECT 1 FROM construction_bindings WHERE construction_id=?", (current["id"],)).fetchone()
                     if bound and local[:2] != incoming_values[:2]:
                         self._record_conflict(connection, seed_id, current["id"], "binding_alignment_conflict")
-                        changed = True
+                        changed = changed or connection.execute("SELECT changes()").fetchone()[0] == 1
                         continue
                     if local != incoming_values or state["last_applied_revision"] != revision:
                         connection.execute(
@@ -554,27 +603,34 @@ class RegistryStorage:
                         changed = True
                 elif local != incoming_values:
                     self._record_conflict(connection, seed_id, current["id"], "local_seed_divergence")
-                    changed = True
+                    changed = changed or connection.execute("SELECT changes()").fetchone()[0] == 1
             for seed_id, current in current_by_seed.items():
                 if seed_id in incoming_by_id:
                     continue
                 state = states.get(seed_id)
                 if state is None:
                     self._record_conflict(connection, seed_id, current["id"], "missing_seed_state")
-                    changed = True
+                    changed = changed or connection.execute("SELECT changes()").fetchone()[0] == 1
                     continue
                 base = (state["base_code_prefix"], state["base_official_name"], state["base_status"])
                 local = (current["code_prefix"], current["official_name"], current["status"])
-                if local == base:
+                if local == base and current["status"] != "archived":
                     connection.execute(
                         "UPDATE constructions SET status='archived', row_revision=row_revision+1, updated_at=? WHERE id=?",
                         (utc_now(), current["id"]),
                     )
+                    connection.execute("UPDATE registry_seed_state SET base_status=? WHERE seed_entry_id=?", ("archived", seed_id))
                     changed = True
-                else:
+                elif local != base:
                     self._record_conflict(connection, seed_id, current["id"], "seed_removal_local_edit")
-                    changed = True
-            if manifest["seed_revision"] != self.seed_revision:
+                    changed = changed or connection.execute("SELECT changes()").fetchone()[0] == 1
+            # A revision is considered applied only when every three-way
+            # decision is resolved.  Otherwise a repeated reconcile of the
+            # same seed must be a strict no-op rather than bumping generation.
+            unresolved = connection.execute(
+                "SELECT 1 FROM registry_conflicts WHERE resolved_at IS NULL LIMIT 1"
+            ).fetchone()
+            if manifest["seed_revision"] != self.seed_revision and not unresolved:
                 connection.execute("UPDATE registry_meta SET seed_revision=?, updated_at=? WHERE id=1", (revision, utc_now()))
                 changed = True
             if changed:

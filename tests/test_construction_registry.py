@@ -54,9 +54,13 @@ def test_duplicate_status_and_generation_conflicts(tmp_path: Path) -> None:
         with pytest.raises(ConstructionValidationError):
             storage.update_status(first.id, "draft", expected_generation=storage.generation)
         generation = storage.generation
-        storage.update_status(first.id, "archived", expected_generation=generation)
-        with pytest.raises(RegistryStaleError):
+        with pytest.raises(ConstructionValidationError):
             storage.update_status(first.id, "active", expected_generation=generation)
+        active = storage.create_construction(code_prefix="123-1234568", official_name="Активная", status="active")
+        generation = storage.generation
+        storage.update_status(active.id, "archived", expected_generation=generation)
+        with pytest.raises(RegistryStaleError):
+            storage.update_status(active.id, "active", expected_generation=generation)
     finally:
         storage.close()
 
@@ -68,3 +72,41 @@ def test_windows_path_is_injectable_and_seed_is_never_modified(tmp_path: Path) -
     storage.create_construction(code_prefix="123-1234567", official_name="Локальная", status="draft")
     storage.close()
     assert DEFAULT_SEED_PATH.read_bytes() == seed_before
+
+
+def test_drafts_never_route_and_unbound_local_update_is_cas(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        draft = storage.create_construction(code_prefix="123-1234567", official_name="Черновик", status="draft")
+        assert storage.match("Черновик: объект") is None
+        updated = storage.update_construction(
+            draft.id, code_prefix="123-1234568", official_name="Исправленный черновик",
+            expected_generation=storage.generation, expected_row_revision=draft.row_revision,
+        )
+        assert updated.code_prefix == "123-1234568"
+        with pytest.raises(RegistryStaleError):
+            storage.update_construction(
+                draft.id, code_prefix="123-1234569", official_name="Поздно",
+                expected_generation=storage.generation, expected_row_revision=draft.row_revision,
+            )
+        with pytest.raises(ConstructionValidationError):
+            storage.create_construction(code_prefix="123-1234569", official_name="Нельзя seed", origin="seed", seed_entry_id="x")
+    finally:
+        storage.close()
+
+
+def test_bound_local_name_or_code_update_is_rejected(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        local = storage.create_construction(code_prefix="123-1234567", official_name="Локальная", status="active")
+        storage.bind_construction(
+            local.id, workbook_contract_id="contract", target_identity="target", sheet_identity="sheet",
+            template_version="v1", verified_state="verified", expected_generation=storage.generation,
+        )
+        with pytest.raises(RegistryConflictError):
+            storage.update_construction(
+                local.id, code_prefix="123-1234568", official_name="Переименована",
+                expected_generation=storage.generation, expected_row_revision=local.row_revision,
+            )
+    finally:
+        storage.close()

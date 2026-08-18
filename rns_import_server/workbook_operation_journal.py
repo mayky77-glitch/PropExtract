@@ -25,7 +25,7 @@ PHASE_MANUAL_REPAIR = "manual_repair"
 
 LEGAL_TRANSITIONS = {
     PHASE_PLANNED: {PHASE_STAGED, PHASE_MANUAL_REPAIR},
-    PHASE_STAGED: {PHASE_NATIVE, PHASE_MANUAL_REPAIR},
+    PHASE_STAGED: {PHASE_NATIVE, PHASE_VALIDATED, PHASE_MANUAL_REPAIR},
     PHASE_NATIVE: {PHASE_VALIDATED, PHASE_MANUAL_REPAIR},
     PHASE_VALIDATED: {PHASE_BACKUP_VERIFIED, PHASE_MANUAL_REPAIR},
     PHASE_BACKUP_VERIFIED: {PHASE_PUBLISHED, PHASE_MANUAL_REPAIR},
@@ -120,6 +120,14 @@ class WorkbookOperationJournal:
             raise RegistryError("Неподдерживаемый режим workbook mutation")
         if operation_kind == "new_row" and not canonical_rns:
             raise RegistryError("Операция новой строки требует canonical RNS")
+        immutable = {
+            "operation_id": operation_id, "idempotency_key": idempotency_key, "consumer_id": consumer_id,
+            "owner_id": owner_id, "pair_nonce": pair_nonce, "construction_id": construction_id,
+            "canonical_rns": canonical_rns, "operation_kind": operation_kind, "mutation_mode": mutation_mode,
+            "target_identity": target_identity, "sheet_identity": sheet_identity, "template_version": template_version,
+            "expected_generation": expected_generation, "intent_version": intent_version, "intent_digest": intent_digest,
+            "manifest_version": manifest_version, "manifest_digest": manifest_digest, "operation_directory": operation_directory,
+        }
         with self.storage.transaction() as connection:
             if expected_generation != self.storage.generation:
                 raise RegistryConflictError("Справочник изменился до планирования операции")
@@ -136,11 +144,12 @@ class WorkbookOperationJournal:
                 )
             except sqlite3.IntegrityError as error:
                 existing = connection.execute(
-                    "SELECT operation_id FROM workbook_operation_journal WHERE idempotency_key=?", (idempotency_key,)
+                    "SELECT * FROM workbook_operation_journal WHERE operation_id=? OR idempotency_key=? OR consumer_id=?",
+                    (operation_id, idempotency_key, consumer_id),
                 ).fetchone()
-                if existing and existing["operation_id"] == operation_id:
+                if existing and all(existing[key] == value for key, value in immutable.items()):
                     return self.get(operation_id)  # type: ignore[return-value]
-                raise RegistryConflictError("operation/idempotency/consumer ID уже использован") from error
+                raise RegistryConflictError("Повтор journal operation не совпадает с исходным immutable intent") from error
         return self.get(operation_id)  # type: ignore[return-value]
 
     def transition(
@@ -158,12 +167,29 @@ class WorkbookOperationJournal:
         hashes = hashes or {}
         if set(hashes) - _HASH_FIELDS or any(not isinstance(value, str) or not value for value in hashes.values()):
             raise RegistryError("Journal hashes имеют неверный формат")
-        if next_phase == PHASE_PUBLISHED and not hashes.get("post_hash"):
-            raise RegistryError("До publication необходим durable post-hash")
+        current = self.get(operation_id)
+        if current is None or current.phase != expected_phase:
+            raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
+        if next_phase == PHASE_STAGED and not {"pre_hash", "staged_hash"}.issubset(hashes):
+            raise RegistryError("Staged operation требует pre_hash и staged_hash до внешней публикации")
+        if next_phase == PHASE_PUBLISHED:
+            if hashes.get("post_hash") or not current["post_hash"]:
+                raise RegistryError("Published CAS использует только заранее durable post_hash")
         if next_phase == PHASE_BACKUP_VERIFIED and not hashes.get("backup_hash"):
             raise RegistryError("До publication необходим verified backup hash")
         if next_phase == PHASE_VALIDATED and not hashes.get("validation_digest"):
             raise RegistryError("Validated operation требует validation digest")
+        if next_phase == PHASE_VALIDATED and current["mutation_mode"] == "middle_insert":
+            lease = {"excel_adapter", "excel_pid", "excel_hwnd", "excel_process_started_at", "excel_build"}
+            persisted = {name: current[name] for name in lease}
+            persisted.update(excel_lease or {})
+            control_hash = hashes.get("control_hash") or current["control_hash"]
+            if not control_hash or any(persisted[name] in {None, ""} for name in lease):
+                raise RegistryError("Native mutation требует Excel lease и control_hash до validation")
+        if next_phase == PHASE_MANUAL_REPAIR and not failure_code:
+            raise RegistryError("Manual repair требует durable failure code")
+        if next_phase == PHASE_FINALIZED and not all(current[flag] for flag in FINALIZATION_FLAGS):
+            raise RegistryError("Finalized operation требует все finalization flags")
         lease_fields = {"excel_adapter", "excel_pid", "excel_hwnd", "excel_process_started_at", "excel_build"}
         if excel_lease and set(excel_lease) - lease_fields:
             raise RegistryError("Неизвестное поле Excel lease")
@@ -194,13 +220,35 @@ class WorkbookOperationJournal:
                 raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
         return self.get(operation_id)  # type: ignore[return-value]
 
+    def record_post_hash(self, operation_id: str, *, expected_phase: str, post_hash: str) -> JournalOperation:
+        """Commit post-publication evidence before the caller may replace XLSX."""
+        if expected_phase != PHASE_BACKUP_VERIFIED or not isinstance(post_hash, str) or not post_hash:
+            raise RegistryError("post_hash допускается только после verified backup")
+        self.storage.connection.execute("PRAGMA synchronous=FULL")
+        with self.storage.transaction() as connection:
+            updated = connection.execute(
+                "UPDATE workbook_operation_journal SET post_hash=?, updated_at=? "
+                "WHERE operation_id=? AND phase=? AND post_hash IS NULL",
+                (post_hash, _now(), operation_id, expected_phase),
+            ).rowcount
+            if updated != 1:
+                raise JournalTransitionError("post_hash уже записан или operation изменилась")
+        return self.get(operation_id)  # type: ignore[return-value]
+
     def finalize_flag(self, operation_id: str, flag: str) -> JournalOperation:
         if flag not in FINALIZATION_FLAGS:
             raise RegistryError("Неизвестный флаг finalization")
         with self.storage.transaction() as connection:
+            phase = connection.execute(
+                "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if not phase:
+                raise RegistryError("Operation не найдена")
+            if phase["phase"] != PHASE_PUBLISHED:
+                raise JournalTransitionError("Finalization flag разрешён только после publication")
             updated = connection.execute(
-                f"UPDATE workbook_operation_journal SET {flag}=1, updated_at=? WHERE operation_id=?",
-                (_now(), operation_id),
+                f"UPDATE workbook_operation_journal SET {flag}=1, {flag}_at=?, updated_at=? WHERE operation_id=?",
+                (_now(), _now(), operation_id),
             ).rowcount
             if updated != 1:
                 raise RegistryError("Operation не найдена")
@@ -208,6 +256,6 @@ class WorkbookOperationJournal:
 
     def incomplete(self) -> list[JournalOperation]:
         rows = self.storage.connection.execute(
-            "SELECT * FROM workbook_operation_journal WHERE phase NOT IN ('finalized', 'manual_repair') ORDER BY created_at"
+            "SELECT * FROM workbook_operation_journal WHERE phase != 'finalized' ORDER BY created_at"
         )
         return [JournalOperation(dict(row)) for row in rows]

@@ -80,7 +80,9 @@ def match_official_prefix(
         return None
     candidates: list[Construction] = []
     for construction in constructions:
-        if construction.status == "archived" and not include_archived:
+        # Drafts are an admin/provisioning state, never a routing state.  An
+        # archived construction can be inspected only by an explicit caller.
+        if construction.status == "draft" or (construction.status == "archived" and not include_archived):
             continue
         prefix = construction.normalized_name
         if not normalized_object.startswith(prefix):

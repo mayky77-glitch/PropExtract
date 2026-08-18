@@ -9,6 +9,7 @@ from rns_import_server.registry_storage import (
     RegistryCorruptError,
     RegistrySchemaError,
     RegistryStorage,
+    SCHEMA_VERSION,
     load_seed_manifest,
     sha256_file,
 )
@@ -19,7 +20,7 @@ def _seed(path: Path, revision: str, entries: list[dict[str, str]]) -> tuple[Pat
     storage = RegistryStorage.create_seed(seed, entries, seed_revision=revision)
     storage.close()
     manifest = path / f"{revision}.json"
-    manifest.write_text(json.dumps({"schema_version": 1, "seed_revision": revision, "entry_count": len(entries), "sha256": sha256_file(seed)}), encoding="utf-8")
+    manifest.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "seed_revision": revision, "entry_count": len(entries), "sha256": sha256_file(seed)}), encoding="utf-8")
     return seed, manifest
 
 
@@ -37,6 +38,9 @@ def test_seed_reconciliation_preserves_local_and_records_divergence(tmp_path: Pa
         assert runtime.count() == 2
         assert runtime.get_construction(row.id).official_name == "Локальная правка"  # type: ignore[union-attr]
         assert runtime.conflicts()[0]["kind"] == "local_seed_divergence"
+        before = (runtime.generation, runtime.get_construction(row.id).row_revision, len(runtime.conflicts()))  # type: ignore[union-attr]
+        runtime.reconcile_seed(seed2, manifest2)
+        assert (runtime.generation, runtime.get_construction(row.id).row_revision, len(runtime.conflicts())) == before  # type: ignore[union-attr]
     finally:
         runtime.close()
 
@@ -56,6 +60,9 @@ def test_untouched_removal_archives_and_bound_rename_is_alignment_conflict(tmp_p
         # Existing bound entry is untouched and can be safely archived on removal.
         runtime.reconcile_seed(seed3, manifest3)
         assert runtime.get_construction(row.id).status == "archived"  # type: ignore[union-attr]
+        before = (runtime.generation, runtime.get_construction(row.id).row_revision, len(runtime.conflicts()))  # type: ignore[union-attr]
+        runtime.reconcile_seed(seed3, manifest3)
+        assert (runtime.generation, runtime.get_construction(row.id).row_revision, len(runtime.conflicts())) == before  # type: ignore[union-attr]
     finally:
         runtime.close()
 
@@ -64,7 +71,7 @@ def test_corrupt_seed_is_rejected(tmp_path: Path) -> None:
     seed = tmp_path / "broken.sqlite3"
     seed.write_bytes(b"not sqlite")
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({"schema_version": 1, "seed_revision": "r", "entry_count": 0, "sha256": sha256_file(seed)}), encoding="utf-8")
+    manifest.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "seed_revision": "r", "entry_count": 0, "sha256": sha256_file(seed)}), encoding="utf-8")
     with pytest.raises(RegistryCorruptError):
         RegistryStorage.bootstrap(tmp_path / "runtime", seed_path=seed, manifest_path=manifest)
 
@@ -76,12 +83,20 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
     runtime.close()
     migrated = RegistryStorage(path)
     try:
-        assert migrated.connection.execute("SELECT schema_version FROM registry_meta").fetchone()[0] == 1
+        assert migrated.connection.execute("SELECT schema_version FROM registry_meta").fetchone()[0] == SCHEMA_VERSION
         assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
     finally:
         migrated.close()
     newer = RegistryStorage(path)
-    newer.connection.execute("UPDATE registry_meta SET schema_version=2")
+    newer.connection.execute("UPDATE registry_meta SET schema_version=3")
     newer.close()
     with pytest.raises(RegistrySchemaError):
         RegistryStorage(path)
+
+
+def test_schema_less_or_interrupted_runtime_is_rejected(tmp_path: Path) -> None:
+    target = tmp_path / "PropExtract" / "construction-registry" / "registry.sqlite3"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    with pytest.raises(RegistrySchemaError):
+        RegistryStorage(target)

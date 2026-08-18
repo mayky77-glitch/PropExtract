@@ -109,3 +109,12 @@ Set card to `review`. Record requested vs actual route, feature SHA, changed pat
 - Evidence: `/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python -m pytest -q tests/test_construction_registry.py tests/test_registry_storage.py tests/test_workbook_operation_journal.py` → `10 passed`; `scripts/build_construction_registry_seed.py --check` and `scripts/validate_construction_registry_seed.py` → passed; `compileall` and `git diff --check` → passed.
 - Risk: schema v1 migration supports only legacy version marker `0`; future schema versions require explicit tested migration steps. Runtime SQLite is local-only; concurrent writers receive bounded SQLite lock failure instead of a server-mediated retry.
 - Proposed knowledge delta: record the seed/runtime split, v1 registry schema, three-way seed reconciliation conflict behavior, and generic journal phase/CAS contract after integration accepts this feature.
+
+## Remediation handoff — 2026-08-18
+
+- Review findings addressed: seed/runtime schema is now v2 with a verified backup migration from v0/v1; schema-less interrupted runtime databases fail closed. Drafts never route, ordinary draft activation is rejected, and unbound-local updates use generation plus row-revision CAS while bound identity is immutable.
+- Journal now persists phase-specific evidence: `pre_hash`/`staged_hash`, native lease and control evidence, an independently durable `post_hash` before published CAS, phase-gated per-flag timestamps, finalization gate, and visible manual-repair operations. Exact idempotent retries compare every immutable intent field.
+- Reconciliation deduplicates unresolved conflicts/removals, preserving generation and row revision on repeated identical reconcile.
+- Feature SHA: pending remediation commit (reported separately; no amend after handoff).
+- Evidence: `/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python -m pytest -q tests/test_construction_registry.py tests/test_registry_storage.py tests/test_workbook_operation_journal.py` → `14 passed`; deterministic seed check, seed validator, compileall, and diff check passed.
+- Remaining risk: v2 stores the foundation only; actual Excel publication and recovery dispatcher consumers remain later-wave responsibilities. Future schema versions require explicit reversible migration steps.
