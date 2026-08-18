@@ -87,6 +87,7 @@ _REQUIRED_SCHEMA_COLUMNS = {
 _V2_JOURNAL_COLUMNS = frozenset({
     "capability_finalized_at", "binding_finalized_at", "history_finalized_at", "report_finalized_at",
 })
+_LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 
 
 def utc_now() -> str:
@@ -477,6 +478,23 @@ class RegistryStorage:
                 column = f"{flag}_finalized_at"
                 if column not in columns:
                     connection.execute(f"ALTER TABLE workbook_operation_journal ADD COLUMN {column} TEXT")
+                connection.execute(
+                    f"UPDATE workbook_operation_journal SET {column}=COALESCE(NULLIF(updated_at, ''), created_at) "
+                    f"WHERE {flag}_finalized=1 AND {column} IS NULL"
+                )
+            any_finalized = " OR ".join(f"{flag}_finalized=1" for flag in ("capability", "binding", "history", "report"))
+            missing_finalized = " OR ".join(f"{flag}_finalized IS NOT 1" for flag in ("capability", "binding", "history", "report"))
+            # A legacy record without phase-gated finalization cannot be
+            # resumed as a successful operation. Preserve its evidence but
+            # make the repair requirement durable and visible after restart.
+            connection.execute(
+                f"""UPDATE workbook_operation_journal
+                    SET phase='manual_repair', failure_code=?, updated_at=?
+                    WHERE (phase='finalized' AND ({missing_finalized}))
+                       OR (phase IN ('planned', 'staged', 'native', 'validated', 'backup_verified')
+                           AND ({any_finalized}))""",
+                (_LEGACY_JOURNAL_STATE_FAILURE_CODE, utc_now()),
+            )
             # v1 had no identity index, so repeated reconciliation could write
             # duplicate unresolved conflicts. Keep resolved history intact.
             connection.execute(

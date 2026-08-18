@@ -16,6 +16,7 @@ from rns_import_server.registry_storage import (
     load_seed_manifest,
     sha256_file,
 )
+from rns_import_server.workbook_operation_journal import WorkbookOperationJournal
 
 
 def _seed(path: Path, revision: str, entries: list[dict[str, str]]) -> tuple[Path, Path]:
@@ -25,6 +26,19 @@ def _seed(path: Path, revision: str, entries: list[dict[str, str]]) -> tuple[Pat
     manifest = path / f"{revision}.json"
     manifest.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "seed_revision": revision, "entry_count": len(entries), "sha256": sha256_file(seed)}), encoding="utf-8")
     return seed, manifest
+
+
+def _journal_operation(storage: RegistryStorage, suffix: str) -> str:
+    construction = storage.list_constructions()[0]
+    return WorkbookOperationJournal(storage).create(
+        operation_id=f"legacy-operation-{suffix}", idempotency_key=f"legacy-idempotency-{suffix}",
+        consumer_id=f"legacy-consumer-{suffix}", owner_id="legacy-owner", pair_nonce="legacy-nonce",
+        construction_id=construction.id, operation_kind="new_row", mutation_mode="middle_insert",
+        target_identity="legacy-target", sheet_identity="legacy-sheet", template_version="legacy-template",
+        expected_generation=storage.generation, intent_version="legacy-intent", intent_digest="legacy-intent-digest",
+        manifest_version="legacy-manifest", manifest_digest="legacy-manifest-digest",
+        operation_directory="legacy-operation-directory", canonical_rns="RU-00000000-00-2026",
+    ).operation_id
 
 
 def test_seed_reconciliation_preserves_local_and_records_divergence(tmp_path: Path) -> None:
@@ -240,6 +254,98 @@ def test_v1_53307beb_migration_deduplicates_active_conflicts_and_backup_rolls_ba
         assert len(reopened.conflicts()) == 1
     finally:
         reopened.close()
+
+
+def test_v1_journal_migration_backfills_true_finalization_flag_timestamps(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-finalization-timestamps.sqlite3"
+    storage = RegistryStorage.create_seed(path, [
+        {"seed_entry_id": "one", "code_prefix": "111-1111111", "official_name": "Первая", "status": "active"},
+    ], seed_revision="construction-registry-v1")
+    operation_id = _journal_operation(storage, "timestamps")
+    storage.close()
+    legacy_timestamp = "2024-03-02T01:02:03Z"
+    legacy = sqlite3.connect(path)
+    try:
+        legacy.execute("DROP INDEX registry_conflict_identity_idx")
+        for flag in ("capability", "binding", "history", "report"):
+            legacy.execute(f"ALTER TABLE workbook_operation_journal DROP COLUMN {flag}_finalized_at")
+        legacy.execute("UPDATE registry_meta SET schema_version=1")
+        legacy.execute(
+            """UPDATE workbook_operation_journal
+               SET phase='published', capability_finalized=1, binding_finalized=1,
+                   history_finalized=1, report_finalized=1, updated_at=?
+               WHERE operation_id=?""",
+            (legacy_timestamp, operation_id),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    migrated = RegistryStorage(path)
+    try:
+        row = migrated.connection.execute(
+            "SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        assert row["phase"] == "published"
+        for flag in ("capability", "binding", "history", "report"):
+            assert row[f"{flag}_finalized_at"] == legacy_timestamp
+    finally:
+        migrated.close()
+
+
+def test_v1_journal_migration_quarantines_impossible_finalization_states_after_restart(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-finalization-quarantine.sqlite3"
+    storage = RegistryStorage.create_seed(path, [
+        {"seed_entry_id": "one", "code_prefix": "111-1111111", "official_name": "Первая", "status": "active"},
+    ], seed_revision="construction-registry-v1")
+    finalized_id = _journal_operation(storage, "finalized")
+    premature_id = _journal_operation(storage, "premature")
+    storage.close()
+    legacy_timestamp = "2024-04-05T06:07:08Z"
+    legacy = sqlite3.connect(path)
+    try:
+        legacy.execute("DROP INDEX registry_conflict_identity_idx")
+        for flag in ("capability", "binding", "history", "report"):
+            legacy.execute(f"ALTER TABLE workbook_operation_journal DROP COLUMN {flag}_finalized_at")
+        legacy.execute("UPDATE registry_meta SET schema_version=1")
+        legacy.execute(
+            """UPDATE workbook_operation_journal
+               SET phase='finalized', capability_finalized=0, binding_finalized=0,
+                   history_finalized=0, report_finalized=0, updated_at=?
+               WHERE operation_id=?""",
+            (legacy_timestamp, finalized_id),
+        )
+        legacy.execute(
+            """UPDATE workbook_operation_journal
+               SET phase='validated', history_finalized=1, updated_at=?
+               WHERE operation_id=?""",
+            (legacy_timestamp, premature_id),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    migrated = RegistryStorage(path)
+    try:
+        rows = {
+            row["operation_id"]: row for row in migrated.connection.execute(
+                "SELECT * FROM workbook_operation_journal WHERE operation_id IN (?, ?)",
+                (finalized_id, premature_id),
+            )
+        }
+        for operation_id in (finalized_id, premature_id):
+            assert rows[operation_id]["phase"] == "manual_repair"
+            assert rows[operation_id]["failure_code"] == "legacy_journal_state_invalid"
+        assert rows[premature_id]["history_finalized_at"] == legacy_timestamp
+    finally:
+        migrated.close()
+
+    restarted = RegistryStorage(path)
+    try:
+        incomplete_ids = {item.operation_id for item in WorkbookOperationJournal(restarted).incomplete()}
+        assert {finalized_id, premature_id} <= incomplete_ids
+    finally:
+        restarted.close()
 
 
 def test_missing_meta_row_table_or_column_raises_typed_schema_error(tmp_path: Path) -> None:
