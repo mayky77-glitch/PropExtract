@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -183,6 +184,46 @@ def test_runtime_lock_uses_bounded_sqlite_timeout(tmp_path: Path) -> None:
         holder.execute("ROLLBACK")
         holder.close()
         contender.close()
+        storage.close()
+
+
+def test_read_snapshot_never_mixes_generation_with_concurrent_writer_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    generation_read = threading.Event()
+    allow_reader = threading.Event()
+    result: dict[str, object] = {}
+    original = RegistryStorage._snapshot_generation
+
+    def pause_after_snapshot_anchor(self: RegistryStorage, connection: sqlite3.Connection) -> int:
+        generation = original(self, connection)
+        generation_read.set()
+        assert allow_reader.wait(timeout=2)
+        return generation
+
+    monkeypatch.setattr(RegistryStorage, "_snapshot_generation", pause_after_snapshot_anchor)
+
+    def read() -> None:
+        reader = RegistryStorage(storage.path)
+        try:
+            result["snapshot"] = reader.read_snapshot()
+        finally:
+            reader.close()
+
+    thread = threading.Thread(target=read)
+    try:
+        before = storage.generation
+        thread.start()
+        assert generation_read.wait(timeout=2)
+        storage.create_construction(code_prefix="123-1234567", official_name="Concurrent")
+        allow_reader.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        snapshot = result["snapshot"]
+        assert snapshot.generation == before  # type: ignore[union-attr]
+        assert all(item.code_prefix != "123-1234567" for item in snapshot.constructions)  # type: ignore[union-attr]
+    finally:
+        allow_reader.set()
+        thread.join(timeout=2)
         storage.close()
 
 

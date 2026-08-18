@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 from rns_import_server.registry_admin import RegistryAdminCode, RegistryAdminService
 from rns_import_server.registry_storage import RegistryStorage
 
@@ -79,4 +82,81 @@ def test_stale_generation_and_active_job_gate_are_typed_without_mutation(tmp_pat
         assert stale.code is RegistryAdminCode.STALE_GENERATION
         assert storage.get_construction("not-there") is None
     finally:
+        storage.close()
+
+
+def test_revalidation_exception_missing_and_ambiguous_bindings_fail_without_mutation(tmp_path) -> None:
+    storage, admin = service(tmp_path)
+    try:
+        missing = admin.change_status("missing", status="active", expected_generation=storage.generation)
+        assert missing.code is RegistryAdminCode.NOT_FOUND
+
+        active = storage.create_construction(code_prefix="123-1234567", official_name="Проверка", status="active")
+        storage.bind_construction(active.id, workbook_contract_id="one", target_identity="target", sheet_identity="sheet", template_version="v1", verified_state="verified", expected_generation=storage.generation)
+        archived = admin.change_status(active.id, status="archived", expected_generation=storage.generation)
+        assert archived.code is RegistryAdminCode.OK
+        generation = storage.generation
+
+        def raises(_: object) -> bool:
+            raise RuntimeError("injected validator failure")
+
+        failed = admin.change_status(active.id, status="active", expected_generation=generation, binding_revalidator=raises)
+        assert failed.code is RegistryAdminCode.BINDING_REVALIDATION_FAILED
+        assert storage.generation == generation
+        assert storage.get_construction(active.id).status == "archived"  # type: ignore[union-attr]
+
+        storage.bind_construction(active.id, workbook_contract_id="two", target_identity="target", sheet_identity="sheet", template_version="v1", verified_state="verified", expected_generation=generation)
+        ambiguous = admin.change_status(
+            active.id, status="active", expected_generation=storage.generation,
+            binding_revalidator=lambda _: (_ for _ in ()).throw(AssertionError("must not run")),
+        )
+        assert ambiguous.code is RegistryAdminCode.BINDING_REVALIDATION_FAILED
+        assert storage.get_construction(active.id).status == "archived"  # type: ignore[union-attr]
+    finally:
+        admin.close_thread_storage()
+        storage.close()
+
+
+def test_threaded_list_and_mutation_use_distinct_connections_and_typed_cas(tmp_path) -> None:
+    storage, admin = service(tmp_path)
+    try:
+        workers = 4
+        list_barrier = threading.Barrier(workers)
+
+        def list_from_request_thread() -> tuple[int, int, int]:
+            list_barrier.wait(timeout=2)
+            try:
+                projection = admin.list()
+                return threading.get_ident(), id(admin._storage_for_thread().connection), projection.generation
+            finally:
+                admin.close_thread_storage()
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            listed = list(executor.map(lambda _: list_from_request_thread(), range(workers)))
+        assert {item[0] for item in listed}.__len__() == workers
+        assert {item[1] for item in listed}.__len__() == workers
+        assert storage.generation == 0
+
+        generation = storage.generation
+        mutation_barrier = threading.Barrier(workers)
+
+        def create_from_request_thread(index: int) -> tuple[RegistryAdminCode, int]:
+            mutation_barrier.wait(timeout=2)
+            try:
+                result = admin.create_provision_request(
+                    code_prefix=f"123-12345{index:02d}", official_name=f"Поток {index}",
+                    expected_generation=generation,
+                )
+                return result.code, id(admin._storage_for_thread().connection)
+            finally:
+                admin.close_thread_storage()
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            mutations = list(executor.map(create_from_request_thread, range(workers)))
+        assert [code for code, _ in mutations].count(RegistryAdminCode.OK) == 1
+        assert all(code in {RegistryAdminCode.OK, RegistryAdminCode.STALE_GENERATION} for code, _ in mutations)
+        assert {connection_id for _, connection_id in mutations}.__len__() == workers
+        assert storage.generation == 1
+    finally:
+        admin.close_thread_storage()
         storage.close()

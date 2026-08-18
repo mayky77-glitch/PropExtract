@@ -3,6 +3,7 @@ card_id: construction-group-routing-v1-registry-service
 status: review
 version: 1
 supersedes: null
+recovery_of: 9a9201099ddf9dfffcc0e649af2200a8dd901299
 work_id: construction-group-routing-v1
 task_id: registry-service
 purpose: Дать validated admin-service projection для draft/provision/status операций с generation и active-job gate без HTTP/UI wiring.
@@ -23,12 +24,13 @@ dependency_shas:
 branch: codex/cgr-registry-service
 branch_base_sha: runtime-envelope
 write_scope:
+  - rns_import_server/registry_storage.py
   - rns_import_server/registry_admin.py
+  - tests/test_registry_storage.py
   - tests/test_registry_admin_service.py
   - knowledge/tasks/construction-group-routing-v1-registry-service.md
 forbidden_paths:
   - rns_import_server/construction_registry.py
-  - rns_import_server/registry_storage.py
   - rns_import_server/workbook_operation_journal.py
   - rns_import_server/workbook.py
   - rns_import_server/server.py
@@ -79,3 +81,12 @@ Set card to `review`. Record requested vs actual route, feature SHA, changed pat
 - Checks: `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_registry_admin_service.py tests/test_construction_registry.py tests/test_registry_storage.py` — `23 passed`; `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server tests` — passed; `git diff --check` — passed.
 - Remaining risk: storage has no public binding projection method, so this transport-neutral read projection uses its accepted local SQLite connection; server/UI wiring and actual XLSX provisioning remain later-wave scopes.
 - Proposed knowledge delta: record `registry_admin.py` as draft-only admin service with generation, active-job, and binding-revalidation gates; no `knowledge/INDEX.md` exists in this frozen worktree, so no shared vault index changed.
+
+## Recovery handoff — 2026-08-18
+
+- Recovery base: `9a9201099ddf9dfffcc0e649af2200a8dd901299`.
+- Changed paths: `rns_import_server/registry_storage.py`, `rns_import_server/registry_admin.py`, `tests/test_registry_storage.py`, `tests/test_registry_admin_service.py`, this card.
+- Repair: public `read_snapshot()` pins generation, constructions, bindings, and unresolved conflicts to one SQLite read transaction. Admin list consumes that projection. Admin instances derive a per-thread storage connection from the accepted storage path or injected factory; no handler thread shares the caller connection.
+- Revalidation: injected exceptions, missing construction, and ambiguous bindings stay typed and leave an archived construction unchanged.
+- Checks: `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_registry_admin_service.py tests/test_registry_storage.py tests/test_construction_registry.py` — `26 passed`; `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server tests` — passed; `git diff --check` — passed.
+- Remaining risk: request-thread connections are intentionally bounded to their request thread; an HTTP adapter should call `close_thread_storage()` after unusually long-lived handler use.

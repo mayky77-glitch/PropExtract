@@ -7,6 +7,7 @@ future migration and reconciliation work occurs transactionally.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -88,6 +89,21 @@ _V2_JOURNAL_COLUMNS = frozenset({
     "capability_finalized_at", "binding_finalized_at", "history_finalized_at", "report_finalized_at",
 })
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
+
+
+@dataclass(frozen=True)
+class RegistryReadSnapshot:
+    """Registry projection read from one SQLite snapshot transaction.
+
+    The mapping values deliberately preserve the storage-level database shape;
+    transport layers can project them into their own DTOs without issuing a
+    second query against a newer generation.
+    """
+
+    generation: int
+    constructions: tuple[Construction, ...]
+    bindings: tuple[dict[str, object], ...]
+    conflicts: tuple[dict[str, object], ...]
 
 
 def utc_now() -> str:
@@ -557,6 +573,47 @@ class RegistryStorage:
             statement += " WHERE status != 'archived'"
         statement += " ORDER BY normalized_name"
         return [self._row_to_construction(row) for row in self.connection.execute(statement, params)]
+
+    def _snapshot_generation(self, connection: sqlite3.Connection) -> int:
+        """Read the snapshot anchor separately to make transaction ordering explicit."""
+        return int(connection.execute("SELECT generation FROM registry_meta WHERE id=1").fetchone()[0])
+
+    def read_snapshot(self) -> RegistryReadSnapshot:
+        """Return list data from exactly one SQLite read transaction.
+
+        WAL writers may commit while this method is running.  ``BEGIN`` pins
+        every subsequent SELECT to the generation read first, so callers never
+        receive a generation from one committed state and rows from another.
+        """
+        begun = False
+        try:
+            self.connection.execute("BEGIN")
+            begun = True
+            generation = self._snapshot_generation(self.connection)
+            constructions = tuple(
+                self._row_to_construction(row)
+                for row in self.connection.execute("SELECT * FROM constructions ORDER BY normalized_name")
+            )
+            bindings = tuple(
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT construction_id, workbook_contract_id, target_identity, sheet_identity, "
+                    "template_version, verified_state FROM construction_bindings ORDER BY id"
+                )
+            )
+            conflicts = tuple(
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM registry_conflicts WHERE resolved_at IS NULL ORDER BY id"
+                )
+            )
+            self.connection.execute("COMMIT")
+            begun = False
+            return RegistryReadSnapshot(generation, constructions, bindings, conflicts)
+        except Exception:
+            if begun:
+                self.connection.execute("ROLLBACK")
+            raise
 
     def get_construction(self, construction_id: str) -> Construction | None:
         row = self.connection.execute("SELECT * FROM constructions WHERE id=?", (construction_id,)).fetchone()
