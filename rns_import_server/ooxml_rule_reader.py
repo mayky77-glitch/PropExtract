@@ -39,8 +39,12 @@ class ConditionalFormattingRule:
     operator: str | None
     dxf_id: int | None
     dxf_reference: str | None
+    x14_id: str | None
+    dxf_xml: str | None
     formulas: tuple[str, ...]
     attributes: tuple[tuple[str, str], ...]
+    group_attributes: tuple[tuple[str, str], ...]
+    group_xml: str
     rule_xml: str
 
 
@@ -59,6 +63,9 @@ class DataValidationRule:
     formula1: str | None
     formula2: str | None
     attributes: tuple[tuple[str, str], ...]
+    container_attributes: tuple[tuple[str, str], ...]
+    container_xml: str
+    sqref_attributes: tuple[tuple[str, str], ...]
     validation_xml: str
 
 
@@ -113,7 +120,7 @@ def _tokens(value: str | None, part: str, owner: str) -> tuple[str, ...]:
 
 
 def _findings(part: str, owner: str, node: ET.Element, known_attributes: set[str], known_children: set[str]) -> tuple[UnsupportedFinding, ...]:
-    findings = [UnsupportedFinding(part, owner, f"attribute:{key}") for key in sorted(node.attrib) if key not in known_attributes]
+    findings = [UnsupportedFinding(part, owner, f"attribute:{key}={node.attrib[key]}", _canonical(node)) for key in sorted(node.attrib) if key not in known_attributes]
     findings.extend(UnsupportedFinding(part, owner, f"child:{child.tag}", _canonical(child)) for child in node if child.tag not in known_children)
     return tuple(findings)
 
@@ -132,7 +139,7 @@ def _native_cf(part: str, root: ET.Element) -> tuple[list[ConditionalFormattingR
             known = {f"{{{NS['x']}}}formula", f"{{{NS['x']}}}colorScale", f"{{{NS['x']}}}dataBar", f"{{{NS['x']}}}iconSet"}
             findings.extend(_findings(part, "native-cf-rule", rule, {"type", "priority", "stopIfTrue", "operator", "dxfId", "aboveAverage", "equalAverage", "percent", "bottom", "rank", "stdDev", "text", "timePeriod"}, known))
             for token in tokens:
-                rules.append(ConditionalFormattingRule(part, "native", order, token, sqref or "", rule.get("type"), _integer(rule.get("priority"), part, "cfRule.priority"), _bool(rule.get("stopIfTrue")), rule.get("operator"), _integer(rule.get("dxfId"), part, "cfRule.dxfId"), rule.get("dxfId"), formulas, _attrs(rule), _canonical(rule)))
+                rules.append(ConditionalFormattingRule(part, "native", order, token, sqref or "", rule.get("type"), _integer(rule.get("priority"), part, "cfRule.priority"), _bool(rule.get("stopIfTrue")), rule.get("operator"), _integer(rule.get("dxfId"), part, "cfRule.dxfId"), rule.get("dxfId"), None, None, formulas, _attrs(rule), _attrs(group), _canonical(group), _canonical(rule)))
     return rules, findings
 
 
@@ -146,10 +153,11 @@ def _x14_cf(part: str, root: ET.Element) -> tuple[list[ConditionalFormattingRule
         findings.extend(_findings(part, "x14-conditionalFormatting", group, set(), {f"{{{NS['x14']}}}cfRule", f"{{{NS['xm']}}}sqref"}))
         for rule in group.findall("x14:cfRule", NS):
             order += 1
-            formulas = tuple("".join(node.itertext()) for node in rule.findall("x14:formula", NS))
-            findings.extend(_findings(part, "x14-cf-rule", rule, {"type", "priority", "stopIfTrue", "operator", "dxfId", "id"}, {f"{{{NS['x14']}}}formula", f"{{{NS['x14']}}}colorScale", f"{{{NS['x14']}}}dataBar", f"{{{NS['x14']}}}iconSet"}))
+            formulas = tuple("".join(node.itertext()) for node in rule.findall("xm:f", NS))
+            dxf = rule.find("x14:dxf", NS)
+            findings.extend(_findings(part, "x14-cf-rule", rule, {"type", "priority", "stopIfTrue", "operator", "id", "aboveAverage", "equalAverage", "percent", "bottom", "rank", "stdDev", "text", "timePeriod", "activePresent"}, {f"{{{NS['xm']}}}f", f"{{{NS['x14']}}}dxf", f"{{{NS['x14']}}}colorScale", f"{{{NS['x14']}}}dataBar", f"{{{NS['x14']}}}iconSet"}))
             for token in tokens:
-                rules.append(ConditionalFormattingRule(part, "x14", order, token, "".join(sqref_node.itertext()) if sqref_node is not None else "", rule.get("type"), _integer(rule.get("priority"), part, "x14.cfRule.priority"), _bool(rule.get("stopIfTrue")), rule.get("operator"), _integer(rule.get("dxfId"), part, "x14.cfRule.dxfId"), rule.get("dxfId"), formulas, _attrs(rule), _canonical(rule)))
+                rules.append(ConditionalFormattingRule(part, "x14", order, token, "".join(sqref_node.itertext()) if sqref_node is not None else "", rule.get("type"), _integer(rule.get("priority"), part, "x14.cfRule.priority"), _bool(rule.get("stopIfTrue")), rule.get("operator"), None, None, rule.get("id"), _canonical(dxf) if dxf is not None else None, formulas, _attrs(rule), _attrs(group), _canonical(group), _canonical(rule)))
     return rules, findings
 
 
@@ -157,6 +165,7 @@ def _native_dv(part: str, root: ET.Element) -> tuple[list[DataValidationRule], l
     rules: list[DataValidationRule] = []
     findings: list[UnsupportedFinding] = []
     order = 0
+    container = root.find("x:dataValidations", NS)
     for node in root.findall("x:dataValidations/x:dataValidation", NS):
         order += 1
         sqref = node.get("sqref")
@@ -165,7 +174,7 @@ def _native_dv(part: str, root: ET.Element) -> tuple[list[DataValidationRule], l
         formula2 = node.find("x:formula2", NS)
         findings.extend(_findings(part, "native-dataValidation", node, {"type", "operator", "allowBlank", "showErrorMessage", "showInputMessage", "showDropDown", "error", "errorTitle", "prompt", "promptTitle", "imeMode", "sqref"}, {f"{{{NS['x']}}}formula1", f"{{{NS['x']}}}formula2"}))
         for token in tokens:
-            rules.append(DataValidationRule(part, "native", order, token, sqref or "", node.get("type"), node.get("operator"), _bool(node.get("allowBlank")), _bool(node.get("showErrorMessage")), _bool(node.get("showInputMessage")), None if formula1 is None else "".join(formula1.itertext()), None if formula2 is None else "".join(formula2.itertext()), _attrs(node), _canonical(node)))
+            rules.append(DataValidationRule(part, "native", order, token, sqref or "", node.get("type"), node.get("operator"), _bool(node.get("allowBlank")), _bool(node.get("showErrorMessage")), _bool(node.get("showInputMessage")), None if formula1 is None else "".join(formula1.itertext()), None if formula2 is None else "".join(formula2.itertext()), _attrs(node), _attrs(container) if container is not None else (), _canonical(container) if container is not None else "", (), _canonical(node)))
     return rules, findings
 
 
@@ -173,6 +182,7 @@ def _x14_dv(part: str, root: ET.Element) -> tuple[list[DataValidationRule], list
     rules: list[DataValidationRule] = []
     findings: list[UnsupportedFinding] = []
     order = 0
+    container = root.find(".//x14:dataValidations", NS)
     for node in root.findall(".//x14:dataValidation", NS):
         order += 1
         sqref_node = node.find("xm:sqref", NS)
@@ -182,7 +192,7 @@ def _x14_dv(part: str, root: ET.Element) -> tuple[list[DataValidationRule], list
         formula2 = node.find("x14:formula2/xm:f", NS)
         findings.extend(_findings(part, "x14-dataValidation", node, {"type", "operator", "allowBlank", "showErrorMessage", "showInputMessage", "showDropDown", "error", "errorTitle", "prompt", "promptTitle", "imeMode", "uid"}, {f"{{{NS['xm']}}}sqref", f"{{{NS['x14']}}}formula1", f"{{{NS['x14']}}}formula2"}))
         for token in tokens:
-            rules.append(DataValidationRule(part, "x14", order, token, sqref or "", node.get("type"), node.get("operator"), _bool(node.get("allowBlank")), _bool(node.get("showErrorMessage")), _bool(node.get("showInputMessage")), None if formula1 is None else "".join(formula1.itertext()), None if formula2 is None else "".join(formula2.itertext()), _attrs(node), _canonical(node)))
+            rules.append(DataValidationRule(part, "x14", order, token, sqref or "", node.get("type"), node.get("operator"), _bool(node.get("allowBlank")), _bool(node.get("showErrorMessage")), _bool(node.get("showInputMessage")), None if formula1 is None else "".join(formula1.itertext()), None if formula2 is None else "".join(formula2.itertext()), _attrs(node), _attrs(container) if container is not None else (), _canonical(container) if container is not None else "", _attrs(sqref_node) if sqref_node is not None else (), _canonical(node)))
     return rules, findings
 
 
