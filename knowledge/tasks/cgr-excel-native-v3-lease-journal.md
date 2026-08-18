@@ -52,3 +52,11 @@ acceptance_commands:
 ## Residual risk
 
 - The journal only authorizes a nonce-bound ACK after `excel_owned`; the adapter/PowerShell consumers must call the new lease methods before opening a workbook. Their integration is intentionally outside this card's write scope.
+
+## Recovery evidence
+
+- Recovery SHA: `5bfc32c36f0d76a8503b9ea9e47107526bdd792a`.
+- `excel_owned` now compares and predicates the previously durable adapter PID/image/start, updates Excel fields only, and treats raced exact replays as success while differing identity is a typed conflict.
+- Cleanup failure diagnostics are write-once CAS evidence; exact races replay, differing races conflict. Failure envelopes require the exact complete typed stage/code/message/HRESULT/WinError shape.
+- Seed manifests remain exact v2 release artifacts; runtime v3 is accepted only after copy-and-migrate.
+- Recovery validation: focused `26 passed`; full `293 passed, 1 warning`; deterministic seed check, compileall, and diff check pass.
