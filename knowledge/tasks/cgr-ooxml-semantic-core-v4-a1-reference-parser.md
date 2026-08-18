@@ -53,3 +53,11 @@ acceptance_commands:
 ## Residual risk
 
 - This v1 contract intentionally rejects reference dialects outside A1. Later OOXML integration must surface that typed unsupported state rather than attempting a text fallback.
+
+## Bounded recovery evidence
+
+- Recovery SHA: `c5884997509d1ae832c670fb20dfb141d992e5f3`.
+- Raw column spelling is retained for exact no-map roundtrips; normalized arithmetic is used only for A1 validation. Reference-shaped function identifiers such as `LOG10` are lexical identifiers when followed by `(`.
+- Complete parse rejects every quoted/unquoted 3D span endpoint combination before mapping. Excel row upper bound `1048576` is enforced for parsed references and for insertion-shift overflow, before rendering.
+- Tests cover raw-case boundaries 6/10/104, four 3D combinations, max-row parse/overflow and a valid-before/after unsupported expression with a render trap proving all-or-nothing behavior.
+- Validation: focused `25 passed`; full `311 passed, 1 warning` (existing OpenPyXL x14 warning); compileall and diff check pass.
