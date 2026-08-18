@@ -1,6 +1,6 @@
 ---
 card_id: cgr-excel-native-v3-powershell-row-contract
-status: frozen
+status: review
 version: 1
 work_id: cgr-excel-native-v3-20260818
 task_id: powershell-row-contract-v3
@@ -43,4 +43,13 @@ acceptance_commands:
 - Always close workbooks and COM proxies; `Quit()` only owned Excel. Cleanup failure is secondary and never hides the primary stage failure.
 - Python tests statically/model-check contract and JSON protocol; Pester tests execute mocked COM success at 6/10/104 plus open/insert/calc/save/cleanup faults. Non-Windows absence is explicit, not a pass for real Excel.
 
-Set card `review`, record immutable feature SHA/evidence/Windows risk; normal commit/push only. No merge/amend/rebase/force-push.
+## Implementation evidence
+
+- Feature SHA: `d759cc425b68ef0a7a72734e15e23b513d7951ae`.
+- New PowerShell contract module writes atomic BOM-free/flushed JSON artifacts; it emits structured progress/result/error envelopes, a full adapter/Excel lease before nonce ACK, and opens neither workbook before ACK succeeds.
+- Request validation covers group/header/source/template/insertion bounds, fields A:X/AA, exact Y/Z `FormulaR1C1`, W hyperlink and explicit A ordinal map. The helper contains one native `.Insert`, copies only row height/formats/DV, and performs owned-only `Quit()` plus COM release in cleanup.
+- Python static/model contract tests: `4 passed`; full Python suite: `290 passed, 1 warning` (existing OpenPyXL x14 warning); compileall and diff check pass.
+
+## Windows gate risk
+
+- `pwsh` is absent on this host and Pester reports explicit `windows_powershell_contract_unavailable`; no Windows/Excel execution is claimed. The mocked Pester lifecycle cases cover 6/10/104 and open/insert/calc/save/cleanup paths, but a real Windows Excel run remains required before release.
