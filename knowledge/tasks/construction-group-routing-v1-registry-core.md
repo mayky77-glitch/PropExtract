@@ -1,0 +1,102 @@
+---
+card_id: construction-group-routing-v1-registry-core
+status: frozen
+version: 1
+supersedes: null
+work_id: construction-group-routing-v1
+task_id: registry-core
+purpose: Создать поставляемый SQLite seed, LocalAppData runtime registry и generic workbook-operation journal без Excel/server/UI wiring.
+role: database-engineer
+route: P4
+assigned_model: gpt-5.6-terra
+reasoning_effort: high
+launch_status: planned
+actual_model: pending
+actual_reasoning_effort: pending
+fallback_reason: null
+card_path: knowledge/tasks/construction-group-routing-v1-registry-core.md
+card_commit_sha: runtime-envelope
+planning_parent_sha: f0f2f6f990dbae3711b4ab8b63af0356b03f2c18
+base_sha: runtime-envelope
+dependency_shas: []
+branch: codex/cgr-registry-core
+branch_base_sha: runtime-envelope
+write_scope:
+  - rns_import_server/construction_registry.py
+  - rns_import_server/registry_storage.py
+  - rns_import_server/workbook_operation_journal.py
+  - rns_import_server/data/construction_registry.seed.sqlite3
+  - rns_import_server/data/construction_registry.seed.manifest.json
+  - scripts/build_construction_registry_seed.py
+  - scripts/validate_construction_registry_seed.py
+  - tests/test_construction_registry.py
+  - tests/test_registry_storage.py
+  - tests/test_workbook_operation_journal.py
+  - knowledge/tasks/construction-group-routing-v1-registry-core.md
+forbidden_paths:
+  - rns_import_server/server.py
+  - rns_import_server/app.py
+  - rns_import_server/workbook.py
+  - rns_import_server/static
+  - README.md
+contract_versions:
+  input: construction-registry-plan-v1
+  output: construction-registry-storage-v1
+acceptance_commands:
+  - "'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' scripts/build_construction_registry_seed.py --check"
+  - "'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' scripts/validate_construction_registry_seed.py"
+  - "'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_construction_registry.py tests/test_registry_storage.py tests/test_workbook_operation_journal.py"
+  - "'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server scripts tests"
+  - git diff --check
+---
+
+# Wave 1 — registry core
+
+## Required behavior
+
+- Git/source archive ships deterministic read-only `construction_registry.seed.sqlite3` plus manifest containing schema version, seed revision, entry count and SHA-256.
+- First Windows start creates writable runtime DB at `%LOCALAPPDATA%\PropExtract\construction-registry\registry.sqlite3`. Tests inject the data root; installed seed is never modified. Non-Windows path logic remains importable and testable.
+- Runtime SQLite uses short transactions, busy timeout, foreign keys, integrity check, schema versioning, migration backup and `synchronous=FULL` for workbook-operation transitions that precede external publication.
+- Construction fields: internal ID, stable optional seed ID, origin, code prefix, official name, normalized name, `draft|active|archived`, row revision and timestamps. Unique normalized name/code conflicts fail explicitly.
+- Match only an official normalized prefix at start of PDF object with punctuation/whitespace boundary. Longest valid nested name wins. No fuzzy fallback.
+- Bindings store stable construction/workbook-contract/target/sheet/template identity and verified state. Never persist physical row/header coordinates.
+- Seed reconciliation keeps stable provenance/base values: untouched seed updates, local-only entries survive, divergent local/seed edits become conflicts, bound name/code changes become alignment conflicts, removal archives only untouched entries. Crash rolls back atomically.
+
+## Approved initial seed
+
+Only these official group names and prefixes enter Git:
+
+- `051-2006437` — `Реконструкция УПГ-102 Ковыктинского ГКМ`
+- `051-2006735` — `Газопровод подключения Тас-Юряхского и Верхневилючанского месторождений к МГ "Сила Сибири"`
+- `051-2004430` — `Магистральный газопровод "Сила Сибири". Участок "Ковыкта - Чаянда"`
+- `051-2000714` — `Обустройство Ковыктинского газоконденсатного месторождения`
+
+No object names, RNS values, row numbers, paths or workbook content enter seed/manifest/tests.
+
+## Generic workbook operation journal
+
+Support `group_provision|new_row` with mutation mode `bootstrap_fill|blank_fill|middle_insert`.
+
+Durable record includes:
+
+- unique operation/idempotency/consumer ID, owner/pair nonce;
+- construction ID, canonical RNS when applicable, stable target/sheet/template identity and expected registry generation;
+- intent/manifest version+digest, operation directory;
+- pre/staged/control/post/backup hashes and validation digest;
+- Excel lease metadata: adapter/Excel PID, HWND, process start, build;
+- legal phase, failure code, capability/binding/history/report finalization flags and timestamps.
+
+API uses CAS transitions and rejects illegal/repeated moves. Required lifecycle covers planned, staged/native phases, validated, backup verified, published, finalized and manual repair. Incomplete operations are listable after restart. Post-hash evidence is durable before caller may replace target.
+
+## Tests
+
+- deterministic seed bytes/manifest and clean bootstrap;
+- Unicode normalization, longest boundary prefix, duplicate name/code, status and stale generation;
+- seed update/local edit/removal/bound-alignment conflict and crash rollback;
+- corrupt/newer schema, bounded lock, migration backup, no write into installed seed;
+- journal required fields, CAS/phase validation, idempotency, `synchronous=FULL`, restart read and finalization flags;
+- no secrets, PDF text, cell content or local source paths in seed/journal diagnostics.
+
+## Handoff
+
+Set card to `review`. Record requested vs actual route, feature SHA, changed paths, exact commands/results, remaining risk and proposed knowledge delta. Commit and push feature branch. Do not merge, amend, rebase or force-push after handoff.
