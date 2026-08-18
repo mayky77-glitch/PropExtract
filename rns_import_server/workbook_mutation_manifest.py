@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import zipfile
 
 from openpyxl import load_workbook
 
@@ -23,7 +24,17 @@ class MutationManifest:
     hyperlinks: dict[str, str]
     styles: dict[str, int]
     structure: tuple[object, ...]
+    package_fingerprint: str
     digest: str
+
+
+@dataclass(frozen=True)
+class InsertionExpectation:
+    values: dict[str, object]
+    formulas: dict[str, str]
+    hyperlink_target: str
+    hyperlink_display: str
+    ordinal: object
 
 
 def manifest_for(path: Path, sheet_name: str, *, insertion_row: int | None = None) -> MutationManifest:
@@ -46,14 +57,16 @@ def manifest_for(path: Path, sheet_name: str, *, insertion_row: int | None = Non
                      tuple(sorted(item.name for item in book.defined_names.values())),
                      tuple(sorted(str(item.sqref) for item in sheet.data_validations.dataValidation)),
                      tuple(sorted(str(item.sqref) for item in sheet.conditional_formatting)))
+        with zipfile.ZipFile(path) as archive:
+            package = {name: digest(archive.read(name).decode("utf-8", "replace")) for name in sorted(archive.namelist()) if name.startswith(("xl/worksheets/", "xl/workbook.xml", "xl/styles", "xl/worksheets/_rels/"))}
         payload = {"version": "native-group-row-insertion-v1", "sheet": sheet_name, "insertion_row": insertion_row,
                    "max_row": sheet.max_row, "values": values, "formulas": formulas, "hyperlinks": links, "styles": styles, "structure": structure}
-        return MutationManifest(**payload, digest=digest(payload))
+        return MutationManifest(**payload, package_fingerprint=digest(package), digest=digest(payload))
     finally:
         book.close()
 
 
-def validate_insertion(control: MutationManifest, candidate: MutationManifest, row: int) -> None:
+def validate_insertion(control: MutationManifest, candidate: MutationManifest, row: int, *, expected: InsertionExpectation | None = None) -> None:
     """Prove exactly one physical row and forbid edits outside the mapped insert."""
     if control.sheet != candidate.sheet or candidate.max_row != control.max_row + 1:
         raise RuntimeError("mutation_manifest_row_count_mismatch")
@@ -64,11 +77,11 @@ def validate_insertion(control: MutationManifest, candidate: MutationManifest, r
             from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
             column, source_row = coordinate_from_string(coordinate)
             mapped = f"{column}{source_row if source_row < row else source_row + 1}"
-            expected = value
+            expected_value = value
             if source is control.formulas:
                 from openpyxl.formula.translate import Translator
-                expected = Translator(value, origin=coordinate).translate_formula(mapped)
-            if target.get(mapped) != expected and not (column == "A" and source_row >= row):
+                expected_value = Translator(value, origin=coordinate).translate_formula(mapped)
+            if target.get(mapped) != expected_value and not (column == "A" and source_row >= row):
                 raise RuntimeError(f"mutation_manifest_changed:{coordinate}")
         for coordinate in target:
             from openpyxl.utils.cell import coordinate_from_string
@@ -82,6 +95,14 @@ def validate_insertion(control: MutationManifest, candidate: MutationManifest, r
                 raise RuntimeError(f"mutation_manifest_candidate_only:{coordinate}")
     if control.structure != candidate.structure:
         raise RuntimeError("mutation_manifest_structure_changed")
+    if expected:
+        for column, value in expected.values.items():
+            if candidate.values.get(f"{column}{row}") != value: raise RuntimeError(f"mutation_manifest_insert_value:{column}")
+        for column, value in expected.formulas.items():
+            if candidate.formulas.get(f"{column}{row}") != value: raise RuntimeError(f"mutation_manifest_insert_formula:{column}")
+        if candidate.values.get(f"A{row}") != expected.ordinal: raise RuntimeError("mutation_manifest_insert_ordinal")
+        if candidate.hyperlinks.get(f"W{row}") != expected.hyperlink_target or candidate.values.get(f"W{row}") != expected.hyperlink_display:
+            raise RuntimeError("mutation_manifest_insert_hyperlink")
 
 
 def validate_control(original: MutationManifest, control: MutationManifest) -> None:
