@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -304,7 +305,8 @@ def test_v3_structured_primary_and_cleanup_failure_survive_restart(tmp_path: Pat
         assert failed["cleanup_failure_winerror"] == 1460
         with pytest.raises(RegistryConflictError):
             journal.record_failure(operation_id, expected_phase="planned",
-                                   primary_failure={"stage": "other", "code": "replacement"})
+                                   primary_failure={"stage": "other", "code": "replacement", "message": "replacement",
+                                                    "hresult": None, "winerror": None})
         storage.close()
         restarted = RegistryStorage(storage.path)
         try:
@@ -316,3 +318,102 @@ def test_v3_structured_primary_and_cleanup_failure_survive_restart(tmp_path: Pat
     finally:
         if storage.connection:
             pass
+
+
+def test_v3_owned_lease_preserves_adapter_identity_and_concurrent_exact_replay(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    path = storage.path
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED,
+                           hashes={"pre_hash": "pre", "staged_hash": "staged"})
+        journal.record_excel_launching(operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=_adapter_lease())
+        swapped = {**_owned_lease(), "adapter_pid": 404}
+        with pytest.raises(RegistryConflictError):
+            journal.record_excel_owned(operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=swapped)
+        launching = journal.get(operation_id)
+        assert launching and launching.phase == PHASE_EXCEL_LAUNCHING and launching["adapter_pid"] == 101
+    finally:
+        storage.close()
+
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+
+    def own() -> None:
+        worker = RegistryStorage(path)
+        try:
+            barrier.wait(timeout=3)
+            outcomes.append(WorkbookOperationJournal(worker).record_excel_owned(
+                operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=_owned_lease()
+            ).phase)
+        except BaseException as error:  # assertions below retain both racing outcomes
+            outcomes.append(error)
+        finally:
+            worker.close()
+
+    first, second = threading.Thread(target=own), threading.Thread(target=own)
+    first.start(); second.start(); first.join(timeout=4); second.join(timeout=4)
+    assert not first.is_alive() and not second.is_alive()
+    assert outcomes == [PHASE_EXCEL_OWNED, PHASE_EXCEL_OWNED]
+
+
+def test_v3_cleanup_failure_is_write_once_with_concurrent_exact_replay(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    path = storage.path
+    cleanup = {"stage": "cleanup", "code": "terminate_timeout", "message": "timeout", "hresult": None, "winerror": 1460}
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        journal.record_failure(operation_id, expected_phase="planned", primary_failure={
+            "stage": "open", "code": "open_failed", "message": "open", "hresult": -1, "winerror": 5,
+        })
+    finally:
+        storage.close()
+
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+
+    def cleanup_writer() -> None:
+        worker = RegistryStorage(path)
+        try:
+            barrier.wait(timeout=3)
+            outcomes.append(WorkbookOperationJournal(worker).record_cleanup_failure(
+                operation_id, cleanup_failure=cleanup
+            )["cleanup_failure_code"])
+        except BaseException as error:
+            outcomes.append(error)
+        finally:
+            worker.close()
+
+    first, second = threading.Thread(target=cleanup_writer), threading.Thread(target=cleanup_writer)
+    first.start(); second.start(); first.join(timeout=4); second.join(timeout=4)
+    assert not first.is_alive() and not second.is_alive()
+    assert outcomes == ["terminate_timeout", "terminate_timeout"]
+    reopened = RegistryStorage(path)
+    try:
+        with pytest.raises(RegistryConflictError):
+            WorkbookOperationJournal(reopened).record_cleanup_failure(
+                operation_id,
+                cleanup_failure={**cleanup, "code": "different", "message": "different"},
+            )
+    finally:
+        reopened.close()
+
+
+def test_v3_failure_envelope_requires_exact_complete_typed_fields(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        invalid = (
+            {"stage": "open", "code": "failed", "message": "failure", "hresult": None},
+            {"stage": "open", "code": "failed", "message": "", "hresult": None, "winerror": None},
+            {"stage": "open", "code": "failed", "message": "failure", "hresult": "bad", "winerror": None},
+            {"stage": "open", "code": "failed", "message": "failure", "hresult": None, "winerror": True},
+        )
+        for envelope in invalid:
+            with pytest.raises(RegistryError):
+                journal.record_failure(operation_id, expected_phase="planned", primary_failure=envelope)
+    finally:
+        storage.close()

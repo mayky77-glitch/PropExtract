@@ -155,10 +155,10 @@ def load_seed_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[str, Any]:
     required = {"schema_version", "seed_revision", "entry_count", "sha256"}
     if not isinstance(manifest, dict) or set(manifest) != required:
         raise RegistryCorruptError("Manifest поставляемого справочника имеет неподдерживаемый формат")
-    # Release seeds are immutable.  A newer runtime can promote a verified
-    # v2 seed to its writable v3 runtime copy; it must not reject the release
-    # artifact merely because the runtime has a later migration.
-    if manifest["schema_version"] not in {SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION} or not isinstance(manifest["entry_count"], int):
+    # A manifest describes the immutable shipped seed, never its migrated
+    # runtime copy.  Runtime v3 is reached only after copying this exact v2
+    # artifact into the writable data root.
+    if manifest["schema_version"] != SEED_SCHEMA_VERSION or not isinstance(manifest["entry_count"], int):
         raise RegistryCorruptError("Manifest поставляемого справочника несовместим с программой")
     if not isinstance(manifest["seed_revision"], str) or not isinstance(manifest["sha256"], str):
         raise RegistryCorruptError("Manifest поставляемого справочника имеет неверные поля")

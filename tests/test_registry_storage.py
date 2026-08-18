@@ -95,6 +95,21 @@ def test_corrupt_seed_is_rejected(tmp_path: Path) -> None:
         RegistryStorage.bootstrap(tmp_path / "runtime", seed_path=seed, manifest_path=manifest)
 
 
+def test_seed_manifest_is_exact_v2_even_when_runtime_schema_is_v3(tmp_path: Path) -> None:
+    seed = tmp_path / "seed.sqlite3"
+    created = RegistryStorage.create_seed(seed, [])
+    created.close()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": RUNTIME_SCHEMA_VERSION,
+        "seed_revision": "construction-registry-v2",
+        "entry_count": 0,
+        "sha256": sha256_file(seed),
+    }), encoding="utf-8")
+    with pytest.raises(RegistryCorruptError):
+        load_seed_manifest(manifest)
+
+
 def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp_path: Path) -> None:
     runtime = RegistryStorage.bootstrap(tmp_path)
     path = runtime.path

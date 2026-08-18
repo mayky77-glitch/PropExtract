@@ -127,19 +127,20 @@ def _normalize_failure(value: Mapping[str, object] | None, *, fallback_stage: st
     if value is None:
         if fallback_code is None:
             return None
-        value = {"stage": fallback_stage, "code": fallback_code, "message": fallback_code}
-    if set(value) - _FAILURE_FIELDS:
-        raise RegistryError("Неизвестное поле structured failure")
+        value = {"stage": fallback_stage, "code": fallback_code, "message": fallback_code,
+                 "hresult": None, "winerror": None}
+    if set(value) != _FAILURE_FIELDS:
+        raise RegistryError("Structured failure требует точный полный набор полей")
     stage = value.get("stage")
     code = value.get("code")
     if not isinstance(stage, str) or not stage or not isinstance(code, str) or not code:
         raise RegistryError("Structured failure требует stage и code")
-    message = value.get("message")
-    if message is not None and (not isinstance(message, str) or not message):
+    message = value["message"]
+    if not isinstance(message, str) or not message:
         raise RegistryError("Structured failure message имеет неверный формат")
     normalized: dict[str, object] = {"stage": stage, "code": code, "message": message}
     for key in ("hresult", "winerror"):
-        item = value.get(key)
+        item = value[key]
         if item is not None and (not isinstance(item, int) or isinstance(item, bool)):
             raise RegistryError(f"Structured failure {key} имеет неверный формат")
         normalized[key] = item
@@ -176,6 +177,8 @@ class WorkbookOperationJournal:
         expected_phase: str,
         next_phase: str,
         lease: Mapping[str, object],
+        update_fields: frozenset[str] | None = None,
+        cas_fields: frozenset[str] = frozenset(),
     ) -> JournalOperation:
         """CAS-write one lease boundary, allowing only exact replay.
 
@@ -192,16 +195,26 @@ class WorkbookOperationJournal:
             raise RegistryConflictError("Повтор Excel lease не совпадает с durable identity")
         if current.phase != expected_phase:
             raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
-        assignments = ["phase=?", "updated_at=?"] + [f"{field}=?" for field in lease]
-        values: list[object] = [next_phase, _now(), *lease.values(), operation_id, owner_id, pair_nonce, expected_phase]
+        fields_to_update = update_fields or frozenset(lease)
+        assignments = ["phase=?", "updated_at=?"] + [f"{field}=?" for field in fields_to_update]
+        values: list[object] = [next_phase, _now(), *(lease[field] for field in fields_to_update),
+                                operation_id, owner_id, pair_nonce, expected_phase]
+        predicates = "".join(f" AND {field}=?" for field in cas_fields)
+        values.extend(lease[field] for field in cas_fields)
         self.storage.connection.execute("PRAGMA synchronous=FULL")
         with self.storage.transaction() as connection:
             updated = connection.execute(
                 f"UPDATE workbook_operation_journal SET {', '.join(assignments)} "
-                "WHERE operation_id=? AND owner_id=? AND pair_nonce=? AND phase=?",
+                f"WHERE operation_id=? AND owner_id=? AND pair_nonce=? AND phase=?{predicates}",
                 values,
             ).rowcount
             if updated != 1:
+                replayed = self.get(operation_id)
+                if replayed is not None and replayed.phase == next_phase:
+                    self._assert_nonce(replayed, owner_id=owner_id, pair_nonce=pair_nonce)
+                    if self._lease_matches(replayed, lease):
+                        return replayed
+                    raise RegistryConflictError("Повтор Excel lease не совпадает с durable identity")
                 raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
         return self.get(operation_id)  # type: ignore[return-value]
 
@@ -222,7 +235,8 @@ class WorkbookOperationJournal:
         """Durably prove complete process identity before an ACK is possible."""
         _validate_owned_lease(lease)
         return self._record_lease(operation_id, owner_id=owner_id, pair_nonce=pair_nonce,
-                                  expected_phase=PHASE_EXCEL_LAUNCHING, next_phase=PHASE_EXCEL_OWNED, lease=lease)
+                                  expected_phase=PHASE_EXCEL_LAUNCHING, next_phase=PHASE_EXCEL_OWNED, lease=lease,
+                                  update_fields=_EXCEL_LEASE_FIELDS, cas_fields=_ADAPTER_LEASE_FIELDS)
 
     confirm_excel_ownership = record_excel_owned
 
