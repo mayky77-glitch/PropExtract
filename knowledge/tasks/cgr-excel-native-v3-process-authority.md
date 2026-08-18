@@ -1,6 +1,6 @@
 ---
 card_id: cgr-excel-native-v3-process-authority
-status: frozen
+status: review
 version: 1
 work_id: cgr-excel-native-v3-20260818
 task_id: windows-process-authority-v1
@@ -40,5 +40,19 @@ acceptance_commands:
 - Verify Excel lease exactly against PID/HWND/image=`EXCEL.EXE`/creation time; reject mismatch, access denied and PID reuse.
 - Terminator is mandatory. Revalidate immediately before bounded `TerminateProcess` + wait; never terminate on incomplete/mismatched authority and never touch user Excel.
 - Tests inject facade outcomes for success, mismatch, reused PID, access denied, vanished process, timeout and handle cleanup.
+
+## Handoff evidence
+
+- P4 developer route completed with injectable facade only; no adapter/publisher edits.
+- Passed: `pytest -q tests/test_windows_process_authority.py` (6 passed), compileall and diff check.
+- Windows API calls are simulated by the facade on this non-Windows host; real Windows validation remains a later gate.
+
+## Bounded recovery evidence
+
+- Recovery SHA: `f584ed850bdf04923b81f08b2b04f2bc0c86d388`.
+- Added concrete injectable `ctypes` facade for `OpenProcess`, process image/times, HWND→PID, terminate, wait and close; typed `GetLastError` is retained on the public error.
+- Cleanup opens one terminate-capable handle, revalidates HWND/PID/image/start through that same handle immediately before termination, then waits and closes that handle in every branch. Mismatch, PID reuse, access denial and vanished process do not terminate.
+- Fake adversarial coverage includes exact adapter PID identity, access-denied/vanished process, PID reuse, timeout and handle closure.
+- Validation: focused `10 passed`; full `296 passed, 1 warning`; compileall and diff check pass. Real Excel/Windows remains a later gate.
 
 Set card `review`, record immutable feature SHA/evidence/risks; normal commit/push only. No merge/amend/rebase/force-push.
