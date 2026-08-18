@@ -82,7 +82,7 @@ acceptance_commands:
 ## Handoff evidence
 
 - Requested/actual route: P4 developer, `gpt-5.6-terra` / high; no fallback.
-- Feature SHA: pending normal commit on `codex/cgr-row-insertion-engine`.
+- Implementation SHA: `7b38b8a4922c664cfafc185078320a4a6feeb827` (normal commit on `codex/cgr-row-insertion-engine`; the handoff record follows in a separate immutable commit).
 - Changed paths: the 12 card-owned paths only, including a generated sanitized template; no user workbook/PDF was opened or changed.
 - Passed: `pytest -q tests/test_group_row_insertion.py tests/test_excel_native_contract.py tests/test_workbook_mutation_manifest.py tests/test_workbook_group_publication.py tests/test_workbook_group_routing.py tests/test_workbook_operation_journal.py` (28 passed); `compileall`; `windows_end_to_end_smoke.py --self-test`; `git diff --check`.
 - Windows evidence: unavailable on this macOS hosted runner. The safe negative middle-insertion contract is tested and raises `excel_required_for_middle_insert` before staging/mutation. Real desktop Excel insert/recalculate/save/reopen remains a blocking gate.
