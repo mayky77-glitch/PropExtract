@@ -1,6 +1,6 @@
 ---
 card_id: cgr-ooxml-semantic-core-v4-opc-workbook-reader
-status: frozen
+status: review
 version: 1
 work_id: cgr-ooxml-semantic-core-v4-20260818
 task_id: opc-workbook-reader-v1
@@ -44,3 +44,10 @@ acceptance_commands:
 - Positive tests assert the complete typed model; mutations assert exact findings. Do not copy or merge `9d9ef680`, `725d3c28`, or their implementation.
 
 Set card `review`, record immutable feature SHA/evidence/risk; normal commit/push only. No merge/amend/rebase/force-push.
+
+## Implementation evidence
+
+- Immutable feature SHA: `1535efb4ddfb47eafe86b3e0f5006228760e6b76`; direct descendant of exact base `3541fedb93058664a52a7c064822afcb70451083`.
+- Added namespace-aware direct OPC reader and synthetic fixtures. Sheet targets resolve from relationships to `xl/worksheets/sheet6.xml` and `sheet104.xml`; semantic boundaries cover rows `6`, `10`, and `104` with two distinct sheets.
+- Acceptance: focused `5 passed`; full suite `291 passed, 1 warning` (existing OpenPyXL synthetic-x14 warning); compileall and `git diff --check` pass.
+- Residual risk: reader intentionally reports, rather than interprets, unsupported worksheet features such as conditional formatting; package digests remain evidence only.
