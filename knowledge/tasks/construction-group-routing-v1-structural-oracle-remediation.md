@@ -2,7 +2,7 @@
 card_id: construction-group-routing-v1-structural-oracle-remediation
 status: frozen
 version: 1
-work_id: construction-group-routing-v1
+work_id: construction-group-routing-v1-row-remediation
 task_id: structural-oracle-remediation
 purpose: Завершить bidirectional raw-OOXML semantic oracle для paired control/candidate publication.
 role: developer

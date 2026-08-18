@@ -2,7 +2,7 @@
 card_id: construction-group-routing-v1-excel-native-remediation
 status: frozen
 version: 1
-work_id: construction-group-routing-v1
+work_id: construction-group-routing-v1-row-remediation
 task_id: excel-native-remediation
 purpose: Завершить безопасный Excel COM lease/ACK и audited row construction для native middle insertion.
 role: developer
