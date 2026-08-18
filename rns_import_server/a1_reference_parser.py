@@ -98,7 +98,8 @@ class FormulaAst:
         return "".join(token.render() for token in self.tokens)
 
 
-_MAX_COLUMN = 16_384  # XFD
+MAX_COLUMN = 16_384  # XFD
+MAX_ROW = 1_048_576
 
 
 def _column_number(column: str) -> int:
@@ -114,6 +115,16 @@ def _is_name_char(char: str) -> bool:
 
 def _is_boundary(text: str, index: int) -> bool:
     return index >= len(text) or not (text[index].isalnum() or text[index] in "_.$")
+
+
+def _is_function_identifier(text: str, index: int) -> bool:
+    """Treat a reference-shaped identifier followed by ``(`` as a function."""
+    if index >= len(text) or not (text[index].isalpha() or text[index] in "_\\"):
+        return False
+    position = index + 1
+    while position < len(text) and _is_name_char(text[position]):
+        position += 1
+    return position < len(text) and text[position] == "("
 
 
 def _consume_string(text: str, index: int) -> int:
@@ -160,6 +171,17 @@ def _consume_unquoted_sheet(text: str, index: int) -> tuple[str, int] | None:
     return text[index:position], position
 
 
+def _consume_sheet_endpoint(text: str, index: int) -> int | None:
+    """Consume either legal sheet-name spelling for 3D-span detection."""
+    quoted = _consume_quoted_sheet(text, index) if index < len(text) and text[index] == "'" else None
+    if quoted is not None:
+        if "[" in quoted[0]:
+            raise UnsupportedReference("external_or_structured_reference")
+        return quoted[2]
+    unquoted = _consume_unquoted_sheet(text, index)
+    return unquoted[1] if unquoted is not None else None
+
+
 def _parse_cell(text: str, index: int) -> tuple[CellReference, int] | None:
     position = index
     column_absolute = position < len(text) and text[position] == "$"
@@ -169,7 +191,7 @@ def _parse_cell(text: str, index: int) -> tuple[CellReference, int] | None:
     while position < len(text) and text[position].isalpha():
         position += 1
     column = text[start:position]
-    if not column or _column_number(column) > _MAX_COLUMN:
+    if not column or _column_number(column) > MAX_COLUMN:
         return None
     row_absolute = position < len(text) and text[position] == "$"
     if row_absolute:
@@ -182,7 +204,11 @@ def _parse_cell(text: str, index: int) -> tuple[CellReference, int] | None:
     row = int(text[row_start:position])
     if row < 1:
         return None
-    return CellReference(column.upper(), row, column_absolute, row_absolute), position
+    if row > MAX_ROW:
+        raise UnsupportedReference("a1_row_out_of_bounds")
+    # Preserve source case for exact no-map roundtrips. Validation and sheet
+    # matching are case-insensitive, but rendering must not normalize bytes.
+    return CellReference(column, row, column_absolute, row_absolute), position
 
 
 def _parse_column(text: str, index: int) -> tuple[ColumnReference, int] | None:
@@ -194,9 +220,9 @@ def _parse_column(text: str, index: int) -> tuple[ColumnReference, int] | None:
     while position < len(text) and text[position].isalpha():
         position += 1
     column = text[start:position]
-    if not column or _column_number(column) > _MAX_COLUMN:
+    if not column or _column_number(column) > MAX_COLUMN:
         return None
-    return ColumnReference(column.upper(), absolute), position
+    return ColumnReference(column, absolute), position
 
 
 def _parse_row(text: str, index: int) -> tuple[RowReference, int] | None:
@@ -237,6 +263,8 @@ def _parse_reference(text: str, index: int, *, sheet_raw: str | None = None, she
     if row is not None and row[1] < len(text) and text[row[1]] == ":":
         second = _parse_row(text, row[1] + 1)
         if second is not None and _is_boundary(text, second[1]):
+            if row[0].row > MAX_ROW or second[0].row > MAX_ROW:
+                raise UnsupportedReference("a1_row_out_of_bounds")
             return A1Reference(sheet_raw, sheet_name, row[0], second[0]), second[1]
     return None
 
@@ -248,9 +276,7 @@ def _qualified_reference(text: str, index: int) -> tuple[A1Reference, int] | Non
         if "[" in raw:
             raise UnsupportedReference("external_or_structured_reference")
         if position < len(text) and text[position] == ":":
-            other_quoted = _consume_quoted_sheet(text, position + 1)
-            other_unquoted = _consume_unquoted_sheet(text, position + 1)
-            other_end = other_quoted[2] if other_quoted is not None else (other_unquoted[1] if other_unquoted is not None else None)
+            other_end = _consume_sheet_endpoint(text, position + 1)
             if other_end is not None and other_end < len(text) and text[other_end] == "!":
                 raise UnsupportedReference("three_dimensional_reference")
         if position < len(text) and text[position] == "!":
@@ -261,8 +287,8 @@ def _qualified_reference(text: str, index: int) -> tuple[A1Reference, int] | Non
         return None
     name, position = unquoted
     if position < len(text) and text[position] == ":":
-        other = _consume_unquoted_sheet(text, position + 1)
-        if other is not None and other[1] < len(text) and text[other[1]] == "!":
+        other_end = _consume_sheet_endpoint(text, position + 1)
+        if other_end is not None and other_end < len(text) and text[other_end] == "!":
             raise UnsupportedReference("three_dimensional_reference")
     if position < len(text) and text[position] == "!":
         return _parse_reference(text, position + 1, sheet_raw=name, sheet_name=name)
@@ -292,6 +318,9 @@ def parse_formula(formula: str) -> FormulaAst:
         # A1 grammar cannot begin midway through a defined name. This avoids
         # treating the tail of ``NameA1`` as the unrelated cell ``EA1``.
         can_start = position == 0 or not _is_name_char(formula[position - 1])
+        if can_start and _is_function_identifier(formula, position):
+            position += 1
+            continue
         qualified = _qualified_reference(formula, position) if can_start and (char == "'" or char.isalpha() or char in "_\\") else None
         if qualified is not None:
             if literal_start < position:
@@ -317,6 +346,8 @@ def parse_formula(formula: str) -> FormulaAst:
 def _shift_endpoint(endpoint: ReferenceEndpoint, insertion_row: int) -> ReferenceEndpoint:
     if isinstance(endpoint, ColumnReference) or endpoint.row < insertion_row:
         return endpoint
+    if endpoint.row >= MAX_ROW:
+        raise UnsupportedReference("a1_row_insertion_overflow")
     if isinstance(endpoint, CellReference):
         return CellReference(endpoint.column, endpoint.row + 1, endpoint.column_absolute, endpoint.row_absolute)
     return RowReference(endpoint.row + 1, endpoint.absolute)
@@ -331,8 +362,8 @@ def map_formula(formula: str, *, host_sheet: str, target_sheet: str, insertion_r
     """Map A1 references across one row insertion, preserving all other text."""
     if not isinstance(host_sheet, str) or not host_sheet or not isinstance(target_sheet, str) or not target_sheet:
         raise ValueError("host_sheet and target_sheet must be non-empty strings")
-    if not isinstance(insertion_row, int) or isinstance(insertion_row, bool) or insertion_row < 1:
-        raise ValueError("insertion_row must be a positive integer")
+    if not isinstance(insertion_row, int) or isinstance(insertion_row, bool) or not 1 <= insertion_row <= MAX_ROW:
+        raise UnsupportedReference("a1_row_insertion_overflow")
     ast = parse_formula(formula)
     mapped: list[FormulaToken] = []
     for token in ast.tokens:

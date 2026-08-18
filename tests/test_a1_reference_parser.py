@@ -6,6 +6,7 @@ from rns_import_server.a1_reference_parser import (
     A1Reference,
     CellReference,
     FormulaAst,
+    MAX_ROW,
     ReferenceToken,
     UnsupportedReference,
     map_formula,
@@ -51,3 +52,50 @@ def test_unsupported_reference_is_typed_and_happens_before_any_rewrite(formula: 
 def test_quoted_sheet_apostrophe_roundtrips_when_not_target() -> None:
     formula = "='O''Brien'!A104"
     assert map_formula(formula, host_sheet="Host", target_sheet="Other", insertion_row=104) == formula
+
+
+@pytest.mark.parametrize(("formula", "row", "expected"), (
+    ("=a6+$b$5", 6, "=a7+$b$5"),
+    ("=c10:d10", 10, "=c11:d11"),
+    ("=e103:e104", 104, "=e103:e105"),
+))
+def test_mapping_preserves_raw_column_case_at_6_10_and_104(formula: str, row: int, expected: str) -> None:
+    assert parse_formula(formula).render() == formula
+    assert map_formula(formula, host_sheet="Target", target_sheet="Target", insertion_row=row) == expected
+
+
+def test_reference_shaped_function_identifier_is_not_a_cell_reference() -> None:
+    formula = "=LOG10(A10)+LOG1(A10)+SUM(A10)"
+    assert map_formula(formula, host_sheet="Target", target_sheet="Target", insertion_row=10) == "=LOG10(A11)+LOG1(A11)+SUM(A11)"
+
+
+@pytest.mark.parametrize("formula", (
+    "='First':'Last'!A10",
+    "='First':Last!A10",
+    "=First:'Last'!A10",
+    "=First:Last!A10",
+))
+def test_every_quoted_unquoted_three_dimensional_span_is_rejected(formula: str) -> None:
+    with pytest.raises(UnsupportedReference, match="three_dimensional_reference"):
+        parse_formula(formula)
+
+
+def test_unsupported_between_valid_references_never_reaches_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_render(self: FormulaAst) -> str:
+        raise AssertionError("partial mapping attempted to render")
+
+    monkeypatch.setattr(FormulaAst, "render", unexpected_render)
+    with pytest.raises(UnsupportedReference, match="three_dimensional_reference"):
+        map_formula("=A6+First:'Last'!A10+B104", host_sheet="Target", target_sheet="Target", insertion_row=10)
+
+
+@pytest.mark.parametrize("formula", ("=A1048577", "=1048577:1048578"))
+def test_parser_rejects_rows_outside_excel_bounds(formula: str) -> None:
+    with pytest.raises(UnsupportedReference, match="a1_row_out_of_bounds"):
+        parse_formula(formula)
+
+
+def test_insertion_overflow_fails_before_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(FormulaAst, "render", lambda self: (_ for _ in ()).throw(AssertionError("rendered")))
+    with pytest.raises(UnsupportedReference, match="a1_row_insertion_overflow"):
+        map_formula(f"=A{MAX_ROW}", host_sheet="Target", target_sheet="Target", insertion_row=MAX_ROW)
