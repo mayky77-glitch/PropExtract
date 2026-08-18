@@ -5,7 +5,7 @@ from rns_import_server.opc_package_resolver import OPCResolverError, resolve_opc
 
 CT="http://schemas.openxmlformats.org/package/2006/content-types"; PR="http://schemas.openxmlformats.org/package/2006/relationships"
 def package(path, mutate=None):
- parts={"[Content_Types].xml":f'<Types xmlns="{CT}"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="book"/></Types>',"_rels/.rels":f'<Relationships xmlns="{PR}"><Relationship Id="r1" Type="office" Target="xl/workbook.xml"/></Relationships>',"xl/workbook.xml":"<book/>","xl/_rels/workbook.xml.rels":f'<Relationships xmlns="{PR}"><Relationship Id="r2" Type="sheet" Target="worksheets/../sheet.xml"/><Relationship Id="r3" Type="link" Target="https://example.test/a" TargetMode="External"/></Relationships>',"xl/sheet.xml":"<sheet/>"}
+ parts={"[Content_Types].xml":f'<Types xmlns="{CT}"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="book"/></Types>',"_rels/.rels":f'<Relationships xmlns="{PR}"><Relationship Id="r1" Type="urn:test:office" Target="xl/workbook.xml"/></Relationships>',"xl/workbook.xml":"<book/>","xl/_rels/workbook.xml.rels":f'<Relationships xmlns="{PR}"><Relationship Id="r2" Type="urn:test:sheet" Target="worksheets/../sheet.xml"/><Relationship Id="r3" Type="urn:test:link" Target="https://example.test/a" TargetMode="External"/></Relationships>',"xl/sheet.xml":"<sheet/>"}
  if mutate: mutate(parts)
  with ZipFile(path,"w",ZIP_DEFLATED) as z:
   for name,value in parts.items():z.writestr(name,value)
