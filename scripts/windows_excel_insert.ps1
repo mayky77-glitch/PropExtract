@@ -23,7 +23,9 @@ public static class NativeWindow { [DllImport("user32.dll")] public static exter
     if ($excelProcess.ProcessName -ne 'EXCEL') { throw 'excel_lease_image_invalid' }
     $lease = @{ operation_id=$data.operation_id; owner_nonce=$data.owner_nonce; pair_nonce=$data.pair_nonce; excel_adapter='com'; adapter_pid=$PID; adapter_started_at=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o'); excel_pid=[int]$excelPid; excel_hwnd=[int64]$excel.Hwnd; excel_process_started_at=$excelProcess.StartTime.ToUniversalTime().ToString('o'); excel_image='EXCEL.EXE'; excel_build=[string]$excel.Build }
     $temporary = "$($data.lease_file).tmp.$PID"
-    [System.IO.File]::WriteAllText($temporary, ($lease | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
+    $leaseBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($lease | ConvertTo-Json -Compress))
+    $leaseStream = New-Object System.IO.FileStream($temporary, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $leaseStream.Write($leaseBytes, 0, $leaseBytes.Length); $leaseStream.Flush($true) } finally { $leaseStream.Dispose() }
     Move-Item -Force -LiteralPath $temporary -Destination $data.lease_file
     $deadline = (Get-Date).AddSeconds(20)
     do { Start-Sleep -Milliseconds 50 } until ((Test-Path -LiteralPath $data.ack_file) -or (Get-Date) -gt $deadline)
