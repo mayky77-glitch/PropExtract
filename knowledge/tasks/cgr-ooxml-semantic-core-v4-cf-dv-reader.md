@@ -52,3 +52,10 @@ Set card `review`, record immutable feature SHA/evidence/risk; normal commit/pus
 - Native and x14 CF/DV rules flatten each disjoint `sqref` token while retaining source, original range, rule order, priority, formulas, DXF references and complete attributes. Unknown attributes/children produce typed ordered findings with canonical XML for child evidence.
 - Namespace-valid two-sheet fixture maps differ semantically at `6`, `10`, and `104`. Acceptance: focused `7 passed`; full `293 passed, 1 existing synthetic-x14 warning`; compileall and diff check pass.
 - Risk: DXF references are semantic IDs from worksheet rules; resolving them against a styles part remains a later explicit-input contract.
+
+## P6 recovery evidence
+
+- Immutable recovery feature SHA: `95422d14bcedc361092ad18be4930aeaa44448cc`.
+- x14 CF now follows official rule structure: `xm:f` formulas, typed `id`, canonical embedded `x14:dxf`, and official attributes including `aboveAverage` and `activePresent`; synthetic `x14:formula`/`dxfId` assumptions removed.
+- Native/x14 validation containers retain all attributes including `disablePrompts`; `xm:sqref` attributes and canonical owner XML are modeled. Unknown finding details include exact attribute values and owner XML.
+- Focused `10 passed`; full `296 passed, 1 existing synthetic-x14 warning`; compileall and diff check pass. Residual DXF styles-part resolution remains explicitly outside this worksheet-map reader.
