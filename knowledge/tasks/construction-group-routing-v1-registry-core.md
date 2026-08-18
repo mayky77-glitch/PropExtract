@@ -1,6 +1,6 @@
 ---
 card_id: construction-group-routing-v1-registry-core
-status: frozen
+status: done
 version: 1
 supersedes: null
 work_id: construction-group-routing-v1
@@ -10,10 +10,11 @@ role: database-engineer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
-launch_status: planned
-actual_model: pending
-actual_reasoning_effort: pending
-fallback_reason: null
+launch_status: inherited
+actual_model: inherited
+actual_reasoning_effort: inherited
+fallback_reason: Runtime did not expose a per-child route confirmation; executed by the assigned database-engineer P4 scope.
+accepted_feature_sha: 9c1d6ffeeb640cc8c72f72e502ae39ae158cc746
 card_path: knowledge/tasks/construction-group-routing-v1-registry-core.md
 card_commit_sha: runtime-envelope
 planning_parent_sha: f0f2f6f990dbae3711b4ab8b63af0356b03f2c18
@@ -100,3 +101,29 @@ API uses CAS transitions and rejects illegal/repeated moves. Required lifecycle 
 ## Handoff
 
 Set card to `review`. Record requested vs actual route, feature SHA, changed paths, exact commands/results, remaining risk and proposed knowledge delta. Commit and push feature branch. Do not merge, amend, rebase or force-push after handoff.
+
+## Review handoff — 2026-08-18
+
+- Requested route: P4 database-engineer / Terra high. Actual route: inherited database-engineer runtime; per-child model/effort confirmation was unavailable.
+- Feature SHA: pending commit (reported separately after commit; card is not amended after handoff).
+- Changed paths: `rns_import_server/construction_registry.py`, `rns_import_server/registry_storage.py`, `rns_import_server/workbook_operation_journal.py`, `rns_import_server/data/construction_registry.seed.sqlite3`, `rns_import_server/data/construction_registry.seed.manifest.json`, `scripts/build_construction_registry_seed.py`, `scripts/validate_construction_registry_seed.py`, and the three scoped registry/journal test files.
+- Evidence: `/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python -m pytest -q tests/test_construction_registry.py tests/test_registry_storage.py tests/test_workbook_operation_journal.py` → `10 passed`; `scripts/build_construction_registry_seed.py --check` and `scripts/validate_construction_registry_seed.py` → passed; `compileall` and `git diff --check` → passed.
+- Risk: schema v1 migration supports only legacy version marker `0`; future schema versions require explicit tested migration steps. Runtime SQLite is local-only; concurrent writers receive bounded SQLite lock failure instead of a server-mediated retry.
+- Proposed knowledge delta: record the seed/runtime split, v1 registry schema, three-way seed reconciliation conflict behavior, and generic journal phase/CAS contract after integration accepts this feature.
+
+## Remediation handoff — 2026-08-18
+
+- Review findings addressed: seed/runtime schema is now v2 with a verified backup migration from v0/v1; schema-less interrupted runtime databases fail closed. Drafts never route, ordinary draft activation is rejected, and unbound-local updates use generation plus row-revision CAS while bound identity is immutable.
+- Journal now persists phase-specific evidence: `pre_hash`/`staged_hash`, native lease and control evidence, an independently durable `post_hash` before published CAS, phase-gated per-flag timestamps, finalization gate, and visible manual-repair operations. Exact idempotent retries compare every immutable intent field.
+- Reconciliation deduplicates unresolved conflicts/removals, preserving generation and row revision on repeated identical reconcile.
+- Feature SHA: pending remediation commit (reported separately; no amend after handoff).
+- Evidence: `/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python -m pytest -q tests/test_construction_registry.py tests/test_registry_storage.py tests/test_workbook_operation_journal.py` → `14 passed`; deterministic seed check, seed validator, compileall, and diff check passed.
+- Remaining risk: v2 stores the foundation only; actual Excel publication and recovery dispatcher consumers remain later-wave responsibilities. Future schema versions require explicit reversible migration steps.
+
+## Integration acceptance — 2026-08-18
+
+- Accepted immutable feature tip: `9c1d6ffeeb640cc8c72f72e502ae39ae158cc746`; exact Wave-1 base: `3e2ff332454669b912825ba9428287cc7444c2a7`.
+- Recovery closed draft routing/activation, journal evidence/idempotency/finalization, stable seed reconciliation, typed incomplete-schema rejection, safe v1 conflict migration, and legacy journal-state quarantine.
+- Final focused evidence: registry-core suite `24 passed`; deterministic seed check passed; validator reported `schema=2`, revision `construction-registry-v2`, four approved entries; compileall and diff check passed.
+- Independent P6 review: ACCEPT. Exact v1 migration repros, restart visibility, ancestry and all eleven reserved paths verified; no substantive residual or frozen-card test gap.
+- Remaining risk: impossible legacy journal states migrate to visible `manual_repair` with `legacy_journal_state_invalid`; operator recovery is intentionally required instead of unsafe automatic completion.

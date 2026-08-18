@@ -1,0 +1,69 @@
+---
+card_id: construction-group-routing-v1-object-routing
+status: frozen
+version: 1
+supersedes: null
+work_id: construction-group-routing-v1
+task_id: object-routing
+purpose: Преобразовать raw object name в однозначный construction route и object tail с fail-closed typed outcomes.
+role: developer
+route: P3
+assigned_model: gpt-5.6-terra
+reasoning_effort: medium
+launch_status: planned
+actual_model: pending
+actual_reasoning_effort: pending
+fallback_reason: null
+card_path: knowledge/tasks/construction-group-routing-v1-object-routing.md
+card_commit_sha: runtime-envelope
+planning_parent_sha: 9c1d6ffeeb640cc8c72f72e502ae39ae158cc746
+base_sha: runtime-envelope
+dependency_shas:
+  - runtime-envelope
+branch: codex/cgr-object-routing
+branch_base_sha: runtime-envelope
+write_scope:
+  - rns_import_server/object_routing.py
+  - tests/test_object_group_routing.py
+  - knowledge/tasks/construction-group-routing-v1-object-routing.md
+forbidden_paths:
+  - rns_import_server/construction_registry.py
+  - rns_import_server/registry_storage.py
+  - rns_import_server/workbook_operation_journal.py
+  - rns_import_server/workbook.py
+  - rns_import_server/server.py
+  - rns_import_server/app.py
+  - rns_import_server/static
+  - README.md
+contract_versions:
+  input: construction-registry-storage-v1
+  output: construction-object-route-v1
+acceptance_commands:
+  - "'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_object_group_routing.py tests/test_construction_registry.py"
+  - "'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server tests"
+  - git diff --check
+---
+
+# Wave 2 — object routing
+
+## Required behavior
+
+- Consume accepted immutable registry snapshot/API; do not reopen or mutate SQLite in this layer.
+- Preserve original `raw_object`. Normalize only for matching.
+- Match official normalized construction name only at start, with punctuation/whitespace boundary. Longest valid nested name wins; no fuzzy/LLM fallback.
+- Return stable typed projection containing construction identity, code prefix, status, registry generation, original raw value and exact `object_tail` after removing only matched prefix plus its boundary.
+- Unknown, ambiguous/conflicting, archived-for-new-row and stale input fail closed with explicit codes. Draft is never routable.
+- Archived construction may remain identifiable for an already-existing-row comparison, but route must carry a flag that forbids new-row creation until reactivation.
+- Never infer workbook block, row coordinates, RNS placement or mutation plan.
+
+## Tests
+
+- exact/boundary/punctuation/Unicode normalization and longest nested prefix;
+- prefix-like text without valid boundary, empty tail, unknown and conflicting snapshot entries;
+- draft exclusion and archived existing-only semantics;
+- raw input preserved while tail removes only the exact matched construction prefix;
+- deterministic typed outcome and generation propagation; no private PDF text or workbook content in fixtures/diagnostics.
+
+## Handoff
+
+Set card to `review`. Record requested vs actual route, feature SHA, changed paths, exact commands/results, remaining risk and proposed knowledge delta. Commit and push feature branch. Do not merge, amend, rebase or force-push after handoff.
