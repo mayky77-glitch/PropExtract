@@ -48,16 +48,17 @@ def public_mock_job() -> dict[str, object]:
             "row_numbers": [],
             "new_row_numbers": [],
             "rows_with_issues": [],
-            "out_of_scope_count": 1,
+            "out_of_scope_count": 0,
             "unidentified_permit_count": 0,
-            "processing_failed_count": 0,
+            "processing_failed_count": 1,
         },
         "documents": [{
             "id": "public-document-1",
             "filename": "public-sample.pdf",
-            "outcome": "out_of_scope",
-            "error": "Документ не относится к РНС-потоку импорта.",
-            "hint": "Проверьте документ вручную и повторите запуск.",
+            "outcome": "processing_failed",
+            "error": "Не удалось обработать PDF.",
+            "hint": "Проверьте, что PDF корректный и не открыт другим процессом, затем повторите запуск.",
+            "technical_error": "pdfinfo failed",
         }],
         "row_cards": [],
         "proposals": [],
@@ -124,6 +125,10 @@ try:
         assert is_full_width(measurements[1440]), measurements[1440]
         assert is_full_width(measurements[480]), measurements[480]
         assert is_full_width(measurements[768]), measurements[768]
+        assert page.get_by_text("Не удалось обработать PDF.", exact=True).count() == 1
+        assert page.get_by_text("Проверьте, что PDF корректный и не открыт другим процессом, затем повторите запуск.", exact=True).count() == 1
+        technical = page.locator("p.record-verdict.record-verdict--review", has_text="Техническая причина:")
+        assert technical.count() == 1
         browser.close()
 finally:
     server.terminate()

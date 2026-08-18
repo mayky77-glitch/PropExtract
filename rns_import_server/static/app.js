@@ -170,7 +170,7 @@
     const docName = escapeText(item.filename || sourceName(item, documents));
     const error = item.error || "Документ не обработан.";
     const hint = item.hint || "Проверьте документ вручную и повторите запуск.";
-    const technical = item.technical_error ? `<p class=\"record-verdict\"><strong>Техническая причина:</strong> <span>${escapeText(item.technical_error)}</span></p>` : "";
+    const technical = item.technical_error ? `<p class=\"record-verdict record-verdict--review\"><strong>Техническая причина:</strong> <span>${escapeText(item.technical_error)}</span></p>` : "";
     return `<article class="record-card record-card--review record-card--document">
       <div class="record-card-main">
         <div class="record-card-heading">

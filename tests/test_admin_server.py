@@ -425,9 +425,13 @@ def test_public_documents_include_user_friendly_error_and_hint(tmp_path: Path):
 
     failed_doc = documents[failed.name]
     assert failed_doc["outcome"] == "processing_failed"
-    assert failed_doc["error"] == "Проверьте, что PDF корректный и не открыт другим процессом, затем повторите запуск."
+    assert failed_doc["error"] == "Не удалось обработать PDF."
     assert "повторите запуск" in failed_doc["hint"]
+    assert failed_doc["error"] != failed_doc["hint"]
     assert failed_doc["technical_error"] == "error.log"
+
+    javascript = (Path(__file__).parents[1] / "rns_import_server/static/app.js").read_text(encoding="utf-8")
+    assert 'item.technical_error ? `<p class=\\"record-verdict record-verdict--review\\">' in javascript
 
 
 def test_public_error_maps_document_open_fallbacks():
