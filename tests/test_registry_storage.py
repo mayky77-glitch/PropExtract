@@ -13,6 +13,7 @@ from rns_import_server.registry_storage import (
     RegistryCorruptError,
     RegistrySchemaError,
     RegistryStorage,
+    RUNTIME_SCHEMA_VERSION,
     SCHEMA_VERSION,
     load_seed_manifest,
     sha256_file,
@@ -101,12 +102,12 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
     runtime.close()
     migrated = RegistryStorage(path)
     try:
-        assert migrated.connection.execute("SELECT schema_version FROM registry_meta").fetchone()[0] == SCHEMA_VERSION
+        assert migrated.connection.execute("SELECT schema_version FROM registry_meta").fetchone()[0] == RUNTIME_SCHEMA_VERSION
         assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
     finally:
         migrated.close()
     newer = RegistryStorage(path)
-    newer.connection.execute("UPDATE registry_meta SET schema_version=3")
+    newer.connection.execute("UPDATE registry_meta SET schema_version=?", (RUNTIME_SCHEMA_VERSION + 1,))
     newer.close()
     with pytest.raises(RegistrySchemaError):
         RegistryStorage(path)
@@ -295,6 +296,47 @@ def test_v1_53307beb_migration_deduplicates_active_conflicts_and_backup_rolls_ba
         assert len(reopened.conflicts()) == 1
     finally:
         reopened.close()
+
+
+def test_v2_to_v3_journal_migration_has_verified_rollback_and_reopens_owned_state(tmp_path: Path) -> None:
+    path = tmp_path / "v2.sqlite3"
+    seed = RegistryStorage.create_seed(path, [
+        {"seed_entry_id": "one", "code_prefix": "111-1111111", "official_name": "Первая", "status": "active"},
+    ], seed_revision="construction-registry-v2")
+    operation_id = _journal_operation(seed, "v3")
+    seed.close()
+    legacy = sqlite3.connect(path)
+    v3_columns = (
+        "adapter_pid", "adapter_image", "adapter_process_started_at", "excel_image",
+        "primary_failure_stage", "primary_failure_code", "primary_failure_message",
+        "primary_failure_hresult", "primary_failure_winerror",
+        "cleanup_failure_stage", "cleanup_failure_code", "cleanup_failure_message",
+        "cleanup_failure_hresult", "cleanup_failure_winerror",
+    )
+    try:
+        legacy.execute("UPDATE registry_meta SET schema_version=2")
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    migrated = RegistryStorage(path)
+    backup = path.with_suffix(".sqlite3.pre-migration.bak")
+    try:
+        columns = {row["name"] for row in migrated.connection.execute("PRAGMA table_info(workbook_operation_journal)")}
+        assert set(v3_columns) <= columns
+        assert migrated.connection.execute("SELECT schema_version FROM registry_meta WHERE id=1").fetchone()[0] == RUNTIME_SCHEMA_VERSION
+        assert migrated.connection.execute(
+            "SELECT primary_failure_code FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+        ).fetchone()[0] is None
+        assert backup.is_file()
+    finally:
+        migrated.close()
+    archived = sqlite3.connect(backup)
+    try:
+        assert archived.execute("SELECT schema_version FROM registry_meta WHERE id=1").fetchone()[0] == 2
+        assert "adapter_pid" not in {row[1] for row in archived.execute("PRAGMA table_info(workbook_operation_journal)")}
+    finally:
+        archived.close()
 
 
 def test_v1_journal_migration_backfills_true_finalization_flag_timestamps(tmp_path: Path) -> None:

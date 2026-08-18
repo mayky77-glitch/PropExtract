@@ -27,7 +27,11 @@ from rns_import_server.construction_registry import (
 )
 
 
+# ``SCHEMA_VERSION`` is the immutable shipped-seed contract used by the seed
+# builder.  Runtime copies use the later schema and are migrated in-place.
 SCHEMA_VERSION = 2
+RUNTIME_SCHEMA_VERSION = 3
+SEED_SCHEMA_VERSION = SCHEMA_VERSION
 SEED_REVISION = "construction-registry-v2"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
@@ -88,6 +92,17 @@ _REQUIRED_SCHEMA_COLUMNS = {
 _V2_JOURNAL_COLUMNS = frozenset({
     "capability_finalized_at", "binding_finalized_at", "history_finalized_at", "report_finalized_at",
 })
+_V3_JOURNAL_COLUMNS = frozenset({
+    # The helper process and the Excel process are intentionally recorded
+    # separately.  A PowerShell PID is not evidence that we own Excel.
+    "adapter_pid", "adapter_image", "adapter_process_started_at", "excel_image",
+    # Keep the old, public ``failure_code`` as the compact recovery code, but
+    # retain both causes.  Cleanup must never overwrite the primary failure.
+    "primary_failure_stage", "primary_failure_code", "primary_failure_message",
+    "primary_failure_hresult", "primary_failure_winerror",
+    "cleanup_failure_stage", "cleanup_failure_code", "cleanup_failure_message",
+    "cleanup_failure_hresult", "cleanup_failure_winerror",
+})
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 
 
@@ -140,7 +155,10 @@ def load_seed_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[str, Any]:
     required = {"schema_version", "seed_revision", "entry_count", "sha256"}
     if not isinstance(manifest, dict) or set(manifest) != required:
         raise RegistryCorruptError("Manifest поставляемого справочника имеет неподдерживаемый формат")
-    if manifest["schema_version"] != SCHEMA_VERSION or not isinstance(manifest["entry_count"], int):
+    # Release seeds are immutable.  A newer runtime can promote a verified
+    # v2 seed to its writable v3 runtime copy; it must not reject the release
+    # artifact merely because the runtime has a later migration.
+    if manifest["schema_version"] not in {SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION} or not isinstance(manifest["entry_count"], int):
         raise RegistryCorruptError("Manifest поставляемого справочника несовместим с программой")
     if not isinstance(manifest["seed_revision"], str) or not isinstance(manifest["sha256"], str):
         raise RegistryCorruptError("Manifest поставляемого справочника имеет неверные поля")
@@ -201,7 +219,7 @@ class RegistryStorage:
         # Seed bytes are a release artifact, so its timestamps must not make a
         # rebuild differ.  Runtime records continue to use real UTC time.
         storage._fixed_now = "2026-08-18T00:00:00Z"
-        storage._create_schema(seed_revision=seed_revision)
+        storage._create_schema(seed_revision=seed_revision, schema_version=SEED_SCHEMA_VERSION)
         for entry in entries:
             storage._insert_seed_entry(entry)
         storage.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -267,14 +285,17 @@ class RegistryStorage:
         version = meta_rows[0]["schema_version"]
         if not isinstance(version, int) or isinstance(version, bool):
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
-        if version > SCHEMA_VERSION:
+        if version > RUNTIME_SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, SCHEMA_VERSION}:
-            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
+        if version not in {0, 1, 2, RUNTIME_SCHEMA_VERSION}:
+            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {RUNTIME_SCHEMA_VERSION}")
         self._validate_schema(version)
-        if version < SCHEMA_VERSION:
+        if version < RUNTIME_SCHEMA_VERSION:
             if self.read_only:
-                raise RegistrySchemaError("Поставляемый справочник имеет устаревшую схему")
+                # A read-only release seed is only inspected during bootstrap.
+                # Its copied runtime is migrated before any journal consumer
+                # may use it.
+                return
             self._migrate(version)
         elif not self.read_only:
             self._ensure_unresolved_conflict_identity_index()
@@ -292,8 +313,10 @@ class RegistryStorage:
 
     def _validate_schema(self, version: int) -> None:
         required = dict(_REQUIRED_SCHEMA_COLUMNS)
-        if version == SCHEMA_VERSION:
+        if version >= 2:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS
+        if version >= 3:
+            required["workbook_operation_journal"] |= _V3_JOURNAL_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -345,13 +368,31 @@ class RegistryStorage:
                 self.connection.execute("ROLLBACK")
             raise
 
-    def _create_schema(self, *, seed_revision: str) -> None:
+    def _create_schema(self, *, seed_revision: str, schema_version: int = RUNTIME_SCHEMA_VERSION) -> None:
+        if schema_version not in {SEED_SCHEMA_VERSION, RUNTIME_SCHEMA_VERSION}:
+            raise RegistrySchemaError("Неподдерживаемая версия создаваемой схемы")
         now = getattr(self, "_fixed_now", utc_now())
+        v3_journal_columns = "" if schema_version < 3 else """
+                    adapter_pid INTEGER,
+                    adapter_image TEXT,
+                    adapter_process_started_at TEXT,
+                    excel_image TEXT,
+                    primary_failure_stage TEXT,
+                    primary_failure_code TEXT,
+                    primary_failure_message TEXT,
+                    primary_failure_hresult INTEGER,
+                    primary_failure_winerror INTEGER,
+                    cleanup_failure_stage TEXT,
+                    cleanup_failure_code TEXT,
+                    cleanup_failure_message TEXT,
+                    cleanup_failure_hresult INTEGER,
+                    cleanup_failure_winerror INTEGER,
+"""
         # sqlite3.executescript manages its own transaction boundary, so do
         # not wrap it in ``transaction()`` (which would otherwise try to
         # commit a transaction that executescript already closed).
         self.connection.executescript(
-            """
+            f"""
                 CREATE TABLE registry_meta (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     schema_version INTEGER NOT NULL,
@@ -434,7 +475,7 @@ class RegistryStorage:
                     excel_process_started_at TEXT,
                     excel_build TEXT,
                     phase TEXT NOT NULL,
-                    failure_code TEXT,
+                    failure_code TEXT,{v3_journal_columns}
                     capability_finalized INTEGER NOT NULL DEFAULT 0 CHECK (capability_finalized IN (0, 1)),
                     capability_finalized_at TEXT,
                     binding_finalized INTEGER NOT NULL DEFAULT 0 CHECK (binding_finalized IN (0, 1)),
@@ -460,14 +501,14 @@ class RegistryStorage:
         with self.transaction() as connection:
             connection.execute(
                 "INSERT INTO registry_meta VALUES (1, ?, ?, 0, ?, ?)",
-                (SCHEMA_VERSION, seed_revision, now, now),
+                (schema_version, seed_revision, now, now),
             )
 
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1}:
-            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
+        if version not in {0, 1, 2}:
+            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {RUNTIME_SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -490,6 +531,8 @@ class RegistryStorage:
         self.connection.execute("PRAGMA synchronous=FULL")
         with self.transaction() as connection:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(workbook_operation_journal)")}
+            # v1 -> v2 finalization evidence.  The operation is deliberately
+            # idempotent so a v0 fixture with later columns can still recover.
             for flag in ("capability", "binding", "history", "report"):
                 column = f"{flag}_finalized_at"
                 if column not in columns:
@@ -532,11 +575,35 @@ class RegistryStorage:
                 "ON registry_conflicts(seed_entry_id, IFNULL(construction_id, ''), kind) "
                 "WHERE resolved_at IS NULL"
             )
+            # v3 makes the native Excel ownership hand-off durable before the
+            # helper may receive its ACK.  These columns remain nullable for
+            # historical generic journal operations; only the v3 ownership
+            # transition requires the complete identity set.
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(workbook_operation_journal)")}
+            v3_columns = {
+                "adapter_pid": "INTEGER",
+                "adapter_image": "TEXT",
+                "adapter_process_started_at": "TEXT",
+                "excel_image": "TEXT",
+                "primary_failure_stage": "TEXT",
+                "primary_failure_code": "TEXT",
+                "primary_failure_message": "TEXT",
+                "primary_failure_hresult": "INTEGER",
+                "primary_failure_winerror": "INTEGER",
+                "cleanup_failure_stage": "TEXT",
+                "cleanup_failure_code": "TEXT",
+                "cleanup_failure_message": "TEXT",
+                "cleanup_failure_hresult": "INTEGER",
+                "cleanup_failure_winerror": "INTEGER",
+            }
+            for column, sql_type in v3_columns.items():
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE workbook_operation_journal ADD COLUMN {column} {sql_type}")
             connection.execute(
                 "UPDATE registry_meta SET schema_version=?, updated_at=? WHERE id=1",
-                (SCHEMA_VERSION, utc_now()),
+                (RUNTIME_SCHEMA_VERSION, utc_now()),
             )
-        self._validate_schema(SCHEMA_VERSION)
+        self._validate_schema(RUNTIME_SCHEMA_VERSION)
 
     @staticmethod
     def _verify_migration_backup(path: Path, version: int) -> None:

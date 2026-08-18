@@ -8,6 +8,8 @@ from rns_import_server.registry_storage import RegistryConflictError, RegistryEr
 from rns_import_server.workbook_operation_journal import (
     JournalTransitionError,
     PHASE_BACKUP_VERIFIED,
+    PHASE_EXCEL_LAUNCHING,
+    PHASE_EXCEL_OWNED,
     PHASE_FINALIZED,
     PHASE_NATIVE,
     PHASE_PUBLISHED,
@@ -15,6 +17,26 @@ from rns_import_server.workbook_operation_journal import (
     PHASE_VALIDATED,
     WorkbookOperationJournal,
 )
+
+
+def _adapter_lease() -> dict[str, object]:
+    return {
+        "excel_adapter": "powershell-com",
+        "adapter_pid": 101,
+        "adapter_image": r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "adapter_process_started_at": "2026-08-18T01:02:03Z",
+    }
+
+
+def _owned_lease() -> dict[str, object]:
+    return {
+        **_adapter_lease(),
+        "excel_pid": 202,
+        "excel_hwnd": 303,
+        "excel_image": r"C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+        "excel_process_started_at": "2026-08-18T01:02:04Z",
+        "excel_build": "16.0.12345",
+    }
 
 
 def _operation(journal: WorkbookOperationJournal, storage: RegistryStorage) -> str:
@@ -218,3 +240,79 @@ def test_manual_repair_is_visible_and_requires_failure_evidence(tmp_path: Path) 
         assert [item.operation_id for item in journal.incomplete()] == [operation_id]
     finally:
         storage.close()
+
+
+def test_v3_lease_is_nonce_bound_idempotent_and_ack_requires_owned_identity(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED,
+                           hashes={"pre_hash": "pre", "staged_hash": "staged"})
+        with pytest.raises(JournalTransitionError):
+            journal.authorize_excel_ack(operation_id, owner_id="owner-1", pair_nonce="nonce-1")
+        with pytest.raises(RegistryError):
+            journal.record_excel_launching(operation_id, owner_id="owner-1", pair_nonce="nonce-1",
+                                           lease={"excel_adapter": "powershell-com"})
+        launching = journal.record_excel_launching(
+            operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=_adapter_lease()
+        )
+        assert launching.phase == PHASE_EXCEL_LAUNCHING
+        assert journal.record_excel_launching(
+            operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=_adapter_lease()
+        ).phase == PHASE_EXCEL_LAUNCHING
+        with pytest.raises(RegistryConflictError):
+            journal.record_excel_launching(operation_id, owner_id="owner-1", pair_nonce="other", lease=_adapter_lease())
+        with pytest.raises(RegistryError):
+            journal.record_excel_owned(
+                operation_id, owner_id="owner-1", pair_nonce="nonce-1",
+                lease={**_owned_lease(), "excel_image": "not-excel.exe"},
+            )
+        assert journal.get(operation_id).phase == PHASE_EXCEL_LAUNCHING  # type: ignore[union-attr]
+        owned = journal.record_excel_owned(
+            operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=_owned_lease()
+        )
+        assert owned.phase == PHASE_EXCEL_OWNED
+        assert journal.authorize_excel_ack(operation_id, owner_id="owner-1", pair_nonce="nonce-1")["excel_pid"] == 202
+        with pytest.raises(JournalTransitionError):
+            journal.record_excel_launching(operation_id, owner_id="owner-1", pair_nonce="nonce-1", lease=_adapter_lease())
+        with pytest.raises(RegistryConflictError):
+            journal.record_excel_owned(
+                operation_id, owner_id="owner-1", pair_nonce="nonce-1",
+                lease={**_owned_lease(), "excel_pid": 204},
+            )
+    finally:
+        storage.close()
+
+
+def test_v3_structured_primary_and_cleanup_failure_survive_restart(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        failed = journal.record_failure(
+            operation_id,
+            expected_phase="planned",
+            primary_failure={"stage": "excel_open", "code": "com_open_failed", "message": "COM open failed",
+                             "hresult": -2147352567, "winerror": 5},
+            cleanup_failure={"stage": "cleanup", "code": "excel_terminate_timeout", "message": "wait timed out",
+                             "hresult": None, "winerror": 1460},
+        )
+        assert failed.phase == "manual_repair"
+        assert failed["failure_code"] == "com_open_failed"
+        assert failed["primary_failure_hresult"] == -2147352567
+        assert failed["cleanup_failure_winerror"] == 1460
+        with pytest.raises(RegistryConflictError):
+            journal.record_failure(operation_id, expected_phase="planned",
+                                   primary_failure={"stage": "other", "code": "replacement"})
+        storage.close()
+        restarted = RegistryStorage(storage.path)
+        try:
+            restored = WorkbookOperationJournal(restarted).get(operation_id)
+            assert restored and restored["primary_failure_code"] == "com_open_failed"
+            assert restored["cleanup_failure_code"] == "excel_terminate_timeout"
+        finally:
+            restarted.close()
+    finally:
+        if storage.connection:
+            pass
