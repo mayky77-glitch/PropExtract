@@ -14,7 +14,7 @@ from typing import Iterable
 from rns_import_server.normalization import canonical_rns_identity, field_comparison_equal
 
 
-_CODE_PREFIX = re.compile(r"^\s*(\d{3}-\d{7})(?:-(\d+))?\s*$")
+_FULL_OBJECT_CODE = re.compile(r"^(\d{3}-\d{7})\.\d{4}$")
 _EMPTY = (None, "")
 
 
@@ -34,6 +34,7 @@ class WorkbookGroupCode(StrEnum):
     STALE_WORKBOOK = "stale_workbook"
     STALE_REGISTRY = "stale_registry"
     NO_SAFE_INSERTION_POINT = "no_safe_insertion_point"
+    HEADER_CATALOGUE_REQUIRED = "header_catalogue_required"
 
 
 @dataclass(frozen=True)
@@ -134,9 +135,9 @@ def _is_header(row: SheetRow, official_name: str) -> bool:
 
 
 def _canonical_child_prefix(value: object) -> str | None:
-    if not isinstance(value, str) or value.strip() in {"", "-"}:
+    if not isinstance(value, str) or value in {"", "-"}:
         return None
-    match = _CODE_PREFIX.fullmatch(value)
+    match = _FULL_OBJECT_CODE.fullmatch(value)
     return match.group(1) if match else None
 
 
@@ -168,7 +169,7 @@ def resolve_workbook_group(
     rns: object,
     object_code: str | None = None,
     object_name: str | None = None,
-    official_names: Iterable[str] = (),
+    official_names: Iterable[str] | None = None,
     expected_workbook_identity: str | None = None,
     expected_workbook_hash: str | None = None,
     expected_registry_generation: int | None = None,
@@ -191,7 +192,14 @@ def resolve_workbook_group(
         return _resolution(WorkbookGroupCode.INVALID_RNS, **base)
 
     rows = tuple(sorted(projection.rows, key=lambda row: row.number))
-    known_headers = frozenset(name for name in (*official_names, official_name) if isinstance(name, str))
+    # A complete immutable catalogue is required to distinguish a real next
+    # construction header from ordinary D text.  Guessing it would allow a
+    # later block to be swallowed into the current one.
+    if official_names is None:
+        return _resolution(WorkbookGroupCode.HEADER_CATALOGUE_REQUIRED, **base)
+    known_headers = frozenset(name for name in official_names if isinstance(name, str))
+    if not known_headers or official_name not in known_headers:
+        return _resolution(WorkbookGroupCode.HEADER_CATALOGUE_REQUIRED, **base)
     headers = [index for index, row in enumerate(rows) if _is_header(row, official_name)]
     if not headers:
         return _resolution(WorkbookGroupCode.BLOCK_MISSING, **base)

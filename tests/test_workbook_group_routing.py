@@ -30,7 +30,7 @@ def header(number: int, name=NAME) -> SheetRow:
 
 
 def test_adjacent_groups_use_exact_single_header_and_insert_before_next_header() -> None:
-    result = resolve(projection(header(4), row(5, c="123-1234567-0001", d="Есть"), header(6, "Стройка Б")))
+    result = resolve(projection(header(4), row(5, c="123-1234567.0001", d="Есть"), header(6, "Стройка Б")))
     assert result.code is WorkbookGroupCode.INSERTION_PLANNED
     assert result.block_start == 4 and result.block_end == 5
     assert result.plan is not None and result.plan.target_row == 6
@@ -59,7 +59,7 @@ def test_outside_only_duplicate_inside_and_absence_have_distinct_results() -> No
 
 
 def test_foreign_structured_c_conflicts_but_blank_and_legacy_dash_are_allowed() -> None:
-    foreign = resolve(projection(header(4), row(5, c="999-1234567-0001"), header(6, "Другая")))
+    foreign = resolve(projection(header(4), row(5, c="999-1234567.0001"), header(6, "Другая")))
     allowed = resolve(projection(header(4), row(5), row(6, c="-"), header(10, "Другая")))
     assert foreign.code is WorkbookGroupCode.BLOCK_CODE_CONFLICT
     assert allowed.code is WorkbookGroupCode.INSERTION_PLANNED
@@ -92,8 +92,22 @@ def test_arbitrary_blank_shape_row_is_not_a_header_boundary() -> None:
     assert result.plan is not None and result.plan.target_row == 10
 
 
+def test_header_catalogue_is_required_and_prevents_adjacent_group_swallowing() -> None:
+    sheet = projection(header(4), header(6, "Другая"), row(7, f=RNS))
+    missing = resolve_workbook_group(
+        sheet, construction_id="a", official_name=NAME, code_prefix=CODE, rns=RNS,
+    )
+    empty = resolve_workbook_group(
+        sheet, construction_id="a", official_name=NAME, code_prefix=CODE, rns=RNS, official_names=(),
+    )
+    complete = resolve(sheet)
+    assert missing.code is WorkbookGroupCode.HEADER_CATALOGUE_REQUIRED
+    assert empty.code is WorkbookGroupCode.HEADER_CATALOGUE_REQUIRED
+    assert complete.code is WorkbookGroupCode.RNS_WRONG_BLOCK
+
+
 def test_repeated_code_allows_equivalent_name_but_rejects_different_name_and_keeps_leading_zeroes() -> None:
-    code = "123-1234567-0001"
+    code = "123-1234567.0001"
     allowed = resolve(projection(header(4), row(5, c=code, d="Объект Ёлка"), header(10, "Другая")), object_code=code, object_name="объект елка")
     conflicting = resolve(projection(header(4), row(5, c=code, d="Другой объект"), header(10, "Другая")), object_code=code, object_name="Объект Ёлка")
     assert allowed.code is WorkbookGroupCode.INSERTION_PLANNED
@@ -110,7 +124,7 @@ def test_plan_includes_stale_revalidation_identity_and_rejects_stale_input() -> 
 
 
 def test_side_effect_free_projection_and_raw_existing_values_are_preserved() -> None:
-    source = projection(header(4), row(5, a="01", c="123-1234567-0001", d="Объект", f="№RU-12345678-09-2026"), header(10, "Другая"))
+    source = projection(header(4), row(5, a="01", c="123-1234567.0001", d="Объект", f="№RU-12345678-09-2026"), header(10, "Другая"))
     before = source.rows
     result = resolve(source)
     assert source.rows == before

@@ -78,3 +78,9 @@ Set card to `review`. Record requested vs actual route, feature SHA, changed pat
 - Checks: `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m pytest -q tests/test_workbook_group_routing.py tests/test_construction_registry.py` — `18 passed`; `'/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python' -m compileall -q rns_import_server tests` — passed; `git diff --check` — passed.
 - Remaining risk: caller must project authoritative construction-header names and revalidate plan identity/hash/generation under publication lock; native mutation remains Wave 2B scope.
 - Proposed knowledge delta: record `workbook_groups.py` as pure A:F semantic block resolver; no `knowledge/INDEX.md` exists in this frozen worktree, so no shared vault index changed.
+
+## Review remediation — 2026-08-18
+
+- Full C recognition is now exact `^[0-9]{3}-[0-9]{7}\.[0-9]{4}$`; foreign `999-1234567.0001` is a structural conflict and leading-zero suffixes remain raw strings.
+- An immutable official-header catalogue is required. Missing/empty/incomplete catalogues return `header_catalogue_required`; a complete catalogue keeps adjacent-group RNS as `rns_wrong_block`.
+- Checks: focused registry acceptance — `19 passed`; compileall and whitespace checks — passed.
