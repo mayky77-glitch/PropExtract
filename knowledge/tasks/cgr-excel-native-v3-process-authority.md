@@ -1,6 +1,6 @@
 ---
 card_id: cgr-excel-native-v3-process-authority
-status: frozen
+status: review
 version: 1
 work_id: cgr-excel-native-v3-20260818
 task_id: windows-process-authority-v1
@@ -40,5 +40,11 @@ acceptance_commands:
 - Verify Excel lease exactly against PID/HWND/image=`EXCEL.EXE`/creation time; reject mismatch, access denied and PID reuse.
 - Terminator is mandatory. Revalidate immediately before bounded `TerminateProcess` + wait; never terminate on incomplete/mismatched authority and never touch user Excel.
 - Tests inject facade outcomes for success, mismatch, reused PID, access denied, vanished process, timeout and handle cleanup.
+
+## Handoff evidence
+
+- P4 developer route completed with injectable facade only; no adapter/publisher edits.
+- Passed: `pytest -q tests/test_windows_process_authority.py` (6 passed), compileall and diff check.
+- Windows API calls are simulated by the facade on this non-Windows host; real Windows validation remains a later gate.
 
 Set card `review`, record immutable feature SHA/evidence/risks; normal commit/push only. No merge/amend/rebase/force-push.
