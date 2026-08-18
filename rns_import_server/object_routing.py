@@ -123,7 +123,8 @@ def _raw_tail(raw_object: str, offsets: tuple[int, ...], prefix_length: int) -> 
 
     while position < len(tail) and tail[position].isspace():
         position += 1
-    if position < len(tail) and unicodedata.normalize("NFKC", tail[position]) in _BOUNDARY_CHARS:
+    boundary = unicodedata.normalize("NFKC", tail[position]) if position < len(tail) else ""
+    if boundary and all(character in _BOUNDARY_CHARS for character in boundary):
         position += 1
         while position < len(tail) and tail[position].isspace():
             position += 1

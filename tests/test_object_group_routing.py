@@ -40,6 +40,10 @@ def test_nfkc_equivalent_matched_span_and_single_boundary_preserve_raw_tail() ->
     fullwidth = route_object("Йод：Объект", snapshot(item))
     exclamation = route_object("Йод! Объект", snapshot(item))
     hyphen = route_object("Йод: -Объект", snapshot(item))
+    expanded_boundaries = tuple(
+        route_object(f"Йод{boundary}Объект", snapshot(item))
+        for boundary in ("…", "‥", "︰")
+    )
 
     assert decomposed.code is ObjectRouteCode.ROUTED
     assert decomposed.raw_object == "И\u0306од: Объект"
@@ -47,6 +51,7 @@ def test_nfkc_equivalent_matched_span_and_single_boundary_preserve_raw_tail() ->
     assert fullwidth.object_tail == "Объект"
     assert exclamation.object_tail == "Объект"
     assert hyphen.object_tail == "-Объект"
+    assert all(route.object_tail == "Объект" for route in expanded_boundaries)
 
 
 def test_prefix_like_text_is_not_a_match_and_empty_tail_fails_closed() -> None:
