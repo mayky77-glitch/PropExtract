@@ -33,4 +33,11 @@ Parse namespace-aware ContentTypes and every `.rels`; canonicalize part names an
 - Tests cover aliases, missing targets, malformed XML, strict external URIs, malformed percent escapes and backslashes. Focused `9 passed`; full `295 passed, 1 existing synthetic-x14 warning`; compileall/diff pass.
 - Risk: resolver intentionally validates package/URI semantics only; content-type application semantics remain downstream responsibility.
 
+## P6 recovery evidence
+
+- Immutable recovery feature SHA: `16b1f05077771c4ad981358d82c290d50528d4ea`.
+- Relationship IDs require nonblank XML-ID spelling; relationship types require valid absolute URIs. Non-root relationship parts require an existing source part, and unexpected structural children/namespaces reject deterministically.
+- URI parsing is centralized: URI parser/port failures are typed, external scheme payload and authority are validated, and decoded C0/DEL/C1, encoded separators and traversal reject.
+- Focused `9 passed`; full `295 passed, 1 existing synthetic-x14 warning`; compileall and diff check pass. Residual scope remains semantic use of resolved package contents.
+
 Tests must exercise valid contained `..`, escape, encoded traversal, backslash, controls, malformed percent, duplicate aliases, missing parts and external URI edge cases. Set card review, test, normal human-authored commit/push; no merge/amend/rebase/force-push.
