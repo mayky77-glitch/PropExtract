@@ -51,3 +51,11 @@ Set card `review`, record immutable feature SHA/evidence/risk; normal commit/pus
 - Added namespace-aware direct OPC reader and synthetic fixtures. Sheet targets resolve from relationships to `xl/worksheets/sheet6.xml` and `sheet104.xml`; semantic boundaries cover rows `6`, `10`, and `104` with two distinct sheets.
 - Acceptance: focused `5 passed`; full suite `291 passed, 1 warning` (existing OpenPyXL synthetic-x14 warning); compileall and `git diff --check` pass.
 - Residual risk: reader intentionally reports, rather than interprets, unsupported worksheet features such as conditional formatting; package digests remain evidence only.
+
+## P6 recovery evidence
+
+- Immutable recovery feature SHA: `69ff327f64a994875ba3cb42c38d1ce46ec64efb`.
+- RFC3986/OPC internal target normalization now permits package-contained `..` segments and rejects package escape; external relationship targets must be nonempty, syntactically valid absolute URIs.
+- Relationships, hyperlinks, all XML parts, style components and cell/row/column style indexes are validated with deterministic, part-specific findings. Effective cell styles resolve cell, row, column, then XF zero.
+- Three synthetic namespace-valid two-sheet packages cover boundaries `6`, `10`, and `104`; focused matrix `16 passed`, full suite `302 passed, 1 existing synthetic-x14 warning`, compileall and diff check pass.
+- Residual risk unchanged: unsupported features are findings rather than interpreted rules; unmodeled OOXML extensions retain no semantic meaning in this reader.
