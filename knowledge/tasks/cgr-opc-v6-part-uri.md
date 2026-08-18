@@ -1,6 +1,6 @@
 ---
 card_id: cgr-opc-v6-part-uri
-status: frozen
+status: review
 version: 1
 work_id: cgr-opc-package-resolver-v6-20260818
 task_id: part-uri-canonicalizer-v1
@@ -21,3 +21,9 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_part_uri.py", "python
 # OPC part URI canonicalizer v1
 
 Return typed raw/canonical/relative forms. Normalize percent-encoded unreserved aliases before collision/lookup; reject encoded separators/traversal, package-root escape, raw/decoded C0/DEL/C1, slash/backslash misuse, malformed percent and ambiguous Unicode. Resolution is idempotent and source-relative. Tests assert exact collision/error tuples, Unicode, case behavior and all V5 residuals. No V5 ancestry/copy. Human commit/push; no merge/rebase/amend/force.
+
+## Implementation evidence
+
+- Added typed raw, canonical and relative URI forms plus stable `OPCPartURIError` and collision tuples.
+- Unreserved escapes normalize before lookup (`%77` equals `w`); encoded separators, controls, malformed escapes, non-NFC/format Unicode and unsafe path topology fail closed.
+- Focused pytest, compileall and whitespace-diff checks recorded with feature handoff.
