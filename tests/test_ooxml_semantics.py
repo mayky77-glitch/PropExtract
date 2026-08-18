@@ -8,6 +8,7 @@ def test_sanitized_package_inventory_and_mapping(tmp_path, row):
     result=inventory(path)
     assert result.sheets and map_cell("A6",row) == ("A7" if row == 6 else "A6")
 
-def test_formula_fails_closed_for_cross_sheet_or_structured_refs():
-    for formula in ("='Other'!A1", "=Table1[#Data]"):
+def test_formula_maps_quoted_sheet_and_fails_closed_for_structured_refs():
+    assert map_formula("='Other sheet'!$A6", 6) == "='Other sheet'!$A7"
+    for formula in ("=Table1[#Data]", "=[external.xlsx]Sheet1!A1"):
         with pytest.raises(OOXMLSemanticError): map_formula(formula, 6)

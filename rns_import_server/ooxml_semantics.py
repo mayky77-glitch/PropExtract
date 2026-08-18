@@ -6,7 +6,7 @@ import hashlib, re, zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-_CELL = re.compile(r"(?<![A-Z0-9_])\$?([A-Z]{1,3})\$?(\d+)")
+_CELL = re.compile(r"(?<![A-Z0-9_])(?P<colabs>\$?)(?P<col>[A-Z]{1,3})(?P<rowabs>\$?)(?P<row>\d+)")
 
 
 class OOXMLSemanticError(RuntimeError): pass
@@ -28,14 +28,17 @@ class OOXMLInventory:
 def map_cell(reference: str, insertion_row: int) -> str:
     match = _CELL.fullmatch(reference)
     if not match: raise OOXMLSemanticError("ooxml_cell_reference_invalid")
-    column, row = match.groups(); value = int(row)
-    return f"{column}{value if value < insertion_row else value + 1}"
+    value = int(match.group("row"))
+    return f"{match.group('colabs')}{match.group('col')}{match.group('rowabs')}{value if value < insertion_row else value + 1}"
 
 
 def map_formula(formula: str, insertion_row: int) -> str:
-    if "[" in formula or "!" in formula or "[" in formula or "[#" in formula:
+    if "[" in formula or "[#" in formula or ":" in formula and formula.count("!") > 1:
         raise OOXMLSemanticError("ooxml_formula_unsupported_reference")
-    return _CELL.sub(lambda item: f"{item.group(1)}{int(item.group(2)) if int(item.group(2)) < insertion_row else int(item.group(2)) + 1}", formula)
+    def replace(item: re.Match[str]) -> str:
+        value = int(item.group("row")); mapped = value if value < insertion_row else value + 1
+        return f"{item.group('colabs')}{item.group('col')}{item.group('rowabs')}{mapped}"
+    return _CELL.sub(replace, formula)
 
 
 def inventory(path: Path) -> OOXMLInventory:
