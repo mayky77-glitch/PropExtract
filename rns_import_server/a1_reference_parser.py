@@ -275,6 +275,11 @@ def _qualified_reference(text: str, index: int) -> tuple[A1Reference, int] | Non
         raw, name, position = quoted
         if "[" in raw:
             raise UnsupportedReference("external_or_structured_reference")
+        # A single quoted token may encode a 3D span (``'First:Last'``).
+        # Reject decoded punctuation before constructing an A1Reference: its
+        # raw spelling would otherwise be rendered as a trusted sheet prefix.
+        if ":" in name:
+            raise UnsupportedReference("three_dimensional_reference")
         if position < len(text) and text[position] == ":":
             other_end = _consume_sheet_endpoint(text, position + 1)
             if other_end is not None and other_end < len(text) and text[other_end] == "!":

@@ -80,6 +80,28 @@ def test_every_quoted_unquoted_three_dimensional_span_is_rejected(formula: str) 
         parse_formula(formula)
 
 
+@pytest.mark.parametrize("formula", (
+    "='First:Last'!A10",
+    "='First : Last'!A10",
+    "='O''Brien:Last'!A10",
+))
+def test_single_quoted_3d_sheet_token_is_rejected_before_reference_construction(formula: str) -> None:
+    with pytest.raises(UnsupportedReference, match="three_dimensional_reference"):
+        parse_formula(formula)
+
+
+def test_single_quoted_3d_sheet_token_never_partially_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(FormulaAst, "render", lambda self: (_ for _ in ()).throw(AssertionError("rendered")))
+    with pytest.raises(UnsupportedReference, match="three_dimensional_reference"):
+        map_formula("=A6+'First:Last'!A10+B104", host_sheet="Target", target_sheet="Target", insertion_row=10)
+
+
+def test_ordinary_colon_free_quoted_sheet_name_still_roundtrips() -> None:
+    formula = "='O''Brien West'!A10"
+    assert parse_formula(formula).render() == formula
+    assert map_formula(formula, host_sheet="Host", target_sheet="O'Brien West", insertion_row=10) == "='O''Brien West'!A11"
+
+
 def test_unsupported_between_valid_references_never_reaches_render(monkeypatch: pytest.MonkeyPatch) -> None:
     def unexpected_render(self: FormulaAst) -> str:
         raise AssertionError("partial mapping attempted to render")
