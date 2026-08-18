@@ -1,6 +1,6 @@
 ---
 card_id: cgr-opc-v5-package-resolver
-status: frozen
+status: review
 version: 1
 work_id: cgr-opc-semantic-reader-v5-20260818
 task_id: package-relationship-resolver-v1
@@ -25,5 +25,12 @@ acceptance_commands:
 # Package relationship resolver v1
 
 Parse namespace-aware ContentTypes and every `.rels`; canonicalize part names and resolve internal targets against the source directory. Reject duplicate normalized parts, package-root escape, missing targets, invalid percent/control/backslash/URI syntax and malformed internal/external relationships with typed deterministic errors. External targets require a nonempty valid absolute URI and never become package parts. Preserve relationship type, mode, id and source. Do not reuse rejected V4 implementation.
+
+## Implementation evidence
+
+- Immutable feature SHA: `1a1640058ce4578efd25270b56b900032183c5e1`.
+- Namespace-aware Content Types and every relationship part are parsed. Internal URI targets resolve relative to their source; valid contained `..` normalizes, package escape and encoded traversal reject deterministically.
+- Tests cover aliases, missing targets, malformed XML, strict external URIs, malformed percent escapes and backslashes. Focused `9 passed`; full `295 passed, 1 existing synthetic-x14 warning`; compileall/diff pass.
+- Risk: resolver intentionally validates package/URI semantics only; content-type application semantics remain downstream responsibility.
 
 Tests must exercise valid contained `..`, escape, encoded traversal, backslash, controls, malformed percent, duplicate aliases, missing parts and external URI edge cases. Set card review, test, normal human-authored commit/push; no merge/amend/rebase/force-push.
