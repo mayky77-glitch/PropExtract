@@ -1,6 +1,6 @@
 ---
 card_id: cgr-ooxml-semantic-core-v4-a1-reference-parser
-status: frozen
+status: review
 version: 1
 work_id: cgr-ooxml-semantic-core-v4-20260818
 task_id: a1-reference-parser-v1
@@ -43,4 +43,13 @@ acceptance_commands:
 - Cases cover materially distinct 6/10/104 boundaries, local/quoted cross-sheet references, relative/absolute/mixed anchors, whole rows/columns, strings/functions/names and exact unsupported cases.
 - Do not copy or merge `9d9ef680`, `725d3c28`, or their implementation.
 
-Set card `review`, record immutable feature SHA/evidence/risk; normal commit/push only. No merge/amend/rebase/force-push.
+## Implementation evidence
+
+- Feature SHA: `3f586c22f29fc55792c19b38f2b8063e095c5bee`.
+- Immutable lexer/AST tokens preserve exact source bytes when no map applies. Mapping covers cell/range/whole-row/whole-column boundaries at 6, 10 and 104, anchors, host sheet and quoted/unquoted target sheet semantics.
+- External workbook, 3D and structured/table forms raise typed `UnsupportedReference` during parsing before any mapped formula is rendered; strings are opaque.
+- Validation: focused `13 passed`; full `299 passed, 1 warning` (existing OpenPyXL x14 warning); compileall and `git diff --check` pass.
+
+## Residual risk
+
+- This v1 contract intentionally rejects reference dialects outside A1. Later OOXML integration must surface that typed unsupported state rather than attempting a text fallback.
