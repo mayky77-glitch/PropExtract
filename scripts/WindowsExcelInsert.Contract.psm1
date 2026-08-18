@@ -12,21 +12,26 @@ function Write-AtomicContractJson {
     $temporary = "$Path.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
     $encoding = [System.Text.UTF8Encoding]::new($false)
     $stream = $null
+    $writer = $null
     try {
         $stream = [System.IO.FileStream]::new($temporary, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         $writer = [System.IO.StreamWriter]::new($stream, $encoding, 4096, $true)
-        try { $writer.Write((ConvertTo-ContractJson $Value)); $writer.Flush(); $stream.Flush($true) }
-        finally { $writer.Dispose() }
+        $writer.Write((ConvertTo-ContractJson $Value)); $writer.Flush(); $stream.Flush($true)
+        # Windows cannot atomically replace an open file. Both writers must
+        # be closed after Flush(true) and before Move-Item.
+        $writer.Dispose(); $writer = $null
+        $stream.Dispose(); $stream = $null
         Move-Item -LiteralPath $temporary -Destination $Path -Force
     }
     finally {
+        if ($writer) { $writer.Dispose() }
         if ($stream) { $stream.Dispose() }
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Write-ContractProgress {
-    param($Data, [Parameter(Mandatory = $true)][string]$Stage, [hashtable]$Extra = @{}) 
+    param($Data, [Parameter(Mandatory = $true)][string]$Stage, [hashtable]$Extra = @{})
     if ($Data.PSObject.Properties.Name -contains 'progress_file' -and $Data.progress_file) {
         $event = @{ contract_version = 'powershell-row-contract-v3'; kind = 'progress'; stage = $Stage; pid = $PID; hresult = $null; winerror = $null; primary = $null; cleanup = $null }
         foreach ($entry in $Extra.GetEnumerator()) { $event[$entry.Key] = $entry.Value }
@@ -84,21 +89,26 @@ function Get-ProcessIdentity {
 
 function Test-RowContractRequest {
     param([Parameter(Mandatory = $true)]$Data)
-    $required = @('operation_id','owner_nonce','pair_nonce','control','candidate','sheet','insertion_row','group_start_row','group_end_row','expected_next_header_row','expected_next_header_value','source_row','template_row','fields','formula_y_r1c1','formula_z_r1c1','hyperlink','ordinal_map')
+    $required = @('operation_id','owner_nonce','pair_nonce','lease_file','ack_file','control','candidate','sheet','insertion_row','group_start_row','group_end_row','expected_next_header_row','expected_next_header_value','source_row','template_row','fields','formula_y_r1c1','formula_z_r1c1','hyperlink','ordinal_map')
+    $allowed = @($required + @('progress_file','result_file','error_file'))
+    foreach ($property in $Data.PSObject.Properties) { if ($allowed -notcontains $property.Name) { throw "row_contract_unknown_$($property.Name)" } }
     foreach ($name in $required) {
         if (-not ($Data.PSObject.Properties.Name -contains $name) -or $null -eq $Data.$name -or "$($Data.$name)" -eq '') { throw "row_contract_missing_$name" }
     }
     foreach ($name in @('insertion_row','group_start_row','group_end_row','expected_next_header_row','source_row','template_row')) {
         if ([int]$Data.$name -lt 1) { throw "row_contract_invalid_$name" }
     }
-    if ([int]$Data.group_start_row -gt [int]$Data.insertion_row -or [int]$Data.insertion_row -ge [int]$Data.expected_next_header_row -or [int]$Data.expected_next_header_row -gt [int]$Data.group_end_row + 1) { throw 'row_contract_group_bounds_invalid' }
+    if ([int]$Data.group_start_row -gt [int]$Data.insertion_row -or [int]$Data.insertion_row -ge [int]$Data.expected_next_header_row -or [int]$Data.expected_next_header_row -ne [int]$Data.group_end_row + 1) { throw 'row_contract_group_bounds_invalid' }
     if ([int]$Data.source_row -lt [int]$Data.group_start_row -or [int]$Data.source_row -gt [int]$Data.group_end_row -or [int]$Data.template_row -lt [int]$Data.group_start_row -or [int]$Data.template_row -gt [int]$Data.group_end_row) { throw 'row_contract_source_template_invalid' }
     foreach ($property in $Data.fields.PSObject.Properties) {
+        if ($property.Name -notmatch '^[0-9]+$') { throw 'row_contract_field_not_allowed' }
         $column = [int]$property.Name
         if ((($column -lt 1) -or ($column -gt 24)) -and $column -ne 27) { throw 'row_contract_field_not_allowed' }
     }
+    $ordinalRows = [Collections.Generic.HashSet[int]]::new()
     foreach ($entry in @($Data.ordinal_map)) {
         if ($null -eq $entry.row -or $null -eq $entry.ordinal -or [int]$entry.row -lt [int]$Data.group_start_row -or [int]$entry.row -gt [int]$Data.group_end_row + 1) { throw 'row_contract_ordinal_map_invalid' }
+        if (-not $ordinalRows.Add([int]$entry.row)) { throw 'row_contract_ordinal_map_duplicate' }
     }
 }
 
@@ -133,56 +143,62 @@ function Get-PostInsertRow {
 function Invoke-ExcelRowContract {
     param([Parameter(Mandatory = $true)]$Data, [scriptblock]$ExcelFactory = { New-Object -ComObject Excel.Application })
     Test-RowContractRequest $Data
+    $proxies = [Collections.Generic.List[object]]::new()
     $excel = $control = $candidate = $sheet = $null
-    $ownedExcel = $false
-    $stage = 'launch'
-    $primary = $cleanup = $null
+    $ownedExcel = $false; $stage = 'launch'; $primary = $cleanup = $null; $result = $null
+    function Add-ContractProxy($Value) { if ($null -ne $Value) { [void]$proxies.Add($Value) }; return $Value }
+    function Remember-Cleanup($ErrorRecord) { if ($null -eq $script:contractCleanup) { $script:contractCleanup = $ErrorRecord } }
     try {
         Write-ContractProgress $Data 'launch'
-        $excel = & $ExcelFactory
-        $ownedExcel = $true
+        $excel = Add-ContractProxy (& $ExcelFactory); $ownedExcel = $true
         $excel.Visible = $false; $excel.DisplayAlerts = $false; $excel.EnableEvents = $false; $excel.AskToUpdateLinks = $false
         $adapter = Get-ProcessIdentity -ProcessId $PID
         $excelProcessId = Get-HwndProcessId -Hwnd ([int64]$excel.Hwnd)
         $excelIdentity = Get-ProcessIdentity -ProcessId $excelProcessId
         if ((Split-Path -Leaf $excelIdentity.image).ToUpperInvariant() -ne 'EXCEL.EXE') { throw 'excel_lease_image_invalid' }
-        $lease = @{ operation_id = $Data.operation_id; owner_nonce = $Data.owner_nonce; pair_nonce = $Data.pair_nonce; excel_adapter = 'powershell-com'; adapter_pid = $adapter.pid; adapter_image = $adapter.image; adapter_process_started_at = $adapter.started_at; excel_pid = $excelIdentity.pid; excel_hwnd = [int64]$excel.Hwnd; excel_image = $excelIdentity.image; excel_process_started_at = $excelIdentity.started_at; excel_build = [string]$excel.Build }
+        $lease = @{ operation_id=$Data.operation_id; owner_nonce=$Data.owner_nonce; pair_nonce=$Data.pair_nonce; excel_adapter='powershell-com'; adapter_pid=$adapter.pid; adapter_image=$adapter.image; adapter_process_started_at=$adapter.started_at; excel_pid=$excelIdentity.pid; excel_hwnd=[int64]$excel.Hwnd; excel_image=$excelIdentity.image; excel_process_started_at=$excelIdentity.started_at; excel_build=[string]$excel.Build }
         Write-AtomicContractJson -Path ([string]$Data.lease_file) -Value $lease
-        Write-ContractProgress $Data 'lease_written'
-        $stage = 'ack'; Wait-ExactLeaseAck $Data
-        Write-ContractProgress $Data 'acknowledged'
-        # This is intentionally the first Workbooks.Open after the exact ACK.
-        $stage = 'open_control'; $control = $excel.Workbooks.Open([string]$Data.control, 0, $false)
-        $stage = 'calc_control'; $excel.CalculateFullRebuild(); $control.Save(); $control.Close($true); Release-ComProxy $control; $control = $null
-        $stage = 'open_candidate'; $candidate = $excel.Workbooks.Open([string]$Data.candidate, 0, $false)
-        $sheet = $candidate.Worksheets.Item([string]$Data.sheet)
-        if ([int]$sheet.Rows.Count -lt [int]$Data.expected_next_header_row) { throw 'row_contract_sheet_bounds_invalid' }
-        if ([string]$sheet.Cells.Item([int]$Data.expected_next_header_row, 1).Value2 -ne [string]$Data.expected_next_header_value) { throw 'row_contract_next_header_mismatch' }
-        $stage = 'insert'; $sheet.Rows.Item([int]$Data.insertion_row).Insert(-4121, 0)
-        Copy-RowPresentation -Sheet $sheet -SourceRow (Get-PostInsertRow ([int]$Data.source_row) ([int]$Data.insertion_row)) -TemplateRow (Get-PostInsertRow ([int]$Data.template_row) ([int]$Data.insertion_row)) -TargetRow ([int]$Data.insertion_row)
-        foreach ($property in $Data.fields.PSObject.Properties) { $sheet.Cells.Item([int]$Data.insertion_row, [int]$property.Name).Value2 = $property.Value }
-        $sheet.Cells.Item([int]$Data.insertion_row, 25).FormulaR1C1 = [string]$Data.formula_y_r1c1
-        $sheet.Cells.Item([int]$Data.insertion_row, 26).FormulaR1C1 = [string]$Data.formula_z_r1c1
-        $target = $sheet.Cells.Item([int]$Data.insertion_row, 23)
-        $sheet.Hyperlinks.Add($target, [string]$Data.hyperlink, '', '', [string]$Data.hyperlink) | Out-Null
-        foreach ($entry in @($Data.ordinal_map)) { $sheet.Cells.Item([int]$entry.row, 1).Value2 = [int]$entry.ordinal }
-        $stage = 'calc'; $excel.CalculateFullRebuild()
-        $stage = 'save'; $candidate.Save()
-        $result = @{ contract_version = 'powershell-row-contract-v3'; kind = 'result'; status = 'ok'; stage = 'complete'; excel_build = [string]$excel.Build; lease = $lease }
-        if ($Data.PSObject.Properties.Name -contains 'result_file' -and $Data.result_file) { Write-AtomicContractJson -Path ([string]$Data.result_file) -Value $result }
-        return $result
+        Write-ContractProgress $Data 'lease_written'; $stage = 'ack'; Wait-ExactLeaseAck $Data; Write-ContractProgress $Data 'acknowledged'
+        # The first Open is intentionally after durable nonce ACK.
+        $stage = 'open_control'; $control = Add-ContractProxy ($excel.Workbooks.Open([string]$Data.control, 0, $false))
+        $stage = 'calc_control'; $excel.CalculateFullRebuild(); $control.Save()
+        $stage = 'open_candidate'; $candidate = Add-ContractProxy ($excel.Workbooks.Open([string]$Data.candidate, 0, $false))
+        $sheet = Add-ContractProxy ($candidate.Worksheets.Item([string]$Data.sheet))
+        if ([int]$sheet.Rows.Count -lt ([int]$Data.group_end_row + 2)) { throw 'row_contract_sheet_capacity_invalid' }
+        $header = Add-ContractProxy ($sheet.Cells.Item([int]$Data.expected_next_header_row, 1))
+        if ([string]$header.Value2 -ne [string]$Data.expected_next_header_value) { throw 'row_contract_next_header_mismatch' }
+        $stage = 'insert'; $insertRow = Add-ContractProxy ($sheet.Rows.Item([int]$Data.insertion_row)); $insertRow.Insert(-4121, 0)
+        $source = Add-ContractProxy ($sheet.Rows.Item((Get-PostInsertRow ([int]$Data.source_row) ([int]$Data.insertion_row))))
+        $template = Add-ContractProxy ($sheet.Rows.Item((Get-PostInsertRow ([int]$Data.template_row) ([int]$Data.insertion_row))))
+        $insertRow.RowHeight = $source.RowHeight; $template.Copy(); $insertRow.PasteSpecial(-4122); $insertRow.PasteSpecial(6); $sheet.Application.CutCopyMode = $false
+        foreach ($property in $Data.fields.PSObject.Properties) { $field = Add-ContractProxy ($sheet.Cells.Item([int]$Data.insertion_row, [int]$property.Name)); $field.Value2 = $property.Value }
+        $formulaY = Add-ContractProxy ($sheet.Cells.Item([int]$Data.insertion_row, 25)); $formulaY.FormulaR1C1 = [string]$Data.formula_y_r1c1
+        $formulaZ = Add-ContractProxy ($sheet.Cells.Item([int]$Data.insertion_row, 26)); $formulaZ.FormulaR1C1 = [string]$Data.formula_z_r1c1
+        $target = Add-ContractProxy ($sheet.Cells.Item([int]$Data.insertion_row, 23)); $hyperlinks = Add-ContractProxy $sheet.Hyperlinks; $hyperlinks.Add($target, [string]$Data.hyperlink, '', '', [string]$Data.hyperlink) | Out-Null
+        foreach ($entry in @($Data.ordinal_map)) { $ordinal = Add-ContractProxy ($sheet.Cells.Item([int]$entry.row, 1)); $ordinal.Value2 = [int]$entry.ordinal }
+        $stage = 'calc'; $excel.CalculateFullRebuild(); $stage = 'save'; $candidate.Save()
+        $result = @{ contract_version='powershell-row-contract-v3'; kind='result'; status='ok'; stage='complete'; hresult=$null; winerror=$null; primary=$null; cleanup=$null; excel_build=[string]$excel.Build; lease=$lease }
     }
-    catch { $primary = $_; throw }
+    catch { $primary = $_ }
     finally {
-        try { if ($sheet) { Release-ComProxy $sheet }; if ($control) { $control.Close($false); Release-ComProxy $control }; if ($candidate) { $candidate.Close($false); Release-ComProxy $candidate }; if ($excel -and $ownedExcel) { $excel.Quit() }; if ($excel) { Release-ComProxy $excel } }
-        catch { $cleanup = $_ }
-        if ($cleanup -and -not $primary) { throw $cleanup }
-        if ($primary -and $cleanup) {
-            $envelope = Get-ExceptionEnvelope $primary $stage $cleanup
-            Write-ContractProgress $Data 'cleanup_failed' @{ primary = $envelope.primary; cleanup = $envelope.cleanup }
-            if ($Data.PSObject.Properties.Name -contains 'error_file' -and $Data.error_file) { Write-AtomicContractJson -Path ([string]$Data.error_file) -Value $envelope }
-        }
+        $script:contractCleanup = $null
+        foreach ($book in @($candidate, $control)) { if ($book) { try { $book.Close($false) } catch { Remember-Cleanup $_ } } }
+        if ($excel -and $ownedExcel) { try { $excel.Quit() } catch { Remember-Cleanup $_ } }
+        for ($index = $proxies.Count - 1; $index -ge 0; $index--) { try { Release-ComProxy $proxies[$index] } catch { Remember-Cleanup $_ } }
+        $cleanup = $script:contractCleanup; Remove-Variable -Name contractCleanup -Scope Script -ErrorAction SilentlyContinue
     }
+    if ($primary) {
+        $envelope = Get-ExceptionEnvelope $primary $stage $cleanup
+        if ($Data.PSObject.Properties.Name -contains 'error_file' -and $Data.error_file) { Write-AtomicContractJson -Path ([string]$Data.error_file) -Value $envelope }
+        $failure = [System.Exception]::new([string]$primary.Exception.Message); $failure.Data['contract_envelope'] = $envelope; throw $failure
+    }
+    if ($cleanup) {
+        $envelope = Get-ExceptionEnvelope $cleanup 'cleanup' $null
+        if ($Data.PSObject.Properties.Name -contains 'error_file' -and $Data.error_file) { Write-AtomicContractJson -Path ([string]$Data.error_file) -Value $envelope }
+        $failure = [System.Exception]::new([string]$cleanup.Exception.Message); $failure.Data['contract_envelope'] = $envelope; throw $failure
+    }
+    if ($Data.PSObject.Properties.Name -contains 'result_file' -and $Data.result_file) { Write-AtomicContractJson -Path ([string]$Data.result_file) -Value $result }
+    return $result
 }
 
 Export-ModuleMember -Function ConvertTo-ContractJson,Write-AtomicContractJson,Get-ExceptionEnvelope,Test-RowContractRequest,Wait-ExactLeaseAck,Invoke-ExcelRowContract

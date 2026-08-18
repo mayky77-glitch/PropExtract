@@ -39,16 +39,37 @@ def test_contract_validates_row_group_allowlists_and_performs_one_exact_insert()
     assert text.count(".Insert(-4121, 0)") == 1
     assert ".FormulaR1C1 = [string]$Data.formula_y_r1c1" in text
     assert ".FormulaR1C1 = [string]$Data.formula_z_r1c1" in text
-    assert "$sheet.Hyperlinks.Add($target" in text
+    assert "$hyperlinks.Add($target" in text
     assert "foreach ($entry in @($Data.ordinal_map))" in text
 
 
 def test_owned_cleanup_and_pester_fault_matrix_are_explicit() -> None:
     text = MODULE.read_text(encoding="utf-8")
-    assert "if ($excel -and $ownedExcel) { $excel.Quit() }" in text
+    assert "if ($excel -and $ownedExcel) { try { $excel.Quit() }" in text
     assert "Release-ComProxy" in text
     pester = PESTER.read_text(encoding="utf-8")
     for marker in ("6", "10", "104", "open", "insert", "calc", "save", "cleanup"):
         assert marker in pester
     assert "windows_powershell_contract_unavailable" in pester
     assert "Invoke-ExcelRowContract" in SCRIPT.read_text(encoding="utf-8")
+
+
+def test_recovery_defers_one_final_artifact_until_after_cleanup_and_preserves_envelope() -> None:
+    text = MODULE.read_text(encoding="utf-8")
+    atomic = text.index("function Write-AtomicContractJson")
+    assert text.index("$writer.Dispose(); $writer = $null", atomic) < text.index("Move-Item -LiteralPath $temporary", atomic)
+    assert text.index("$stream.Dispose(); $stream = $null", atomic) < text.index("Move-Item -LiteralPath $temporary", atomic)
+    assert "foreach ($book in @($candidate, $control))" in text
+    assert "for ($index = $proxies.Count - 1; $index -ge 0; $index--)" in text
+    assert "$failure.Data['contract_envelope'] = $envelope" in text
+    assert "$_ .Exception" not in SCRIPT.read_text(encoding="utf-8")
+    wrapper = SCRIPT.read_text(encoding="utf-8")
+    assert "$_.Exception.Data['contract_envelope']" in wrapper
+    assert "exit 2" in PESTER.read_text(encoding="utf-8")
+
+
+def test_recovery_schema_capacity_and_unique_ordinal_targets_are_fail_closed() -> None:
+    text = MODULE.read_text(encoding="utf-8")
+    for field in ("lease_file", "ack_file", "row_contract_unknown_", "row_contract_sheet_capacity_invalid", "row_contract_ordinal_map_duplicate"):
+        assert field in text
+    assert "expected_next_header_row -ne [int]$Data.group_end_row + 1" in text

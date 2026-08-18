@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') {
     Write-Output 'windows_powershell_contract_unavailable: real Windows Excel gate not faked'
-    exit 0
+    exit 2
 }
 
 $modulePath = Join-Path $PSScriptRoot '..\scripts\WindowsExcelInsert.Contract.psm1'
