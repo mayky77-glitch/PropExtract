@@ -27,3 +27,12 @@ def test_manifest_rejects_unmapped_change(tmp_path: Path) -> None:
     book = load_workbook(candidate); book.active["Y6"] = "=A1"; book.save(candidate); book.close()
     with pytest.raises(RuntimeError, match="mutation_manifest_changed"):
         validate_insertion(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС", insertion_row=5), 5)
+
+
+@pytest.mark.parametrize("boundary", [6, 10, 104])
+def test_manifest_rejects_candidate_only_b1_at_every_supported_boundary(tmp_path: Path, boundary: int) -> None:
+    control, candidate = tmp_path / "control.xlsx", tmp_path / "candidate.xlsx"; _save(control); _save(candidate, True)
+    from openpyxl import load_workbook
+    book = load_workbook(candidate); book.active["B1"] = "unauthorized"; book.save(candidate); book.close()
+    with pytest.raises(RuntimeError, match="mutation_manifest_candidate_only:B1"):
+        validate_insertion(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС", insertion_row=5), 5)

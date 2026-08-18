@@ -1,6 +1,6 @@
 ---
 card_id: construction-group-routing-v1-structural-oracle-remediation
-status: frozen
+status: review
 version: 1
 work_id: construction-group-routing-v1-row-remediation
 task_id: structural-oracle-remediation
@@ -9,9 +9,9 @@ role: developer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
-launch_status: planned
-actual_model: pending
-actual_reasoning_effort: pending
+launch_status: completed
+actual_model: gpt-5.6-terra
+actual_reasoning_effort: high
 fallback_reason: null
 card_path: knowledge/tasks/construction-group-routing-v1-structural-oracle-remediation.md
 card_commit_sha: runtime-envelope
@@ -56,3 +56,9 @@ acceptance_commands:
 - Reproduce rejection of candidate-only `B1`, new/changed CF, x14/DV, filter/name/merge, style, hyperlink, formula/error and ordinal mutations; accept only exact mapped insertion plus allowlisted row construction.
 - Cover original→control normalization separately from candidate→control; include insertion rows 6, 10 and 104 with sanitized synthetic fixtures.
 - Set card `review`, record immutable SHA/evidence/risks, commit/push normally; no merge/amend/rebase/force-push.
+
+## Handoff evidence
+
+- P4 developer `gpt-5.6-terra` / high, no fallback; scope limited to oracle, structure, tests and card.
+- Passed: `pytest -q tests/test_workbook_mutation_manifest.py` (5 passed), compileall and diff check.
+- Oracle remains read-only; synthetic tests use no private workbook data. Real Windows Excel gate belongs to the adapter card and is not claimed here.
