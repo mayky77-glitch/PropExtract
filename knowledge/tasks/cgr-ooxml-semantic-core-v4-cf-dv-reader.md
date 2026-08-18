@@ -1,6 +1,6 @@
 ---
 card_id: cgr-ooxml-semantic-core-v4-cf-dv-reader
-status: frozen
+status: review
 version: 1
 work_id: cgr-ooxml-semantic-core-v4-20260818
 task_id: cf-dv-reader-v1
@@ -44,3 +44,11 @@ acceptance_commands:
 - Do not copy or merge `9d9ef680`, `725d3c28`, or their implementation.
 
 Set card `review`, record immutable feature SHA/evidence/risk; normal commit/push only. No merge/amend/rebase/force-push.
+
+## Implementation evidence
+
+- Immutable feature SHA: `791d537acab3631e590f430593a3ecad1aaabc9f`; direct descendant of exact base `3541fedb93058664a52a7c064822afcb70451083`.
+- Reader consumes only the explicit caller-provided worksheet part map. It preserves supplied map order and does not infer part paths.
+- Native and x14 CF/DV rules flatten each disjoint `sqref` token while retaining source, original range, rule order, priority, formulas, DXF references and complete attributes. Unknown attributes/children produce typed ordered findings with canonical XML for child evidence.
+- Namespace-valid two-sheet fixture maps differ semantically at `6`, `10`, and `104`. Acceptance: focused `7 passed`; full `293 passed, 1 existing synthetic-x14 warning`; compileall and diff check pass.
+- Risk: DXF references are semantic IDs from worksheet rules; resolving them against a styles part remains a later explicit-input contract.
