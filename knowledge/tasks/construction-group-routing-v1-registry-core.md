@@ -1,6 +1,6 @@
 ---
 card_id: construction-group-routing-v1-registry-core
-status: frozen
+status: review
 version: 1
 supersedes: null
 work_id: construction-group-routing-v1
@@ -10,10 +10,10 @@ role: database-engineer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
-launch_status: planned
-actual_model: pending
-actual_reasoning_effort: pending
-fallback_reason: null
+launch_status: inherited
+actual_model: inherited
+actual_reasoning_effort: inherited
+fallback_reason: Runtime did not expose a per-child route confirmation; executed by the assigned database-engineer P4 scope.
 card_path: knowledge/tasks/construction-group-routing-v1-registry-core.md
 card_commit_sha: runtime-envelope
 planning_parent_sha: f0f2f6f990dbae3711b4ab8b63af0356b03f2c18
@@ -100,3 +100,12 @@ API uses CAS transitions and rejects illegal/repeated moves. Required lifecycle 
 ## Handoff
 
 Set card to `review`. Record requested vs actual route, feature SHA, changed paths, exact commands/results, remaining risk and proposed knowledge delta. Commit and push feature branch. Do not merge, amend, rebase or force-push after handoff.
+
+## Review handoff — 2026-08-18
+
+- Requested route: P4 database-engineer / Terra high. Actual route: inherited database-engineer runtime; per-child model/effort confirmation was unavailable.
+- Feature SHA: pending commit (reported separately after commit; card is not amended after handoff).
+- Changed paths: `rns_import_server/construction_registry.py`, `rns_import_server/registry_storage.py`, `rns_import_server/workbook_operation_journal.py`, `rns_import_server/data/construction_registry.seed.sqlite3`, `rns_import_server/data/construction_registry.seed.manifest.json`, `scripts/build_construction_registry_seed.py`, `scripts/validate_construction_registry_seed.py`, and the three scoped registry/journal test files.
+- Evidence: `/Users/x/Documents/ChatGPT/Отдел организации работ с недвижимым имуществом/.venv/bin/python -m pytest -q tests/test_construction_registry.py tests/test_registry_storage.py tests/test_workbook_operation_journal.py` → `10 passed`; `scripts/build_construction_registry_seed.py --check` and `scripts/validate_construction_registry_seed.py` → passed; `compileall` and `git diff --check` → passed.
+- Risk: schema v1 migration supports only legacy version marker `0`; future schema versions require explicit tested migration steps. Runtime SQLite is local-only; concurrent writers receive bounded SQLite lock failure instead of a server-mediated retry.
+- Proposed knowledge delta: record the seed/runtime split, v1 registry schema, three-way seed reconciliation conflict behavior, and generic journal phase/CAS contract after integration accepts this feature.
