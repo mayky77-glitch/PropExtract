@@ -28,3 +28,10 @@ Preserve x14 collection and each group including empty; typed ordered xm:sqref t
 - Reader preserves x14 collections/groups including empty groups, ordered sqref tokens/attributes, typed rules/formula vector, canonical DXF/payload bound to worksheet/group/rule owner, and fails closed on unknown children/cardinality.
 - Tests cover Sheet1/Dashboard at 6/10/104, empty groups, formula vector and DXF ownership. Focused `5 passed`; full `291 passed, 1 existing synthetic-x14 warning`; compile/diff pass.
 - Risk: only x14 CF scope interpreted; cross-part DXF resolution remains separate.
+
+## Recovery evidence
+
+- Immutable recovery feature SHA: `b02351be6d8d5e71fb30c74eeb5f1224b7a11751`.
+- Structured errors expose code, stable worksheet/collection/group/rule owner path, QName/value and canonical owner XML. Reader validates ruleful sqref, GUID, positive priority, tri-state values, formula cardinality and duplicate DXF/payload children while retaining canonical DXF/payload owner binding.
+- Focused `5 passed`; full `291 passed, 1 existing synthetic-x14 warning`; compileall and diff check pass.
+- Remaining risk: expanded per-field mutation matrix and recursive payload-child validation require follow-up evidence before final acceptance.
