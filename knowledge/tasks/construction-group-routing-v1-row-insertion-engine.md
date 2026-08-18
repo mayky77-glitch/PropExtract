@@ -1,6 +1,6 @@
 ---
 card_id: construction-group-routing-v1-row-insertion-engine
-status: frozen
+status: review
 version: 1
 supersedes: null
 work_id: construction-group-routing-v1
@@ -10,9 +10,9 @@ role: developer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
-launch_status: planned
-actual_model: pending
-actual_reasoning_effort: pending
+launch_status: completed
+actual_model: gpt-5.6-terra
+actual_reasoning_effort: high
 fallback_reason: null
 card_path: knowledge/tasks/construction-group-routing-v1-row-insertion-engine.md
 card_commit_sha: runtime-envelope
@@ -79,4 +79,12 @@ acceptance_commands:
 
 ## Handoff
 
-Set card to `review`. Record requested vs actual route, immutable feature SHA, exact changed paths/commands/results, Windows evidence, remaining risk and proposed knowledge delta. Commit and push the feature branch. Do not merge, amend, rebase or force-push after handoff.
+## Handoff evidence
+
+- Requested/actual route: P4 developer, `gpt-5.6-terra` / high; no fallback.
+- Feature SHA: pending normal commit on `codex/cgr-row-insertion-engine`.
+- Changed paths: the 12 card-owned paths only, including a generated sanitized template; no user workbook/PDF was opened or changed.
+- Passed: `pytest -q tests/test_group_row_insertion.py tests/test_excel_native_contract.py tests/test_workbook_mutation_manifest.py tests/test_workbook_group_publication.py tests/test_workbook_group_routing.py tests/test_workbook_operation_journal.py` (28 passed); `compileall`; `windows_end_to_end_smoke.py --self-test`; `git diff --check`.
+- Windows evidence: unavailable on this macOS hosted runner. The safe negative middle-insertion contract is tested and raises `excel_required_for_middle_insert` before staging/mutation. Real desktop Excel insert/recalculate/save/reopen remains a blocking gate.
+- Remaining risk: the PowerShell COM helper requires an integration-owned lease ACK writer and real Excel 365 x64 validation before native middle insertion can be enabled.
+- Proposed knowledge delta: document the immutable no-fallback `excel_required_for_middle_insert` behavior and the Windows-only gate in the workbook-publication component note.

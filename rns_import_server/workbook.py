@@ -33,6 +33,12 @@ HEADERS = {
     "Примечание": 24,
 }
 DATE_FMT = "dd\\.mm\\.yyyy"
+
+
+def publish_group_row(*args: object, **kwargs: object) -> dict[str, object]:
+    """Public compatibility entry point for the native group-row publisher."""
+    from rns_import_server.group_row_insertion import publish_group_row as implementation
+    return implementation(*args, **kwargs)
 _STANDARD_CF = re.compile(rb"<conditionalFormatting\b.*?</conditionalFormatting>", re.DOTALL)
 _SYSTEM_STATUS_PREFIXES = (
     "Не перенесено «",
