@@ -47,4 +47,12 @@ acceptance_commands:
 - Passed: `pytest -q tests/test_windows_process_authority.py` (6 passed), compileall and diff check.
 - Windows API calls are simulated by the facade on this non-Windows host; real Windows validation remains a later gate.
 
+## Bounded recovery evidence
+
+- Recovery SHA: `f584ed850bdf04923b81f08b2b04f2bc0c86d388`.
+- Added concrete injectable `ctypes` facade for `OpenProcess`, process image/times, HWND→PID, terminate, wait and close; typed `GetLastError` is retained on the public error.
+- Cleanup opens one terminate-capable handle, revalidates HWND/PID/image/start through that same handle immediately before termination, then waits and closes that handle in every branch. Mismatch, PID reuse, access denial and vanished process do not terminate.
+- Fake adversarial coverage includes exact adapter PID identity, access-denied/vanished process, PID reuse, timeout and handle closure.
+- Validation: focused `10 passed`; full `296 passed, 1 warning`; compileall and diff check pass. Real Excel/Windows remains a later gate.
+
 Set card `review`, record immutable feature SHA/evidence/risks; normal commit/push only. No merge/amend/rebase/force-push.
