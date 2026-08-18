@@ -54,6 +54,41 @@ class RegistryCorruptError(RegistryError):
     pass
 
 
+_META_COLUMNS = frozenset({"id", "schema_version", "seed_revision", "generation", "created_at", "updated_at"})
+_V1_JOURNAL_COLUMNS = frozenset({
+    "operation_id", "idempotency_key", "consumer_id", "owner_id", "pair_nonce", "construction_id",
+    "canonical_rns", "operation_kind", "mutation_mode", "target_identity", "sheet_identity",
+    "template_version", "expected_generation", "intent_version", "intent_digest", "manifest_version",
+    "manifest_digest", "operation_directory", "pre_hash", "staged_hash", "control_hash", "post_hash",
+    "backup_hash", "validation_digest", "excel_adapter", "excel_pid", "excel_hwnd",
+    "excel_process_started_at", "excel_build", "phase", "failure_code", "capability_finalized",
+    "binding_finalized", "history_finalized", "report_finalized", "created_at", "updated_at", "staged_at",
+    "validated_at", "backup_verified_at", "published_at", "finalized_at",
+})
+_REQUIRED_SCHEMA_COLUMNS = {
+    "registry_meta": _META_COLUMNS,
+    "constructions": frozenset({
+        "id", "seed_entry_id", "origin", "code_prefix", "official_name", "normalized_name", "status",
+        "row_revision", "created_at", "updated_at",
+    }),
+    "registry_seed_state": frozenset({
+        "seed_entry_id", "last_applied_revision", "base_code_prefix", "base_official_name",
+        "base_normalized_name", "base_status", "base_digest",
+    }),
+    "registry_conflicts": frozenset({
+        "id", "seed_entry_id", "construction_id", "kind", "detail", "created_at", "resolved_at",
+    }),
+    "construction_bindings": frozenset({
+        "id", "construction_id", "workbook_contract_id", "target_identity", "sheet_identity",
+        "template_version", "verified_state", "verified_at", "created_at", "updated_at",
+    }),
+    "workbook_operation_journal": _V1_JOURNAL_COLUMNS,
+}
+_V2_JOURNAL_COLUMNS = frozenset({
+    "capability_finalized_at", "binding_finalized_at", "history_finalized_at", "report_finalized_at",
+})
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -189,25 +224,94 @@ class RegistryStorage:
 
     def _verify_open(self, *, allow_uninitialized: bool = False) -> None:
         try:
-            result = self.connection.execute("PRAGMA integrity_check").fetchone()[0]
+            integrity = self.connection.execute("PRAGMA integrity_check").fetchone()
         except sqlite3.DatabaseError as error:
             raise RegistryCorruptError("Не удалось проверить целостность локального справочника") from error
+        if integrity is None:
+            raise RegistryCorruptError("Не удалось проверить целостность локального справочника")
+        result = integrity[0]
         if result != "ok":
             raise RegistryCorruptError("Локальный справочник повреждён")
-        has_meta = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry_meta'"
-        ).fetchone()
-        if not has_meta:
+        meta_columns = self._table_columns("registry_meta")
+        if not meta_columns:
             if allow_uninitialized and not self.read_only:
                 return
             raise RegistrySchemaError("Локальный справочник не содержит обязательную схему")
-        version = self.connection.execute("SELECT schema_version FROM registry_meta WHERE id=1").fetchone()[0]
+        if _META_COLUMNS - meta_columns:
+            raise RegistrySchemaError("Локальный справочник имеет неполную metadata-схему")
+        try:
+            meta_rows = self.connection.execute(
+                "SELECT schema_version FROM registry_meta WHERE id=1"
+            ).fetchall()
+        except sqlite3.DatabaseError as error:
+            raise RegistrySchemaError("Не удалось прочитать metadata локального справочника") from error
+        if len(meta_rows) != 1:
+            raise RegistrySchemaError("Локальный справочник не содержит поддерживаемую metadata-запись")
+        version = meta_rows[0]["schema_version"]
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
+        if version not in {0, 1, SCHEMA_VERSION}:
+            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
+        self._validate_schema(version)
         if version < SCHEMA_VERSION:
             if self.read_only:
                 raise RegistrySchemaError("Поставляемый справочник имеет устаревшую схему")
             self._migrate(version)
+        elif not self.read_only:
+            self._ensure_unresolved_conflict_identity_index()
+
+    def _table_columns(self, table: str) -> set[str]:
+        try:
+            present = self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if not present:
+                return set()
+            return {str(row["name"]) for row in self.connection.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.DatabaseError as error:
+            raise RegistrySchemaError("Не удалось прочитать схему локального справочника") from error
+
+    def _validate_schema(self, version: int) -> None:
+        required = dict(_REQUIRED_SCHEMA_COLUMNS)
+        if version == SCHEMA_VERSION:
+            required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS
+        for table, expected_columns in required.items():
+            actual_columns = self._table_columns(table)
+            if not actual_columns:
+                raise RegistrySchemaError(f"Локальный справочник не содержит обязательную таблицу {table}")
+            if expected_columns - actual_columns:
+                raise RegistrySchemaError(f"Локальный справочник имеет неполную таблицу {table}")
+
+    def _ensure_unresolved_conflict_identity_index(self) -> None:
+        """Upgrade the old v2 seed index in writable runtime copies only."""
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='registry_conflict_identity_idx'"
+        ).fetchone()
+        index_sql = str(row["sql"] or "").lower() if row else ""
+        if "where resolved_at is null" in index_sql and "ifnull(construction_id" in index_sql:
+            return
+        with self.transaction() as connection:
+            connection.execute(
+                """DELETE FROM registry_conflicts AS duplicate
+                   WHERE duplicate.resolved_at IS NULL
+                     AND EXISTS (
+                         SELECT 1 FROM registry_conflicts AS retained
+                         WHERE retained.resolved_at IS NULL
+                           AND retained.seed_entry_id=duplicate.seed_entry_id
+                           AND retained.kind=duplicate.kind
+                           AND (retained.construction_id=duplicate.construction_id
+                                OR (retained.construction_id IS NULL AND duplicate.construction_id IS NULL))
+                           AND retained.id < duplicate.id
+                     )"""
+            )
+            connection.execute("DROP INDEX IF EXISTS registry_conflict_identity_idx")
+            connection.execute(
+                "CREATE UNIQUE INDEX registry_conflict_identity_idx "
+                "ON registry_conflicts(seed_entry_id, IFNULL(construction_id, ''), kind) "
+                "WHERE resolved_at IS NULL"
+            )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -343,33 +447,76 @@ class RegistryStorage:
             )
 
     def _migrate(self, version: int) -> None:
-        # Every migration starts from a verified, recoverable file copy.
+        # Every migration starts from a verified SQLite backup. The backup is
+        # made before any runtime mutation and remains a direct rollback file.
+        if version not in {0, 1}:
+            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
-        if backup.exists():
-            backup.unlink()
+        temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            destination = sqlite3.connect(temporary)
+            try:
+                self.connection.backup(destination)
+            finally:
+                destination.close()
+            self._verify_migration_backup(temporary, version)
+            os.replace(temporary, backup)
+            self._verify_migration_backup(backup, version)
+        finally:
+            temporary.unlink(missing_ok=True)
         self.connection.close()
-        shutil.copy2(self.path, backup)
         self.connection = sqlite3.connect(self.path, timeout=self.timeout_ms / 1000, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute(f"PRAGMA busy_timeout={int(self.timeout_ms)}")
         self.connection.execute("PRAGMA foreign_keys=ON")
+        self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
-        if version not in {0, 1}:
-            raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         with self.transaction() as connection:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(workbook_operation_journal)")}
             for flag in ("capability", "binding", "history", "report"):
                 column = f"{flag}_finalized_at"
                 if column not in columns:
                     connection.execute(f"ALTER TABLE workbook_operation_journal ADD COLUMN {column} TEXT")
+            # v1 had no identity index, so repeated reconciliation could write
+            # duplicate unresolved conflicts. Keep resolved history intact.
             connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS registry_conflict_identity_idx "
-                "ON registry_conflicts(seed_entry_id, construction_id, kind)"
+                """DELETE FROM registry_conflicts AS duplicate
+                   WHERE duplicate.resolved_at IS NULL
+                     AND EXISTS (
+                         SELECT 1 FROM registry_conflicts AS retained
+                         WHERE retained.resolved_at IS NULL
+                           AND retained.seed_entry_id=duplicate.seed_entry_id
+                           AND retained.kind=duplicate.kind
+                           AND (retained.construction_id=duplicate.construction_id
+                                OR (retained.construction_id IS NULL AND duplicate.construction_id IS NULL))
+                           AND retained.id < duplicate.id
+                     )"""
+            )
+            connection.execute("DROP INDEX IF EXISTS registry_conflict_identity_idx")
+            connection.execute(
+                "CREATE UNIQUE INDEX registry_conflict_identity_idx "
+                "ON registry_conflicts(seed_entry_id, IFNULL(construction_id, ''), kind) "
+                "WHERE resolved_at IS NULL"
             )
             connection.execute(
                 "UPDATE registry_meta SET schema_version=?, updated_at=? WHERE id=1",
                 (SCHEMA_VERSION, utc_now()),
             )
+        self._validate_schema(SCHEMA_VERSION)
+
+    @staticmethod
+    def _verify_migration_backup(path: Path, version: int) -> None:
+        try:
+            connection = sqlite3.connect(path)
+            try:
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                meta = connection.execute("SELECT schema_version FROM registry_meta WHERE id=1").fetchone()
+            finally:
+                connection.close()
+        except sqlite3.DatabaseError as error:
+            raise RegistryCorruptError("Не удалось проверить backup миграции справочника") from error
+        if integrity is None or integrity[0] != "ok" or meta is None or meta[0] != version:
+            raise RegistryCorruptError("Backup миграции справочника не прошёл проверку")
 
     @property
     def generation(self) -> int:

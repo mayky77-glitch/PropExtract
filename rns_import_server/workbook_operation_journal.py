@@ -129,6 +129,15 @@ class WorkbookOperationJournal:
             "manifest_version": manifest_version, "manifest_digest": manifest_digest, "operation_directory": operation_directory,
         }
         with self.storage.transaction() as connection:
+            collisions = connection.execute(
+                "SELECT * FROM workbook_operation_journal "
+                "WHERE operation_id=? OR idempotency_key=? OR consumer_id=?",
+                (operation_id, idempotency_key, consumer_id),
+            ).fetchall()
+            if collisions:
+                if len(collisions) == 1 and all(collisions[0][key] == value for key, value in immutable.items()):
+                    return JournalOperation(dict(collisions[0]))
+                raise RegistryConflictError("Повтор journal operation не совпадает с исходным immutable intent")
             if expected_generation != self.storage.generation:
                 raise RegistryConflictError("Справочник изменился до планирования операции")
             try:
@@ -143,12 +152,12 @@ class WorkbookOperationJournal:
                      intent_version, intent_digest, manifest_version, manifest_digest, operation_directory, _now(), _now()),
                 )
             except sqlite3.IntegrityError as error:
-                existing = connection.execute(
+                collisions = connection.execute(
                     "SELECT * FROM workbook_operation_journal WHERE operation_id=? OR idempotency_key=? OR consumer_id=?",
                     (operation_id, idempotency_key, consumer_id),
-                ).fetchone()
-                if existing and all(existing[key] == value for key, value in immutable.items()):
-                    return self.get(operation_id)  # type: ignore[return-value]
+                ).fetchall()
+                if len(collisions) == 1 and all(collisions[0][key] == value for key, value in immutable.items()):
+                    return JournalOperation(dict(collisions[0]))
                 raise RegistryConflictError("Повтор journal operation не совпадает с исходным immutable intent") from error
         return self.get(operation_id)  # type: ignore[return-value]
 
@@ -239,12 +248,16 @@ class WorkbookOperationJournal:
         if flag not in FINALIZATION_FLAGS:
             raise RegistryError("Неизвестный флаг finalization")
         with self.storage.transaction() as connection:
-            phase = connection.execute(
-                "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+            current = connection.execute(
+                f"SELECT phase, {flag}, {flag}_at FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
             ).fetchone()
-            if not phase:
+            if not current:
                 raise RegistryError("Operation не найдена")
-            if phase["phase"] != PHASE_PUBLISHED:
+            # A completed flag is durable evidence. Replays must not alter its
+            # first timestamp, including after a restart/finalized transition.
+            if current[flag]:
+                return self.get(operation_id)  # type: ignore[return-value]
+            if current["phase"] != PHASE_PUBLISHED:
                 raise JournalTransitionError("Finalization flag разрешён только после publication")
             updated = connection.execute(
                 f"UPDATE workbook_operation_journal SET {flag}=1, {flag}_at=?, updated_at=? WHERE operation_id=?",
