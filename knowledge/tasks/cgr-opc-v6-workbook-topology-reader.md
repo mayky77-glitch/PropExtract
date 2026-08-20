@@ -50,4 +50,6 @@ Implement fresh from the exact frozen base. Do not merge, cherry-pick, import, o
 
 - The reader uses `build_opc_package_graph` as the sole package/relationship resolver.  It reads only the already-resolved workbook part and the mandatory content-types control part; no sheet payload is read.
 - Main-workbook content type is required as a single Override for the resolved part and is limited to `.xlsx` and macro-enabled SpreadsheetML main types.
+- ZIP member names and Override part names are compared using accepted canonical OPC part identities; raw percent aliases therefore resolve correctly, while canonical collisions remain typed failures.
+- The public boundary coerces a `PathLike` exactly once before graph and ZIP reads.  Sheet IDs are lexically bounded and range-checked before integer conversion; two sheets cannot resolve to one canonical worksheet part.
 - Direct fixtures cover preserved order/state, Unicode, row-boundary sheet IDs 6/10/104, malformed identity and mapping states, encoding, and missing/wrong content type.

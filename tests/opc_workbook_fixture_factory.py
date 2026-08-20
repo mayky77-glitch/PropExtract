@@ -18,7 +18,9 @@ def relationship(identifier: str, type_uri: str, target: str, mode: str = "Inter
 
 def package(destination: Path, *, workbook_xml: bytes | None = None, root_relationships: str | None = None,
             workbook_relationships: str | None = None, worksheet_parts: tuple[str, ...] = ("xl/worksheets/sheet1.xml",),
-            workbook_content_type: str | None = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml") -> Path:
+            workbook_content_type: str | None = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            workbook_member: str = "xl/workbook.xml", override_part_name: str = "/xl/workbook.xml",
+            extra_overrides: tuple[tuple[str, str], ...] = (), extra_members: tuple[tuple[str, bytes], ...] = ()) -> Path:
     root = root_relationships or relationship("rWorkbook", f"{OFFICE_REL_NS}/officeDocument", "xl/workbook.xml")
     sheets = workbook_relationships or relationship("rSheet1", f"{OFFICE_REL_NS}/worksheet", "worksheets/sheet1.xml")
     workbook = workbook_xml or (
@@ -27,14 +29,16 @@ def package(destination: Path, *, workbook_xml: bytes | None = None, root_relati
     ).encode()
     content_types = '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
     if workbook_content_type is not None:
-        content_types += f'<Override PartName="/xl/workbook.xml" ContentType="{workbook_content_type}"/>'
+        content_types += f'<Override PartName="{override_part_name}" ContentType="{workbook_content_type}"/>'
+    content_types += "".join(f'<Override PartName="{part_name}" ContentType="{content_type}"/>' for part_name, content_type in extra_overrides)
     content_types += "</Types>"
     members = (
         ("[Content_Types].xml", content_types.encode()),
         ("_rels/.rels", f'<Relationships xmlns="{REL_NS}">{root}</Relationships>'.encode()),
-        ("xl/workbook.xml", workbook),
+        (workbook_member, workbook),
         ("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="{REL_NS}">{sheets}</Relationships>'.encode()),
         *((name, b"<worksheet/>") for name in worksheet_parts),
+        *extra_members,
     )
     with ZipFile(destination, "w", compression=ZIP_DEFLATED, compresslevel=9, strict_timestamps=True) as archive:
         for name, payload in members:
