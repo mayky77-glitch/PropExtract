@@ -1,6 +1,6 @@
 ---
 type: task
-status: planned
+status: completed
 work_id: cgr-opc-v6-worksheet-x14-cf-owner-io-matrix-v1
 tags: [task/test-corpus, feature/x14-cf-owner-topology, status/planned]
 last_verified: 2026-08-20
@@ -38,3 +38,9 @@ Run direct A, combined original-plus-A, focused compatibility, full suite, and c
 `python3 -m compileall -q tests/test_opc_worksheet_x14_cf_owner_topology_io_matrix.py`
 
 Also run `git diff --check`; verify the reader and fixture hashes, exact one-file scope, identity/remote/clean state, and P6. Human-authored non-force commit/push is required after acceptance; do not prohibit that scoped commit in this card.
+
+## P4 evidence — 2026-08-20
+
+- Added only `tests/test_opc_worksheet_x14_cf_owner_topology_io_matrix.py` (17 tests): PathLike coercion/error matrix, raw-member aliases and ambiguity, read/decompression failure, byte-preserving helper (`None` distinct from `b''`), UTF-8/UTF-16 XML boundaries, unsupported encoding, undeclared prefix, duplicate expanded QName through two namespace prefixes, descriptor identity/equality, and exactly one XML parse per worksheet.
+- Frozen hashes verified: reader `6eea77cdda6f08bc9902810f54cff332123bad87`; fixture `83a56ee4f6f7a00a92cc577eb279377f50aba912`.
+- Passed: direct A `17 passed`; original-plus-A `59 passed`; focused compatibility `442 passed`; full suite `1194 passed, 1 warning` (existing openpyxl unknown-extension warning); compile and `git diff --check` passed.
