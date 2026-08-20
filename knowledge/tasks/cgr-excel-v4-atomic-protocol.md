@@ -40,6 +40,7 @@ Through injected callbacks, atomically write BOM-free JSON only after writer/str
 - Remediation SHA: `b314f6ac9fd63580a8f242086c9e17a0eac845db`.
 - Before any operation callback, the wrapper invalidates both prior final artifact paths. A locked or otherwise undeletable path raises `excel_atomic_protocol_final_artifact_invalidation_failed:<artifact>:...` with the original exception retained as `InnerException`; no lease, ACK, open, execute, or cleanup callback is entered.
 - Final publication also removes an unexpected selected destination before its write, so a write/replace failure cannot expose an old selected artifact as this operation's outcome. The executable Windows Pester test uses a `FileShare.None` lock, proves zero callback events/no lease/no new result, and preserves the old artifact only as explicitly stale evidence after the failed gate.
+- Test expectation SHA: `d7cbaae883af3ae553cf6f76c585c16ed32c3f24`; the locked-file assertion now matches the deterministic error prefix plus its platform-specific underlying-message suffix with Pester's `*` wildcard.
 
 ## Residual risk
 
