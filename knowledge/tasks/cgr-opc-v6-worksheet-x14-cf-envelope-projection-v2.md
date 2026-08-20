@@ -1,6 +1,6 @@
 ---
 type: task
-status: planned
+status: completed
 work_id: cgr-opc-v6-worksheet-x14-cf-envelope-projection-v2
 tags: [task/implementation, feature/x14-cf-envelope, status/planned]
 last_verified: 2026-08-21
@@ -59,3 +59,7 @@ Acceptance commands:
 `git diff --check`
 
 Independent P6 must verify exact accepted-base ancestry, absence of blocked X14 tips, one shared parse/ownership pipeline, X1 behavioral compatibility, anti-shallow exact tuples and immutable full projections. X2 qualifies only envelope values and inline-dxf presence. Sqref geometry/mapping, formula interpretation, dxf/font/fill/color semantics, X14 DV semantics, mutation/insertion/publication safety, UI/CrossOver/native Excel remain explicitly unqualified.
+
+## Completion evidence
+
+Implemented from frozen base `c5ea7cab467288d15b3ec0075d6a87a424633ca0` with accepted X1 dependency `ea280eeb2101c87213bc538d3b697fc0ea6a982e`. The envelope reader uses the shared accepted X1 parse/ownership pipeline and publishes only after all worksheets pass X1 and X2 validation. Exact acceptance subset: 533 passed. Full suite: 1285 passed, with one existing openpyxl unknown-extension warning. Required `compileall` and `git diff --check` passed.

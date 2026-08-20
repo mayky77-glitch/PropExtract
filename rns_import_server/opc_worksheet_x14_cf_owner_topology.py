@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from typing import Final
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, LargeZipFile, ZipFile
@@ -22,7 +23,7 @@ _CF_URI="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"; _DV_URI="{CCE6A557-97BC-4b89-A
 _OWNED=frozenset({_FORMS,_FORM,_RULE,_DXF,_F,_SQREF})
 _LOCALS=frozenset({"conditionalFormattings","conditionalFormatting","cfRule","dxf","f","sqref"})
 
-__all__=("OPCWorksheetX14CfOwnerTopologyError","X14CfContainerOwner","WorksheetX14CfOwnerTopology","WorkbookX14CfOwnerTopology","read_worksheet_x14_cf_owner_topology")
+__all__=("OPCWorksheetX14CfOwnerTopologyError","X14CfContainerOwner","WorksheetX14CfOwnerTopology","WorkbookX14CfOwnerTopology","X14CfRuleEnvelope","X14CfContainerEnvelope","WorksheetX14CfEnvelope","WorkbookX14CfEnvelope","read_worksheet_x14_cf_owner_topology","read_worksheet_x14_cf_envelope")
 
 @dataclass(frozen=True)
 class X14CfContainerOwner:
@@ -35,6 +36,28 @@ class WorksheetX14CfOwnerTopology:
 @dataclass(frozen=True)
 class WorkbookX14CfOwnerTopology:
     worksheets: tuple[WorksheetX14CfOwnerTopology,...]
+@dataclass(frozen=True)
+class X14CfRuleEnvelope:
+    owner_path: str
+    document_order: int
+    type: str
+    priority: int
+    stop_if_true: bool | None
+    rule_id: str
+    formula: str
+    has_inline_dxf: bool
+@dataclass(frozen=True)
+class X14CfContainerEnvelope:
+    owner: X14CfContainerOwner
+    sqref_text: str
+    rules: tuple[X14CfRuleEnvelope,...]
+@dataclass(frozen=True)
+class WorksheetX14CfEnvelope:
+    worksheet: WorksheetDescriptor
+    containers: tuple[X14CfContainerEnvelope,...]
+@dataclass(frozen=True)
+class WorkbookX14CfEnvelope:
+    worksheets: tuple[WorksheetX14CfEnvelope,...]
 @dataclass
 class OPCWorksheetX14CfOwnerTopologyError(ValueError):
     code: str
@@ -140,12 +163,12 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
             if _nonwhite(child.tail) and tag in {_EXTLST,_FORMS,_FORM,_RULE}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"tail")
         if cf_ext and sum(child.tag==_FORMS for child in node)!=1:add(1,"invalid-x14-cf-cardinality","ext","conditionalFormattings")
         if tag==_FORMS and forms and not any(child.tag==_FORM for child in node):add(1,"invalid-x14-cf-cardinality","conditionalFormattings","conditionalFormatting")
-        if tag==_FORM and form:owners.append((start,extlst_index or 0,ext_index or 0))
+        if tag==_FORM and form:owners.append((start,extlst_index or 0,ext_index or 0,node))
         event+=1
     walk(root,None,parent_direct_extlst=False,parent_cf_ext=False,parent_dv_ext=False,parent_dv=False,parent_dv_item=False,parent_forms=False,parent_form=False,parent_rule=False,extlst_index=None,ext_index=None)
     return faults,owners,event
 
-def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->WorkbookX14CfOwnerTopology:
+def _accepted(package_path:os.PathLike[str]|str):
     path=_path(package_path); topology=read_workbook_topology(path)
     trees=[(sheet,sheet.worksheet_part,_xml(_member(path,sheet.worksheet_part),sheet.worksheet_part)) for sheet in topology.worksheets]
     for _,part,root in trees:
@@ -155,11 +178,82 @@ def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->Wor
         current,owners,base=_inspect(root,part,base);faults.extend(current);inspected.append((sheet,part,owners))
     if faults:
         tier=min(item[0] for item in faults);_fail(*min((item for item in faults if item[0]==tier),key=lambda item:item[1])[2])
-    worksheets=[]
+    worksheets=[]; validated=[]
     for sheet,part,specs in inspected:
         counts={}; owners=[]
-        for document_order,(_,extlst,ext) in enumerate(specs,1):
+        for document_order,(_,extlst,ext,node) in enumerate(specs,1):
             key=(extlst,ext);counts[key]=counts.get(key,0)+1
             owners.append(X14CfContainerOwner(f"{part.value}/worksheet/extLst[{extlst}]/ext[{ext}]/conditionalFormattings[1]/conditionalFormatting[{counts[key]}]",document_order))
-        worksheets.append(WorksheetX14CfOwnerTopology(sheet,tuple(owners)))
-    return WorkbookX14CfOwnerTopology(tuple(worksheets))
+        owner_tuple=tuple(owners)
+        worksheets.append(WorksheetX14CfOwnerTopology(sheet,owner_tuple))
+        validated.append((sheet,part,owner_tuple,tuple(item[3] for item in specs)))
+    return WorkbookX14CfOwnerTopology(tuple(worksheets)),tuple(validated)
+
+def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->WorkbookX14CfOwnerTopology:
+    topology,_=_accepted(package_path)
+    return topology
+
+_GUID=re.compile(r"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$")
+_INT32=2147483647
+
+def _semantic_fail(code:str,part:CanonicalPartURI,field:str,detail:str)->None:
+    _fail(code,part.value,field,detail)
+
+def _rule_envelope(node:ET.Element,owner:X14CfContainerOwner,index:int,document_order:int,part:CanonicalPartURI)->X14CfRuleEnvelope:
+    required={"type","priority","id"}; allowed=required|{"stopIfTrue"}
+    extra=sorted(set(node.attrib)-allowed)
+    if extra:_semantic_fail("unknown-x14-cf-attribute",part,"attribute",extra[0])
+    missing=sorted(required-set(node.attrib))
+    if missing:_semantic_fail("invalid-x14-cf-cardinality",part,"attribute",missing[0])
+    if node.attrib["type"]!="expression":_semantic_fail("unsupported-x14-cf-rule-type",part,"type",node.attrib["type"])
+    raw=node.attrib["priority"]
+    significant=raw.strip()
+    if len(raw)>64 or len(significant)>16 or not re.fullmatch(r"[+]?[1-9][0-9]*",significant):_semantic_fail("invalid-x14-cf-priority",part,"priority",raw)
+    priority=int(significant)
+    if priority>_INT32:_semantic_fail("invalid-x14-cf-priority",part,"priority",raw)
+    boolean=None
+    if "stopIfTrue" in node.attrib:
+        token=node.attrib["stopIfTrue"]
+        if token not in {"0","1","false","true"}:_semantic_fail("invalid-x14-cf-boolean",part,"stopIfTrue",token)
+        boolean=token in {"1","true"}
+    rule_id=node.attrib["id"]
+    if not _GUID.fullmatch(rule_id):_semantic_fail("invalid-x14-cf-id",part,"id",rule_id)
+    children=list(node)
+    if len(children)!=2:_semantic_fail("invalid-x14-cf-cardinality",part,"cfRule","f,dxf")
+    if [child.tag for child in children]!=[_F,_DXF]:_semantic_fail("invalid-x14-cf-order",part,"cfRule","f,dxf")
+    formula,dxf=children
+    if formula.attrib or list(formula) or not formula.text or not formula.text.strip() or _nonwhite(formula.tail):_semantic_fail("invalid-x14-cf-formula",part,"f","content")
+    if dxf.attrib or _nonwhite(dxf.text) or _nonwhite(dxf.tail):_semantic_fail("invalid-x14-cf-dxf",part,"dxf","content")
+    dxf_children=list(dxf)
+    for child in dxf_children:
+        if _nonwhite(child.tail):_semantic_fail("invalid-x14-cf-dxf",part,"dxf","tail")
+        if child.tag not in {f"{{{_SML}}}font",f"{{{_SML}}}fill"}:
+            _semantic_fail("unknown-x14-cf-child",part,"tag",str(child.tag))
+    tags=[child.tag for child in dxf_children]
+    if tags not in ([],[f"{{{_SML}}}font"],[f"{{{_SML}}}font",f"{{{_SML}}}fill"]):_semantic_fail("invalid-x14-cf-dxf",part,"child","font,fill")
+    return X14CfRuleEnvelope(f"{owner.owner_path}/cfRule[{index}]",document_order,"expression",priority,boolean,rule_id,formula.text,True)
+
+def _container_envelope(node:ET.Element,owner:X14CfContainerOwner,part:CanonicalPartURI,offset:int,priorities:set[int]):
+    children=list(node)
+    if not children:_semantic_fail("invalid-x14-cf-cardinality",part,"conditionalFormatting","cfRule,sqref")
+    if children[-1].tag!=_SQREF or any(child.tag!=_RULE for child in children[:-1]):_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
+    rules=[]
+    for index,rule in enumerate(children[:-1],1):
+        envelope=_rule_envelope(rule,owner,index,offset+index,part)
+        if envelope.priority in priorities:_semantic_fail("duplicate-x14-cf-priority",part,"priority",str(envelope.priority))
+        priorities.add(envelope.priority); rules.append(envelope)
+    if not rules:_semantic_fail("invalid-x14-cf-cardinality",part,"conditionalFormatting","cfRule")
+    sqref=children[-1]
+    if sqref.attrib or list(sqref) or not sqref.text or not sqref.text.strip() or _nonwhite(sqref.tail):_semantic_fail("invalid-x14-cf-sqref",part,"sqref","content")
+    return X14CfContainerEnvelope(owner,sqref.text,tuple(rules)),offset+len(rules)
+
+def read_worksheet_x14_cf_envelope(package_path:os.PathLike[str]|str)->WorkbookX14CfEnvelope:
+    topology,validated=_accepted(package_path)
+    worksheets=[]
+    for topology_sheet,(_,part,owners,nodes) in zip(topology.worksheets,validated):
+        priorities=set(); offset=0; containers=[]
+        for owner,node in zip(owners,nodes):
+            container,offset=_container_envelope(node,owner,part,offset,priorities)
+            containers.append(container)
+        worksheets.append(WorksheetX14CfEnvelope(topology_sheet.worksheet,tuple(containers)))
+    return WorkbookX14CfEnvelope(tuple(worksheets))
