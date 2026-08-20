@@ -45,97 +45,98 @@ function New-WindowsExcelFakeComProxy {
 
     $State.NextId++
     $proxy = [pscustomobject](@{ Kind = $Kind; Id = $State.NextId; Released = $false; _State = $State } + $Metadata)
+    $state = $State
     Add-WindowsExcelFakeComCall -State $State -Event 'proxy.acquire' -Proxy $proxy
     $proxy | Add-Member -MemberType ScriptMethod -Name Release -Value {
-        if (-not $this.Released) {
-            Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.release' -Stage 'release' -Proxy $this
-            try { Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'release' }
-            finally { $this.Released = $true }
+        if (-not $proxy.Released) {
+            Add-WindowsExcelFakeComCall -State $state -Event 'proxy.release' -Stage 'release' -Proxy $proxy
+            try { Invoke-WindowsExcelFakeComFault -State $state -Stage 'release' }
+            finally { $proxy.Released = $true }
         }
-    }
+    }.GetNewClosure()
 
     switch ($Kind) {
         'Application' {
             $proxy | Add-Member ScriptProperty Workbooks ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.acquire.property' -Proxy $this -Arguments @{ property = 'Workbooks' }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Workbooks'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'proxy.acquire.property' -Proxy $proxy -Arguments @{ property = 'Workbooks' }
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Workbooks'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod CalculateFullRebuild ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'application.calculate' -Stage 'calc' -Proxy $this
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'calc'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'application.calculate' -Stage 'calc' -Proxy $proxy
+                Invoke-WindowsExcelFakeComFault -State $state -Stage 'calc'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod Quit ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'application.quit' -Stage 'cleanup' -Proxy $this
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'cleanup'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'application.quit' -Stage 'cleanup' -Proxy $proxy
+                Invoke-WindowsExcelFakeComFault -State $state -Stage 'cleanup'
+            }.GetNewClosure())
         }
         'Workbooks' {
             $proxy | Add-Member ScriptMethod Open ({ param([string]$Path, [int]$UpdateLinks, [bool]$ReadOnly)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'workbooks.open' -Stage 'open' -Proxy $this -Arguments @{ path = $Path; update_links = $UpdateLinks; read_only = $ReadOnly }
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'open'
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Workbook' -Metadata @{ Path = $Path }
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'workbooks.open' -Stage 'open' -Proxy $proxy -Arguments @{ path = $Path; update_links = $UpdateLinks; read_only = $ReadOnly }
+                Invoke-WindowsExcelFakeComFault -State $state -Stage 'open'
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Workbook' -Metadata @{ Path = $Path }
+            }.GetNewClosure())
         }
         'Workbook' {
             $proxy | Add-Member ScriptProperty Worksheets ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.acquire.property' -Proxy $this -Arguments @{ property = 'Worksheets' }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Worksheets'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'proxy.acquire.property' -Proxy $proxy -Arguments @{ property = 'Worksheets' }
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Worksheets'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod Save ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'workbook.save' -Stage 'save' -Proxy $this
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'save'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'workbook.save' -Stage 'save' -Proxy $proxy
+                Invoke-WindowsExcelFakeComFault -State $state -Stage 'save'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod Close ({ param([bool]$SaveChanges)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'workbook.close' -Stage 'cleanup' -Proxy $this -Arguments @{ save_changes = $SaveChanges }
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'cleanup'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'workbook.close' -Stage 'cleanup' -Proxy $proxy -Arguments @{ save_changes = $SaveChanges }
+                Invoke-WindowsExcelFakeComFault -State $state -Stage 'cleanup'
+            }.GetNewClosure())
         }
         'Worksheets' {
             $proxy | Add-Member ScriptMethod Item ({ param([string]$Name)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'worksheets.item' -Proxy $this -Arguments @{ name = $Name }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Sheet' -Metadata @{ Name = $Name }
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'worksheets.item' -Proxy $proxy -Arguments @{ name = $Name }
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Sheet' -Metadata @{ Name = $Name }
+            }.GetNewClosure())
         }
         'Sheet' {
             foreach ($property in @('Rows', 'Cells', 'Hyperlinks')) {
                 $propertyName = $property
                 $getter = {
-                    Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.acquire.property' -Proxy $this -Arguments @{ property = $propertyName }
-                    New-WindowsExcelFakeComProxy -State $this._State -Kind $propertyName
+                    Add-WindowsExcelFakeComCall -State $state -Event 'proxy.acquire.property' -Proxy $proxy -Arguments @{ property = $propertyName }
+                    New-WindowsExcelFakeComProxy -State $state -Kind $propertyName
                 }.GetNewClosure()
                 $proxy | Add-Member ScriptProperty $propertyName $getter
             }
         }
         'Rows' {
             $proxy | Add-Member ScriptMethod Item ({ param([int]$Row)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'rows.item' -Proxy $this -Arguments @{ row = $Row }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Row' -Metadata @{ Row = $Row }
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'rows.item' -Proxy $proxy -Arguments @{ row = $Row }
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Row' -Metadata @{ Row = $Row }
+            }.GetNewClosure())
         }
         'Row' {
             $proxy | Add-Member ScriptMethod Insert ({ param([int]$Shift, [int]$CopyOrigin)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'row.insert' -Stage 'insert' -Proxy $this -Arguments @{ row = $this.Row; shift = $Shift; copy_origin = $CopyOrigin }
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'insert'
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'row.insert' -Stage 'insert' -Proxy $proxy -Arguments @{ row = $proxy.Row; shift = $Shift; copy_origin = $CopyOrigin }
+                Invoke-WindowsExcelFakeComFault -State $state -Stage 'insert'
+            }.GetNewClosure())
         }
         'Cells' {
             $proxy | Add-Member ScriptMethod Item ({ param([int]$Row, [int]$Column)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'cells.item' -Proxy $this -Arguments @{ row = $Row; column = $Column }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Cell' -Metadata @{ Row = $Row; Column = $Column }
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'cells.item' -Proxy $proxy -Arguments @{ row = $Row; column = $Column }
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Cell' -Metadata @{ Row = $Row; Column = $Column }
+            }.GetNewClosure())
         }
         'Cell' {
-            $proxy | Add-Member ScriptProperty Value2 ({ $this._Value2 }) ({ param($Value)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'cell.mutate.value2' -Stage 'mutation' -Proxy $this -Arguments @{ row = $this.Row; column = $this.Column; value = $Value }
-                $this._Value2 = $Value
-            })
+            $proxy | Add-Member ScriptProperty Value2 ({ $proxy._Value2 }.GetNewClosure()) ({ param($Value)
+                Add-WindowsExcelFakeComCall -State $state -Event 'cell.mutate.value2' -Stage 'mutation' -Proxy $proxy -Arguments @{ row = $proxy.Row; column = $proxy.Column; value = $Value }
+                $proxy._Value2 = $Value
+            }.GetNewClosure())
             $proxy | Add-Member -MemberType NoteProperty -Name _Value2 -Value $null
         }
         'Hyperlinks' {
             $proxy | Add-Member ScriptMethod Add ({ param($Anchor, [string]$Address)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'hyperlinks.add' -Stage 'mutation' -Proxy $this -Arguments @{ anchor_id = $Anchor.Id; row = $Anchor.Row; column = $Anchor.Column; address = $Address }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Hyperlink' -Metadata @{ Address = $Address; AnchorId = $Anchor.Id }
-            })
+                Add-WindowsExcelFakeComCall -State $state -Event 'hyperlinks.add' -Stage 'mutation' -Proxy $proxy -Arguments @{ anchor_id = $Anchor.Id; row = $Anchor.Row; column = $Anchor.Column; address = $Address }
+                New-WindowsExcelFakeComProxy -State $state -Kind 'Hyperlink' -Metadata @{ Address = $Address; AnchorId = $Anchor.Id }
+            }.GetNewClosure())
         }
     }
     return $proxy
