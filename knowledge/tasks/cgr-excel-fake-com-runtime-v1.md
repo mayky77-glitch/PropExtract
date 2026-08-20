@@ -29,3 +29,5 @@ Repair only `tests/support/WindowsExcelFakeCom.psm1` runtime behavior. Keep the 
 - Every generated proxy member now closes over its own immutable `$proxy` and `$state` references. It no longer relies on PowerShell's runtime `$this` binding inside generated ScriptMethod/ScriptProperty bodies.
 - This addresses the exact failure shape: controlled fault calls previously failed before recording their stage envelope, and release cleanup could turn into an untyped primary null-valued-expression. The invariant assertions remain unchanged.
 - No PowerShell executable is available on this macOS host; exact Windows Pester remains required.
+- Run7 at `fdd112fe948171242e14b7e5c93f71eed26e7914` proved generated members execute outside module session state: first `Workbooks` getter and `Release` cannot resolve private `Add-WindowsExcelFakeComCall`.
+- Each proxy now captures private function `CommandInfo` objects for add-call, fault, and recursive proxy creation. Every generated member invokes those captured commands; no generated body performs unbound private-helper name resolution.
