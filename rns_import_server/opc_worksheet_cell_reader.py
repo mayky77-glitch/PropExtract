@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import re
 from typing import Final
@@ -30,9 +31,15 @@ _HYPERLINK_TYPE: Final = f"{_REL}/hyperlink"
 _XML_ENCODING: Final = re.compile(br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']', re.I)
 _A1: Final = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
 _INDEX: Final = re.compile(r"[0-9]+\Z")
+_ROW_HEIGHT: Final = re.compile(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?\Z")
+_ROW_UNSIGNED: Final = re.compile(r"(?:\+?[0-9]+|-[0]+)\Z")
+_XML_WHITESPACE: Final = re.compile(r"[\t\r\n ]+")
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
 _MAX_UNSIGNED: Final = 4_294_967_295
+_MAX_ROW_HEIGHT_LEXICAL: Final = 128
+_MAX_ROW_INTEGER_LEXICAL: Final = 64
+_ROW_BOOLEANS: Final = frozenset({"0", "1", "false", "true"})
 _CELL_TYPES: Final = frozenset({"", "b", "d", "e", "inlineStr", "s", "str"})
 
 
@@ -146,6 +153,63 @@ def _unsigned(value: str | None, subject: str, field: str, code: str) -> int:
     if numeric > _MAX_UNSIGNED:
         _fail(code, subject, field, lexical)
     return numeric
+
+
+def _row_lexical(value: str, limit: int, subject: str, field: str) -> str:
+    if len(value) > limit:
+        _fail("invalid-row-property", subject, field, value)
+    return _XML_WHITESPACE.sub(" ", value).strip(" \t\r\n")
+
+
+def _row_height(value: str, subject: str) -> None:
+    lexical = _row_lexical(value, _MAX_ROW_HEIGHT_LEXICAL, subject, "ht")
+    if _ROW_HEIGHT.fullmatch(lexical) is None:
+        _fail("invalid-row-property", subject, "ht", value)
+    numeric = float(lexical)
+    if not math.isfinite(numeric) or numeric < 0:
+        _fail("invalid-row-property", subject, "ht", value)
+
+
+def _row_unsigned(value: str, subject: str, field: str) -> int:
+    lexical = _row_lexical(value, _MAX_ROW_INTEGER_LEXICAL, subject, field)
+    if _ROW_UNSIGNED.fullmatch(lexical) is None:
+        _fail("invalid-row-property", subject, field, value)
+    numeric = int(lexical)
+    if numeric > _MAX_UNSIGNED:
+        _fail("invalid-row-property", subject, field, value)
+    return numeric
+
+
+def _row_boolean(value: str, subject: str, field: str) -> None:
+    if value not in _ROW_BOOLEANS:
+        _fail("invalid-row-property", subject, field, value)
+
+
+def _validate_row_attributes(element: ET.Element, part: CanonicalPartURI) -> None:
+    allowed = {"r", "spans", "ht", "s", "customHeight", "customFormat", "hidden", "outlineLevel", "collapsed"}
+    unknown = sorted(set(element.attrib) - allowed)
+    if unknown:
+        _fail("unknown-row-attribute", part.value, "attribute", unknown[0])
+    if "spans" in element.attrib:
+        spans = element.attrib["spans"].split(":")
+        if len(spans) != 2 or any(_INDEX.fullmatch(item) is None or len(item) > 5 for item in spans):
+            _fail("invalid-row-spans", part.value, "spans", element.attrib["spans"])
+        start, end = (int(item) for item in spans)
+        if not 1 <= start <= end <= _MAX_COLUMN:
+            _fail("invalid-row-spans", part.value, "spans", element.attrib["spans"])
+    if "ht" in element.attrib:
+        _row_height(element.attrib["ht"], part.value)
+    if "s" in element.attrib:
+        _row_unsigned(element.attrib["s"], part.value, "s")
+    for field in ("customHeight", "customFormat", "hidden"):
+        if field in element.attrib:
+            _row_boolean(element.attrib[field], part.value, field)
+    if "outlineLevel" in element.attrib:
+        outline = _row_unsigned(element.attrib["outlineLevel"], part.value, "outlineLevel")
+        if outline > 7:
+            _fail("invalid-row-property", part.value, "outlineLevel", element.attrib["outlineLevel"])
+    if "collapsed" in element.attrib:
+        _row_boolean(element.attrib["collapsed"], part.value, "collapsed")
 
 
 def _non_whitespace(value: str | None) -> bool:
@@ -302,14 +366,7 @@ def _cells(root: ET.Element, part: CanonicalPartURI) -> tuple[WorksheetCell, ...
         if row_element.tag != _ROW:
             _fail("invalid-sheet-data-child", part.value, "tag", str(row_element.tag))
         _no_mixed(row_element, part, "row")
-        if set(row_element.attrib) - {"r", "spans"}: _fail("unknown-row-attribute", part.value, "attribute", sorted(set(row_element.attrib) - {"r", "spans"})[0])
-        if "spans" in row_element.attrib:
-            spans = row_element.attrib["spans"].split(":")
-            if len(spans) != 2 or any(_INDEX.fullmatch(item) is None or len(item) > 5 for item in spans):
-                _fail("invalid-row-spans", part.value, "spans", row_element.attrib["spans"])
-            start, end = (int(item) for item in spans)
-            if not 1 <= start <= end <= _MAX_COLUMN:
-                _fail("invalid-row-spans", part.value, "spans", row_element.attrib["spans"])
+        _validate_row_attributes(row_element, part)
         lexical = row_element.attrib.get("r", "")
         if _INDEX.fullmatch(lexical) is None or len(lexical) > 7:
             _fail("invalid-row", part.value, "r", lexical)
