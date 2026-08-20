@@ -381,6 +381,7 @@ def read_worksheet_native_cf_container_inventory(
         _x14_hard_stop(root, part)
         _validate_worksheet_root(root, part)
         _validate_owned_placement(root, part)
+        _validate_presence_content(root, part)
         containers = tuple(
             _container_inventory(element, part, index)
             for index, element in enumerate((child for child in root if child.tag == _CONTAINER), start=1)

@@ -263,6 +263,7 @@ def test_container_inventory_projects_ordered_two_sheet_geometry_and_is_immutabl
     first_payload = worksheet(
         '<conditionalFormatting sqref="$a$6 B10:C10" pivot="true" '
         'xr:uid="{01234567-89ab-cdef-0123-456789abcdef}"><cfRule/><cfRule/></conditionalFormatting>'
+        '<conditionalFormatting sqref="D104"/>'
         '<conditionalFormatting sqref="XFD1048576" pivot="0"/>'
     )
     result = read_worksheet_native_cf_container_inventory(
@@ -285,6 +286,13 @@ def test_container_inventory_projects_ordered_two_sheet_geometry_and_is_immutabl
             first_container,
             NativeCfContainerInventory(
                 "xl/worksheets/first.xml/worksheet/conditionalFormatting[2]",
+                (NativeCfA1Range("D104", "D104", 104, 4, 104, 4),),
+                None,
+                None,
+                0,
+            ),
+            NativeCfContainerInventory(
+                "xl/worksheets/first.xml/worksheet/conditionalFormatting[3]",
                 (NativeCfA1Range("XFD1048576", "XFD1048576", 1_048_576, 16_384, 1_048_576, 16_384),),
                 False,
                 None,
@@ -299,6 +307,19 @@ def test_container_inventory_projects_ordered_two_sheet_geometry_and_is_immutabl
         result.worksheets[0].containers = ()
     with pytest.raises(FrozenInstanceError):
         first_container.sqref[0].min_row = 1
+    with pytest.raises(FrozenInstanceError):
+        first_container.rule_count = 0
+
+
+def test_container_inventory_record_field_order_is_frozen():
+    assert tuple(NativeCfA1Range.__dataclass_fields__) == (
+        "start_coordinate", "end_coordinate", "min_row", "min_column", "max_row", "max_column",
+    )
+    assert tuple(NativeCfContainerInventory.__dataclass_fields__) == (
+        "owner_path", "sqref", "pivot", "uid", "rule_count",
+    )
+    assert tuple(WorksheetNativeCfContainerInventory.__dataclass_fields__) == ("worksheet", "containers")
+    assert tuple(WorkbookNativeCfContainerInventory.__dataclass_fields__) == ("worksheets",)
 
 
 @pytest.mark.parametrize(("sqref", "expected"), [
@@ -311,6 +332,7 @@ def test_container_inventory_projects_ordered_two_sheet_geometry_and_is_immutabl
     ("XFE1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "XFE1")),
     ("A1048577", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1048577")),
     ("A0000001", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A0000001")),
+    ("A12345678", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A12345678")),
     ("A6:B5", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A6:B5")),
     ("B6:A7", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B6:A7")),
     ("A6 A6", ("duplicate-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A6")),
@@ -318,6 +340,7 @@ def test_container_inventory_projects_ordered_two_sheet_geometry_and_is_immutabl
     ("A6:A7 A7:A8", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A7:A8")),
     ("A6:B7 B7:C8", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B7:C8")),
     ("A1:C3 B2", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2")),
+    ("A1:C3 B2:D2", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2:D2")),
 ])
 def test_container_inventory_sqref_geometry(tmp_path, sqref, expected):
     path = package(
@@ -331,6 +354,15 @@ def test_container_inventory_sqref_geometry(tmp_path, sqref, expected):
         assert inventory_error(path) == expected
 
 
+def test_container_inventory_rejects_a_truly_overlong_sqref_token(tmp_path):
+    token = "A" * 10_000 + "1"
+    path = package(
+        tmp_path / "overlong-sqref-inventory.xlsx",
+        sheet_one=worksheet(f'<conditionalFormatting sqref="{token}"/>'),
+    )
+    assert inventory_error(path) == ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", token)
+
+
 @pytest.mark.parametrize(("body", "expected"), [
     ('<conditionalFormatting/>', ("missing-native-cf-attribute", "xl/worksheets/first.xml", "attribute", "sqref")),
     ('<conditionalFormatting sqref=""/>', ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "")),
@@ -342,6 +374,18 @@ def test_container_inventory_sqref_geometry(tmp_path, sqref, expected):
 ])
 def test_container_inventory_attributes_and_children(tmp_path, body, expected):
     assert inventory_error(package(tmp_path / "attributes.xlsx", sheet_one=worksheet(body))) == expected
+
+
+@pytest.mark.parametrize(("body", "field", "detail"), [
+    ('<conditionalFormatting sqref="A6">text</conditionalFormatting>', "conditionalFormatting", "text"),
+    ('<conditionalFormatting sqref="A6"><cfRule/>tail</conditionalFormatting>', "conditionalFormatting", "tail"),
+    ('<conditionalFormatting sqref="A6"><cfRule>text</cfRule></conditionalFormatting>', "cfRule", "text"),
+    ('<conditionalFormatting sqref="A6"><cfRule><formula/>tail</cfRule></conditionalFormatting>', "cfRule", "tail"),
+])
+def test_container_inventory_matches_presence_content_boundary(tmp_path, body, field, detail):
+    assert inventory_error(package(tmp_path / "inventory-mixed.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-native-cf-content", "xl/worksheets/first.xml", field, detail,
+    )
 
 
 def test_container_inventory_xml_and_x14_precedence(tmp_path):
@@ -366,6 +410,51 @@ def test_container_inventory_xml_and_x14_precedence(tmp_path):
         "unsupported_x14_content", "xl/worksheets/first.xml", "tag",
         "{http://schemas.microsoft.com/office/spreadsheetml/2009/9/main}conditionalFormatting",
     )
+
+
+@pytest.mark.parametrize(("payload", "expected"), [
+    (b"", ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'<?xml version="1.0" encoding="UTF-8"<worksheet/>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'<?xml version="1.0" encoding="unknown-encoding"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<?xml version="1.0" encoding="UTF-7"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><conditionalFormatting xr:uid="{01234567-89ab-cdef-0123-456789abcdef}" sqref="A6"/></worksheet>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><conditionalFormatting sqref="A6" sqref="B6"/></worksheet>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:a="urn:duplicate" xmlns:b="urn:duplicate"><conditionalFormatting sqref="A6" a:value="1" b:value="2"/></worksheet>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+])
+def test_container_inventory_xml_parser_regressions(tmp_path, payload, expected):
+    assert inventory_error(package(tmp_path / "inventory-xml-regression.xlsx", sheet_one=payload)) == expected
+
+
+@pytest.mark.parametrize(("filename", "payload"), [
+    (
+        "inventory-utf8-bom.xlsx",
+        b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+    ),
+    (
+        "inventory-utf16.xlsx",
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'.encode("utf-16"),
+    ),
+    (
+        "inventory-dtd.xlsx",
+        b'<!DOCTYPE worksheet [<!ENTITY ignored "<x14:cfRule/>">]>'
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        b'xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"/>',
+    ),
+])
+def test_container_inventory_bom_encoding_and_unused_dtd_text(tmp_path, filename, payload):
+    expected = WorkbookNativeCfContainerInventory((
+        WorksheetNativeCfContainerInventory(
+            WorksheetDescriptor("Первый", 1, "visible", "one", PART),
+            (),
+        ),
+        WorksheetNativeCfContainerInventory(
+            WorksheetDescriptor("Второй", 2, "visible", "two", CanonicalPartURI("xl/worksheets/второй.xml")),
+            (),
+        ),
+    ))
+    assert read_worksheet_native_cf_container_inventory(
+        package(tmp_path / filename, sheet_one=payload),
+    ) == expected
 
 
 @pytest.mark.parametrize("read", [

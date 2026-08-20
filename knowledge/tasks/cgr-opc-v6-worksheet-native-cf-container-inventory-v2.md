@@ -62,3 +62,4 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_native_cf_r
 - Both readers use the same private package/topology/member/byte-ElementTree pipeline; each worksheet payload crosses one ElementTree.fromstring(payload_bytes) boundary before x14 or native validation.
 - Added exact projection, immutability, strict A1/sqref, attribute/child, XML/x14 precedence, and single-parse regression coverage.
 - Validation on 2026-08-20: targeted acceptance 314 passed; full suite 1066 passed (one existing OpenPyXL extension warning).
+- P6 parity remediation on 2026-08-20: inventory now executes the accepted content boundary after placement and before projection; focused acceptance 332 passed and full suite 1084 passed (the same existing OpenPyXL warning).
