@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from typing import Final
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, LargeZipFile, ZipFile
+import zlib
 
 from .opc_part_uri import CanonicalPartURI, OPCPartURIError, canonicalize_part_uri
 from .opc_workbook_topology import WorksheetDescriptor, read_workbook_topology
@@ -18,6 +20,10 @@ _CONTAINER: Final = f"{{{_SML}}}conditionalFormatting"
 _RULE: Final = f"{{{_SML}}}cfRule"
 _X14_LOCALS: Final = frozenset({"conditionalFormattings", "conditionalFormatting", "cfRule"})
 _OWNED_LOCALS: Final = frozenset({"conditionalFormatting", "cfRule"})
+_XML_DECLARATION_ENCODING: Final = re.compile(
+    br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 
 __all__ = (
     "OPCWorksheetNativeCfReaderError",
@@ -62,7 +68,7 @@ def _coerce_package_path(value: os.PathLike[str] | str) -> str:
         path = os.fspath(value)
     except TypeError as error:
         _fail("invalid-package-path", subject, "path", type(error).__name__)
-    except (ValueError, OSError) as error:
+    except Exception as error:
         _fail("unreadable-package", subject, "path", type(error).__name__)
     if not isinstance(path, str):
         _fail("invalid-package-path", subject, "path", type(path).__name__)
@@ -80,8 +86,11 @@ def _member(path: str, part: CanonicalPartURI) -> bytes:
                 try:
                     canonical = canonicalize_part_uri(info.filename)
                 except OPCPartURIError:
-                    _fail("unreadable-worksheet-part", part.value, "member", "invalid-member-name")
-                if canonical == part:
+                    if _case_dot_key(info.filename) != part.value.casefold():
+                        _fail("unreadable-worksheet-part", part.value, "member", "invalid-member-name")
+                    matches.append(info)
+                    continue
+                if canonical == part or _case_dot_key(info.filename) == part.value.casefold():
                     matches.append(info)
             if not matches:
                 _fail("missing-worksheet-member", part.value, "member", part.value)
@@ -93,7 +102,7 @@ def _member(path: str, part: CanonicalPartURI) -> bytes:
             return archive.read(info)
     except OPCWorksheetNativeCfReaderError:
         raise
-    except (BadZipFile, LargeZipFile, KeyError, OSError, RuntimeError, ValueError) as error:
+    except (BadZipFile, LargeZipFile, KeyError, OSError, RuntimeError, ValueError, zlib.error) as error:
         _fail("unreadable-worksheet-part", part.value, "xml", type(error).__name__)
     raise AssertionError("unreachable")
 
@@ -103,7 +112,15 @@ def _xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
         root = ET.fromstring(payload)
     except LookupError:
         _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
-    except (ET.ParseError, UnicodeError, ValueError):
+    except ValueError:
+        if _declares_xml_encoding(payload):
+            _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
+        _fail("malformed-worksheet-xml", part.value, "xml", "xml")
+    except ET.ParseError as error:
+        if "unknown encoding" in str(error).lower():
+            _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
+        _fail("malformed-worksheet-xml", part.value, "xml", "xml")
+    except UnicodeError:
         _fail("malformed-worksheet-xml", part.value, "xml", "xml")
     if root.tag != _WORKSHEET:
         _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
@@ -112,6 +129,28 @@ def _xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
 
 def _local(tag: object) -> str:
     return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _case_dot_key(value: str) -> str | None:
+    """Normalize only raw case and dot aliases for member rejection."""
+    if not value or value.startswith("/") or value.endswith("/") or "//" in value:
+        return None
+    segments: list[str] = []
+    for segment in value.split("/"):
+        if segment == ".":
+            continue
+        if segment == "..":
+            if not segments:
+                return None
+            segments.pop()
+            continue
+        segments.append(segment)
+    return "/".join(segments).casefold()
+
+
+def _declares_xml_encoding(payload: bytes) -> bool:
+    candidate = payload[3:] if payload.startswith(b"\xef\xbb\xbf") else payload
+    return _XML_DECLARATION_ENCODING.match(candidate) is not None
 
 
 def _x14_hard_stop(root: ET.Element, part: CanonicalPartURI) -> None:

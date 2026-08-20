@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from zipfile import ZipFile
 
 import pytest
 
@@ -96,6 +97,7 @@ class _PathLike:
     (TypeError("bad"), "invalid-package-path", "TypeError"),
     (ValueError("bad"), "unreadable-package", "ValueError"),
     (OSError("bad"), "unreadable-package", "OSError"),
+    (Exception("bad"), "unreadable-package", "Exception"),
     (b"not-a-path", "invalid-package-path", "bytes"),
 ])
 def test_pathlike_failures_are_typed_and_called_once(outcome, code, detail):
@@ -114,7 +116,11 @@ def test_direct_bytes_and_nul_path_are_typed_before_topology():
 @pytest.mark.parametrize(("member_name", "extra_members", "expected"), [
     ("xl/worksheets/missing.xml", (), ("missing-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/first.xml")),
     ("xl/worksheets/%66irst.xml", (), ("noncanonical-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/%66irst.xml")),
+    ("xl/worksheets/First.xml", (), ("noncanonical-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/First.xml")),
+    ("xl/worksheets/./first.xml", (), ("noncanonical-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/./first.xml")),
     ("xl/worksheets/first.xml", (("xl/worksheets/%66irst.xml", worksheet()),), ("ambiguous-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/first.xml")),
+    ("xl/worksheets/first.xml", (("xl/worksheets/First.xml", worksheet()),), ("ambiguous-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/first.xml")),
+    ("xl/worksheets/first.xml", (("xl/worksheets/./first.xml", worksheet()),), ("ambiguous-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/first.xml")),
     ("xl/worksheets/first.xml", (("../invalid.xml", worksheet()),), ("unreadable-worksheet-part", "xl/worksheets/first.xml", "member", "invalid-member-name")),
 ])
 def test_raw_member_boundary_is_strict(monkeypatch, tmp_path, member_name, extra_members, expected):
@@ -130,10 +136,35 @@ def test_bad_zip_is_typed(monkeypatch, tmp_path):
     assert error(path) == ("unreadable-worksheet-part", "xl/worksheets/first.xml", "xml", "BadZipFile")
 
 
+def test_empty_native_zip_is_missing_topology_owned_member(monkeypatch, tmp_path):
+    isolated_topology(monkeypatch)
+    path = tmp_path / "empty.zip"
+    with ZipFile(path, "w"):
+        pass
+    assert error(path) == ("missing-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/first.xml")
+
+
+def test_zlib_decompression_failure_is_typed(monkeypatch, tmp_path):
+    isolated_topology(monkeypatch)
+    path = package(tmp_path / "corrupt.xlsx", sheet_one=worksheet("<ext>" + "a" * 10_000 + "</ext>"))
+    with ZipFile(path) as archive:
+        info = archive.getinfo("xl/worksheets/first.xml")
+        payload_start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    contents = bytearray(path.read_bytes())
+    contents[payload_start] ^= 0xFF
+    path.write_bytes(contents)
+    assert error(path) == ("unreadable-worksheet-part", "xl/worksheets/first.xml", "xml", "error")
+
+
 @pytest.mark.parametrize(("payload", "expected"), [
+    (b"", ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
     (b'<?xml version="1.0" encoding="UTF-8"<worksheet/>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
     (b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-16"?><worksheet/>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
     (b'<?xml version="1.0" encoding="unknown-encoding"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<?xml version="1.0" encoding="UTF-7"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<?xml version="1.0" encoding="UTF-32"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<?xml version="1.0" encoding="EBCDIC-CP-US"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<?xml version="1.0" encoding="UTF-16LE"?><worksheet/>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
     (b"<notWorksheet/>", ("invalid-worksheet-root", "xl/worksheets/first.xml", "root", "notWorksheet")),
 ])
 def test_xml_boundaries_are_typed(tmp_path, payload, expected):
@@ -171,6 +202,11 @@ def test_foreign_or_empty_namespace_owned_lookalikes_fail_closed(tmp_path, body,
 def test_foreign_lookalikes_outside_owned_positions_are_not_claimed(tmp_path):
     body = '<ext xmlns="urn:foreign"><conditionalFormatting><cfRule/></conditionalFormatting></ext>'
     assert read_worksheet_native_cf_presence(package(tmp_path / "foreign.xlsx", sheet_one=worksheet(body))).worksheets[0].has_native_conditional_formatting is False
+
+
+def test_unrelated_extension_coexists_with_native_cf_absence(tmp_path):
+    body = '<extLst><ext uri="urn:unrelated"><payload/></ext></extLst>'
+    assert read_worksheet_native_cf_presence(package(tmp_path / "extension.xlsx", sheet_one=worksheet(body))).worksheets[0].has_native_conditional_formatting is False
 
 
 @pytest.mark.parametrize(("body", "local"), [
