@@ -33,7 +33,15 @@ function Write-AtomicProtocolJson {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)]$Value
+        [Parameter(Mandatory = $true)]$Value,
+        [scriptblock]$ReplaceFile = {
+            param($Source, $Destination, $Backup)
+            [System.IO.File]::Replace($Source, $Destination, $Backup)
+        },
+        [scriptblock]$RemoveFile = {
+            param($Target)
+            [System.IO.File]::Delete($Target)
+        }
     )
 
     $destination = [System.IO.Path]::GetFullPath($Path)
@@ -43,6 +51,8 @@ function Write-AtomicProtocolJson {
     $temporary = Join-Path $directory ('.{0}.{1}.tmp' -f [System.IO.Path]::GetFileName($destination), [Guid]::NewGuid().ToString('N'))
     $backup = $null
     $stream = $null
+    $primaryFailure = $null
+    $cleanupFailures = [System.Collections.Generic.List[object]]::new()
     try {
         $json = $Value | ConvertTo-Json -Compress -Depth 16
         $bytes = New-Object System.Text.UTF8Encoding($false)
@@ -54,20 +64,40 @@ function Write-AtomicProtocolJson {
         $stream = $null
         if ([System.IO.File]::Exists($destination)) {
             $backup = Join-Path $directory ('.{0}.{1}.bak' -f [System.IO.Path]::GetFileName($destination), [Guid]::NewGuid().ToString('N'))
-            [System.IO.File]::Replace($temporary, $destination, $backup)
-            [System.IO.File]::Delete($backup)
-            $backup = $null
+            & $ReplaceFile $temporary $destination $backup
         }
         else {
             [System.IO.File]::Move($temporary, $destination)
         }
     }
+    catch {
+        $primaryFailure = $_.Exception
+    }
     finally {
-        if ($null -ne $stream) { $stream.Dispose() }
-        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
-        # A failed replace can leave its backup behind. Do not suppress a
-        # deletion failure: it is explicit durability-cleanup evidence.
-        if ($null -ne $backup -and [System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
+        if ($null -ne $stream) {
+            try { $stream.Dispose() }
+            catch { $cleanupFailures.Add([ordered]@{ target = 'stream'; message = $_.Exception.Message; exception = $_.Exception }) }
+        }
+        foreach ($entry in @(@{ target = 'temporary'; path = $temporary }, @{ target = 'backup'; path = $backup })) {
+            if ($null -ne $entry.path -and [System.IO.File]::Exists([string]$entry.path)) {
+                try { & $RemoveFile ([string]$entry.path) }
+                catch { $cleanupFailures.Add([ordered]@{ target = $entry.target; message = $_.Exception.Message; exception = $_.Exception }) }
+            }
+        }
+    }
+    if ($null -ne $primaryFailure) {
+        if ($cleanupFailures.Count -gt 0) {
+            $primaryFailure.Data['cleanup_failure'] = $cleanupFailures[0]
+            $primaryFailure.Data['cleanup_failures'] = $cleanupFailures.ToArray()
+        }
+        throw $primaryFailure
+    }
+    if ($cleanupFailures.Count -gt 0) {
+        $cleanupFailure = $cleanupFailures[0]
+        $failure = [System.InvalidOperationException]::new(('atomic_json_cleanup_failed:{0}:{1}' -f $cleanupFailure.target, $cleanupFailure.message), $cleanupFailure.exception)
+        $failure.Data['cleanup_failure'] = $cleanupFailure
+        $failure.Data['cleanup_failures'] = $cleanupFailures.ToArray()
+        throw $failure
     }
 }
 

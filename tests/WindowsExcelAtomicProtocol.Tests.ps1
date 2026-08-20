@@ -33,13 +33,54 @@ Describe 'Windows Excel atomic protocol' {
         (Get-Content -Raw -LiteralPath $path | ConvertFrom-Json).value | Should -Be 'новое'
         @(Get-ChildItem -LiteralPath $script:root -Filter '*.tmp').Count | Should -Be 0
         @(Get-ChildItem -LiteralPath $script:root -Filter '*.bak').Count | Should -Be 0
+
+        $cleanupOrder = [System.Collections.Generic.List[string]]::new()
+        $replacePrimary = [System.Runtime.InteropServices.COMException]::new('replace failed', [int]0x80004005)
+        $temporaryCleanup = [System.ComponentModel.Win32Exception]::new(5, 'temporary cleanup denied')
+        $backupCleanup = [System.ComponentModel.Win32Exception]::new(32, 'backup cleanup locked')
+        $captured = $null
+        try {
+            Write-AtomicProtocolJson -Path $path -Value ([ordered]@{ value = 'unpublished' }) -ReplaceFile {
+                param($source, $destination, $backup)
+                [System.IO.File]::WriteAllText($backup, 'backup', [System.Text.UTF8Encoding]::new($false))
+                throw $replacePrimary
+            } -RemoveFile {
+                param($target)
+                if ($target -like '*.tmp') { $cleanupOrder.Add('temporary'); throw $temporaryCleanup }
+                $cleanupOrder.Add('backup'); throw $backupCleanup
+            }
+        }
+        catch { $captured = $_.Exception }
+        $captured.HResult | Should -Be $replacePrimary.HResult
+        $captured.Data['cleanup_failure'].target | Should -Be 'temporary'
+        $captured.Data['cleanup_failure'].exception.NativeErrorCode | Should -Be 5
+        @($captured.Data['cleanup_failures']).Count | Should -Be 2
+        $cleanupOrder | Should -Be @('temporary', 'backup')
+        foreach ($residue in (Get-ChildItem -LiteralPath $script:root -File | Where-Object { $_.Extension -in @('.tmp', '.bak') })) { [System.IO.File]::Delete($residue.FullName) }
+
+        $cleanupPath = [System.Collections.Generic.List[string]]::new()
+        $cleanupCaptured = $null
+        try {
+            Write-AtomicProtocolJson -Path $path -Value ([ordered]@{ value = 'published-before-cleanup-failure' }) -RemoveFile {
+                param($target)
+                $cleanupPath.Add($target)
+                throw [System.ComponentModel.Win32Exception]::new(32, 'backup cleanup locked')
+            }
+        }
+        catch { $cleanupCaptured = $_.Exception }
+        $cleanupCaptured.Message | Should -BeLike 'atomic_json_cleanup_failed:backup:*'
+        $cleanupCaptured.Data['cleanup_failure'].exception.NativeErrorCode | Should -Be 32
+        (Get-Content -Raw -LiteralPath $path | ConvertFrom-Json).value | Should -Be 'published-before-cleanup-failure'
+        foreach ($residue in $cleanupPath) { if (Test-Path -LiteralPath $residue) { [System.IO.File]::Delete($residue) } }
+        @(Get-ChildItem -LiteralPath $script:root -Filter '*.tmp').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $script:root -Filter '*.bak').Count | Should -Be 0
     }
 
     It 'flushes the stream to disk before disposal and replacement' {
         $source = Get-Content -Raw -LiteralPath $script:modulePath
         $flush = $source.IndexOf('$stream.Flush($true)', [System.StringComparison]::Ordinal)
         $dispose = $source.IndexOf('$stream.Dispose()', [System.StringComparison]::Ordinal)
-        $replace = $source.IndexOf('[System.IO.File]::Replace', [System.StringComparison]::Ordinal)
+        $replace = $source.IndexOf('& $ReplaceFile $temporary $destination $backup', [System.StringComparison]::Ordinal)
         $flush | Should -BeGreaterThan -1
         $dispose | Should -BeGreaterThan $flush
         $replace | Should -BeGreaterThan $dispose
