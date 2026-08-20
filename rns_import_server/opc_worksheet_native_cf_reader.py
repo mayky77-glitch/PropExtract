@@ -90,7 +90,9 @@ def _member(path: str, part: CanonicalPartURI) -> bytes:
                         _fail("unreadable-worksheet-part", part.value, "member", "invalid-member-name")
                     matches.append(info)
                     continue
-                if canonical == part or _case_dot_key(info.filename) == part.value.casefold():
+                if canonical == part or canonical.value.casefold() == part.value.casefold() or (
+                    _case_dot_key(info.filename) == part.value.casefold()
+                ):
                     matches.append(info)
             if not matches:
                 _fail("missing-worksheet-member", part.value, "member", part.value)
