@@ -161,3 +161,219 @@ def test_rejects_owned_tags_outside_their_exact_legal_parent(tmp_path, leak, tag
         "invalid-owned-worksheet-parent", "xl/worksheets/first.xml", "tag",
         "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}" + tag,
     )
+
+
+class _PathLikeFailure:
+    def __init__(self, outcome):
+        self.outcome = outcome
+
+    def __fspath__(self):
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (b"book.xlsx", ("invalid-package-path", "builtins.bytes", "path", "bytes")),
+    (_PathLikeFailure(TypeError()), ("invalid-package-path", f"{__name__}._PathLikeFailure", "path", "TypeError")),
+    (_PathLikeFailure(ValueError()), ("unreadable-package", f"{__name__}._PathLikeFailure", "path", "ValueError")),
+    (_PathLikeFailure(OSError()), ("unreadable-package", f"{__name__}._PathLikeFailure", "path", "OSError")),
+    # os.fspath itself rejects a non-string __fspath__ result as TypeError.
+    (_PathLikeFailure(6), ("invalid-package-path", f"{__name__}._PathLikeFailure", "path", "TypeError")),
+    ("bad\x00.xlsx", ("unreadable-package", "bad\x00.xlsx", "path", "embedded-nul")),
+])
+def test_pathlike_boundary_matrix_is_exact(value, expected):
+    assert error(value) == expected
+
+
+def test_member_alias_and_canonical_collision_are_distinct_and_typed(tmp_path):
+    alias = package(tmp_path / "alias.xlsx", sheet_one_name="xl/worksheets/%66irst.xml")
+    assert error(alias) == (
+        "noncanonical-worksheet-member", "xl/worksheets/first.xml", "member", "xl/worksheets/%66irst.xml"
+    )
+    collision = package(
+        tmp_path / "collision.xlsx", extra_members=(("xl/worksheets/%66irst.xml", worksheet()),)
+    )
+    assert error(collision) == (
+        "duplicate-normalized-part", "xl/worksheets/first.xml", "name", "xl/worksheets/%66irst.xml"
+    )
+    missing = package(tmp_path / "missing-member.xlsx", sheet_one_name="xl/worksheets/missing.xml")
+    assert error(missing) == (
+        "missing-internal-target", "xl/workbook.xml", "Target", "worksheets/first.xml"
+    )
+
+
+@pytest.mark.parametrize(("payload", "expected"), [
+    (
+        b'<?xml version="1.0" encoding="UTF-16"?><worksheet>',
+        ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml"),
+    ),
+    (
+        b'<?xml version="1.0" encoding="utf-7"?><worksheet/>',
+        ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding"),
+    ),
+    (b"<worksheet/>", ("invalid-worksheet-root", "xl/worksheets/first.xml", "root", "worksheet")),
+    (
+        b'<worksheet xmlns=""><sheetData/></worksheet>',
+        ("invalid-worksheet-root", "xl/worksheets/first.xml", "root", "worksheet"),
+    ),
+    (
+        b'<worksheet xmlns="urn:foreign"><sheetData/></worksheet>',
+        ("invalid-worksheet-root", "xl/worksheets/first.xml", "root", "{urn:foreign}worksheet"),
+    ),
+])
+def test_xml_boundary_failure_matrix_forwards_cell_error_unchanged(tmp_path, payload, expected):
+    assert error(package(tmp_path / "xml-boundary.xlsx", sheet_one=payload)) == expected
+
+
+def test_utf8_declaration_and_bom_are_accepted_before_structure_projection(tmp_path):
+    payload = (
+        b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>'
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData></worksheet>'
+    )
+    result = read_worksheet_structure_semantics(package(tmp_path / "utf8-bom.xlsx", sheet_one=payload))
+    assert [(item.worksheet.worksheet_part.value, [row.row for row in item.rows]) for item in result.worksheets] == [
+        ("xl/worksheets/first.xml", [6]), ("xl/worksheets/второй.xml", [6, 10, 104])
+    ]
+
+
+@pytest.mark.parametrize(("owner", "payload", "expected"), [
+    ("worksheet", b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">bad<sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData></worksheet>', ("invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "text")),
+    ("dimension", worksheet(dimension='<dimension ref="A6">bad</dimension>'), ("invalid-worksheet-content", "xl/worksheets/first.xml", "dimension", "nested")),
+    ("sheetData", worksheet(rows='<row r="6"><c r="A6"><v>1</v></c></row>bad'), ("invalid-worksheet-content", "xl/worksheets/first.xml", "sheetData", "tail")),
+    ("row", worksheet(rows='<row r="6">bad<c r="A6"><v>1</v></c></row>'), ("invalid-worksheet-content", "xl/worksheets/first.xml", "row", "text")),
+    ("autoFilter", worksheet(auto_filter='<autoFilter ref="A6">bad</autoFilter>'), ("invalid-auto-filter-content", "xl/worksheets/first.xml", "autoFilter", "nested")),
+    ("mergeCells", worksheet(merges='<mergeCells count="0">bad</mergeCells>'), ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCells", "text")),
+    ("mergeCell", worksheet(merges='<mergeCells count="1"><mergeCell ref="A6">bad</mergeCell></mergeCells>'), ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCell", "nested")),
+])
+def test_owned_content_owners_report_exact_matrix(tmp_path, owner, payload, expected):
+    assert error(package(tmp_path / f"{owner}.xlsx", sheet_one=payload)) == expected
+
+
+@pytest.mark.parametrize(("fragment", "expected"), [
+    ('<dimension ref="A6" bad="x"/>', ("unknown-dimension-attribute", "xl/worksheets/first.xml", "attribute", "bad")),
+    ('<sheetData bad="x"><row r="6"><c r="A6"><v>1</v></c></row></sheetData>', ("unknown-sheet-data-attribute", "xl/worksheets/first.xml", "attribute", "bad")),
+    ('<autoFilter ref="A6" bad="x"/>', ("unknown-auto-filter-attribute", "xl/worksheets/first.xml", "attribute", "bad")),
+    ('<mergeCells count="0" bad="x"/>', ("unknown-merge-cells-attribute", "xl/worksheets/first.xml", "attribute", "bad")),
+    ('<mergeCells count="1"><mergeCell ref="A6" bad="x"/></mergeCells>', ("unknown-merge-cell-attribute", "xl/worksheets/first.xml", "attribute", "bad")),
+])
+def test_owned_unknown_attribute_matrix_is_exact(tmp_path, fragment, expected):
+    if fragment.startswith("<dimension"):
+        payload = worksheet(dimension=fragment)
+    elif fragment.startswith("<sheetData"):
+        payload = (f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{fragment}</worksheet>').encode()
+    elif fragment.startswith("<autoFilter"):
+        payload = worksheet(auto_filter=fragment)
+    else:
+        payload = worksheet(merges=fragment)
+    assert error(package(tmp_path / "unknown-owner.xlsx", sheet_one=payload)) == expected
+
+
+@pytest.mark.parametrize(("namespace", "prefix", "detail"), [
+    ("urn:foreign", "x:", "{urn:foreign}"),
+    ("", "", ""),
+])
+@pytest.mark.parametrize("tag", ["dimension", "sheetData", "row", "autoFilter", "mergeCells", "mergeCell"])
+def test_all_owned_local_names_reject_foreign_and_empty_namespace_collisions(tmp_path, namespace, prefix, detail, tag):
+    declaration = ' xmlns:x="urn:foreign"' if namespace else ""
+    reset = ' xmlns=""' if not namespace else ""
+    payload = (
+        f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"{declaration}>'
+        f'<sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData>'
+        f'<{prefix}{tag}{reset}/></worksheet>'
+    ).encode()
+    assert error(package(tmp_path / f"namespace-{tag}-{namespace or 'empty'}.xlsx", sheet_one=payload)) == (
+        "owned-worksheet-namespace-collision", "xl/worksheets/first.xml", "tag", f"{detail}{tag}"
+    )
+
+
+@pytest.mark.parametrize(("reference", "expected"), [
+    ("a6", ("A6", "A6", 6, 6, 1, 1)),
+    ("$a$6:$xfd$1048576", ("A6", "XFD1048576", 6, 1048576, 1, 16384)),
+    ("XFD1048576", ("XFD1048576", "XFD1048576", 1048576, 1048576, 16384, 16384)),
+])
+def test_a1_success_matrix_normalizes_exact_values(tmp_path, reference, expected):
+    result = read_worksheet_structure_semantics(
+        package(tmp_path / "a1-success.xlsx", sheet_one=worksheet(dimension=f'<dimension ref="{reference}"/>'))
+    ).worksheets[0].dimension
+    assert result is not None
+    assert (result.start, result.end, result.min_row, result.max_row, result.min_column, result.max_column) == expected
+
+
+@pytest.mark.parametrize("reference", [
+    "", "A:A", "6:6", "Sheet1!A6", "Sheet1:Sheet2!A6", "A0", "A1048577", "XFE1",
+    "AAAA1", "A6:B5", "B6:A7", "A6:B6:C6", "A6;B6", "A6:", ":A6", "A 6",
+])
+def test_complete_a1_failure_matrix_is_exact(tmp_path, reference):
+    assert error(package(tmp_path / "a1-failure.xlsx", sheet_one=worksheet(dimension=f'<dimension ref="{reference}"/>'))) == (
+        "invalid-a1-range", "xl/worksheets/first.xml", "ref", reference
+    )
+
+
+@pytest.mark.parametrize(("rows", "expected"), [
+    ('<row r="6" ht="0" s="0" customHeight="0" customFormat="1" hidden="false" outlineLevel="0" collapsed="true"><c r="A6"><v>1</v></c></row>', (6, 0.0, 0, False, True, False, 0, True)),
+    ('<row r="10" ht=" 1E2 " s="+4294967295" customHeight="1" customFormat="0" hidden="1" outlineLevel="7" collapsed="0"><c r="A10"><v>1</v></c></row>', (10, 100.0, 4294967295, True, False, True, 7, False)),
+    ('<row r="104"><c r="A104"><v>1</v></c></row>', (104, None, None, None, None, None, None, None)),
+])
+def test_row_property_success_boundaries_preserve_all_fields(tmp_path, rows, expected):
+    record = read_worksheet_structure_semantics(
+        package(tmp_path / "row-success.xlsx", sheet_one=worksheet(rows=rows))
+    ).worksheets[0].rows[0]
+    assert (record.row, record.height, record.style_index, record.custom_height, record.custom_format, record.hidden, record.outline_level, record.collapsed) == expected
+
+
+@pytest.mark.parametrize(("row", "expected"), [
+    ('<row><c r="A6"><v>1</v></c></row>', ("invalid-row", "xl/worksheets/first.xml", "r", "")),
+    ('<row r="0"><c r="A1"><v>1</v></c></row>', ("invalid-row", "xl/worksheets/first.xml", "r", "0")),
+    ('<row r="1048577"><c r="A1048577"><v>1</v></c></row>', ("invalid-row", "xl/worksheets/first.xml", "r", "1048577")),
+    ('<row r="6" s="4294967296"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "s", "4294967296")),
+    ('<row r="6" outlineLevel="8"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "outlineLevel", "8")),
+    ('<row r="6" hidden="yes"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "hidden", "yes")),
+    ('<row r="6" nope="x"><c r="A6"><v>1</v></c></row>', ("unknown-row-attribute", "xl/worksheets/first.xml", "attribute", "nope")),
+])
+def test_row_failure_boundaries_are_exact(tmp_path, row, expected):
+    assert error(package(tmp_path / "row-failure.xlsx", sheet_one=worksheet(rows=row))) == expected
+
+
+def test_merge_matrix_count_order_and_normalized_duplicate_are_exact(tmp_path):
+    cases = [
+        ('<mergeCells count=""><mergeCell ref="A6"/></mergeCells>', ("invalid-merge-count", "xl/worksheets/first.xml", "count", "")),
+        ('<mergeCells count="4294967296"/>', ("invalid-merge-count", "xl/worksheets/first.xml", "count", "4294967296")),
+        ('<mergeCells count="1"><mergeCell ref="A6:B6"/><mergeCell ref="B10:C10"/></mergeCells>', ("merge-count-mismatch", "xl/worksheets/first.xml", "count", "1")),
+        ('<mergeCells count="2"><mergeCell ref="B10:C10"/><mergeCell ref="A6:B6"/></mergeCells>', ("out-of-order-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6")),
+        ('<mergeCells count="2"><mergeCell ref="$a$6:$b$6"/><mergeCell ref="A6:B6"/></mergeCells>', ("duplicate-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6")),
+        ('<mergeCells count="1"><mergeCell/></mergeCells>', ("invalid-a1-range", "xl/worksheets/first.xml", "ref", "")),
+        ('<mergeCells count="1"><bogus/></mergeCells>', ("invalid-merge-cells-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bogus")),
+    ]
+    for index, (merges, expected) in enumerate(cases):
+        assert error(package(tmp_path / f"merge-{index}.xlsx", sheet_one=worksheet(merges=merges))) == expected
+
+
+def test_second_sheet_values_are_independent_and_ordered(tmp_path):
+    second = worksheet(
+        dimension='<dimension ref="B10:XFD1048576"/>',
+        rows='<row r="10"><c r="B10"><v>2</v></c></row><row r="1048576"><c r="XFD1048576"><v>3</v></c></row>',
+        auto_filter='<autoFilter ref="B10:XFD1048576"/>',
+        merges='<mergeCells count="1"><mergeCell ref="B10:C10"/></mergeCells>',
+    )
+    result = read_worksheet_structure_semantics(package(tmp_path / "second.xlsx", sheet_two=second))
+    assert [(item.worksheet.name, item.dimension.start if item.dimension else None, [row.row for row in item.rows], [(merge.start, merge.end) for merge in item.merges], item.auto_filter.reference.end if item.auto_filter else None) for item in result.worksheets] == [
+        ("Первый", "A6", [6, 10, 104], [("A6", "B6"), ("A10", "C104")], "C104"),
+        ("Второй", "B10", [10, 1048576], [("B10", "C10")], "XFD1048576"),
+    ]
+
+
+def test_dependency_precedence_is_topology_then_cell_then_structure(tmp_path):
+    topology_first = package(tmp_path / "topology-first.xlsx", sheet_one_name="xl/worksheets/missing.xml")
+    assert error(topology_first) == (
+        "missing-internal-target", "xl/workbook.xml", "Target", "worksheets/first.xml"
+    )
+    cell_first = worksheet(rows='<row r="10"><c r="A10"><v>1</v></c></row><row r="6"><c r="A6"><v>1</v></c></row>', merges='<mergeCells count="bad"/>')
+    assert error(package(tmp_path / "cell-first.xlsx", sheet_one=cell_first)) == (
+        "out-of-order-row", "xl/worksheets/first.xml", "r", "6"
+    )
+    structure_last = worksheet(rows='<row r="6"><c r="A6"><v>1</v></c></row>', merges='<mergeCells count="bad"/>')
+    assert error(package(tmp_path / "structure-last.xlsx", sheet_one=structure_last)) == (
+        "invalid-merge-count", "xl/worksheets/first.xml", "count", "bad"
+    )
