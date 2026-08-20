@@ -6,6 +6,7 @@ import os
 import re
 from typing import Final
 from xml.etree import ElementTree as ET
+from xml.parsers import expat
 from zipfile import BadZipFile, LargeZipFile, ZipFile
 import zlib
 
@@ -28,7 +29,6 @@ _GUID: Final = re.compile(r"\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A
 _BOOLEANS: Final = {"0": False, "1": True, "false": False, "true": True}
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
-_XML_NAME: Final = re.compile(r"[A-Za-z_:][A-Za-z0-9_.:-]*")
 _XML_DECLARATION_ENCODING: Final = re.compile(
     br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']',
     re.IGNORECASE,
@@ -335,115 +335,171 @@ def _container_attributes(container: ET.Element, part: CanonicalPartURI) -> tupl
     return (sqref, pivot, uid)
 
 
-def _decoded_xml_for_attribute_scan(payload: bytes) -> str | None:
-    if payload.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
-        encoding = "utf-32"
-    elif payload.startswith((b"\xff\xfe", b"\xfe\xff")):
-        encoding = "utf-16"
-    elif payload.startswith(b"\xef\xbb\xbf"):
-        encoding = "utf-8-sig"
-    else:
-        encoding = "utf-8"
-    try:
-        return payload.decode(encoding)
-    except UnicodeError:
+@dataclass
+class _XmlFrame:
+    element: ET.Element
+    namespaces: dict[str, str]
+    last_child: ET.Element | None = None
+
+
+def _expanded_name(name: str, namespaces: dict[str, str], *, attribute: bool) -> str:
+    if name == "xmlns" or name.startswith("xmlns:"):
+        return name
+    if ":" in name:
+        prefix, local = name.split(":", 1)
+        namespace = namespaces.get(prefix)
+        return f"{{{namespace}}}{local}" if namespace is not None else name
+    if attribute:
+        return name
+    namespace = namespaces.get("")
+    return f"{{{namespace}}}{name}" if namespace is not None else name
+
+
+def _xml_parse_failure(payload: bytes, part: CanonicalPartURI, error: Exception) -> None:
+    if isinstance(error, LookupError):
+        _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
+    if isinstance(error, ValueError):
+        if _declares_xml_encoding(payload):
+            _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
+        _fail("malformed-worksheet-xml", part.value, "xml", "xml")
+    if isinstance(error, expat.ExpatError) and "unknown encoding" in str(error).lower():
+        _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
+    _fail("malformed-worksheet-xml", part.value, "xml", "xml")
+
+
+def _native_cf_duplicate_from_parse_error(
+    payload: bytes,
+    parser: expat.xmlparser,
+    frames: list[_XmlFrame],
+) -> str | None:
+    """Classify only expat's current duplicate-attribute parse failure."""
+    error_index = parser.ErrorByteIndex
+    start = payload.rfind(b"<", 0, error_index + 1)
+    end = payload.find(b">", error_index)
+    if start < 0 or end < 0 or not frames:
         return None
-
-
-def _start_tags(text: str):
-    """Yield element name and raw attribute text without interpreting XML data."""
-    position = 0
-    while position < len(text):
-        start = text.find("<", position)
-        if start < 0:
-            return
-        if text.startswith("<!--", start):
-            end = text.find("-->", start + 4)
-            if end < 0:
-                return
-            position = end + 3
-            continue
-        if text.startswith("<![CDATA[", start):
-            end = text.find("]]>", start + 9)
-            if end < 0:
-                return
-            position = end + 3
-            continue
-        if text.startswith("<?", start):
-            end = text.find("?>", start + 2)
-            if end < 0:
-                return
-            position = end + 2
-            continue
-        if text.startswith("</", start) or text.startswith("<!", start):
-            position = start + 2
-            continue
-        name_match = _XML_NAME.match(text, start + 1)
-        if name_match is None:
-            position = start + 1
-            continue
-        cursor = name_match.end()
-        quote: str | None = None
-        while cursor < len(text):
-            character = text[cursor]
-            if quote is not None:
-                if character == quote:
-                    quote = None
-            elif character in {"'", '"'}:
-                quote = character
-            elif character == ">":
-                yield name_match.group(), text[name_match.end():cursor]
-                cursor += 1
-                break
-            cursor += 1
-        position = cursor
-
-
-def _attribute_names(raw: str) -> tuple[str, ...] | None:
-    names: list[str] = []
-    position = 0
+    raw = payload[start + 1:end].rstrip().rstrip(b"/").strip()
+    name_match = re.match(br"([A-Za-z_:][A-Za-z0-9_.:-]*)", raw)
+    if name_match is None:
+        return None
+    parent_namespaces = frames[-1].namespaces
+    position = name_match.end()
+    attributes: list[str] = []
+    declarations: dict[str, str] = {}
     while position < len(raw):
-        while position < len(raw) and raw[position] in _XML_WHITESPACE:
+        while position < len(raw) and raw[position] in b" \t\r\n":
             position += 1
-        if position == len(raw) or raw[position] == "/":
-            return tuple(names)
-        name_match = _XML_NAME.match(raw, position)
-        if name_match is None:
+        attribute_match = re.match(br"[A-Za-z_:][A-Za-z0-9_.:-]*", raw[position:])
+        if attribute_match is None:
             return None
-        names.append(name_match.group())
-        position = name_match.end()
-        while position < len(raw) and raw[position] in _XML_WHITESPACE:
+        attribute = attribute_match.group().decode("ascii")
+        position += attribute_match.end()
+        while position < len(raw) and raw[position] in b" \t\r\n":
             position += 1
-        if position == len(raw) or raw[position] != "=":
+        if position == len(raw) or raw[position] != ord("="):
             return None
         position += 1
-        while position < len(raw) and raw[position] in _XML_WHITESPACE:
+        while position < len(raw) and raw[position] in b" \t\r\n":
             position += 1
-        if position == len(raw) or raw[position] not in {"'", '"'}:
+        if position == len(raw) or raw[position] not in (ord("'"), ord('"')):
             return None
         quote = raw[position]
-        position = raw.find(quote, position + 1)
-        if position < 0:
+        value_end = raw.find(bytes((quote,)), position + 1)
+        if value_end < 0:
             return None
-        position += 1
-    return tuple(names)
+        value = raw[position + 1:value_end].decode("utf-8", "replace")
+        position = value_end + 1
+        if attribute == "xmlns":
+            declarations[""] = value
+        elif attribute.startswith("xmlns:"):
+            declarations[attribute[6:]] = value
+        else:
+            attributes.append(attribute)
+    namespaces = parent_namespaces | declarations
+    tag = _expanded_name(name_match.group().decode("ascii"), namespaces, attribute=False)
+    if frames[-1].element.tag != _WORKSHEET or tag != _CONTAINER:
+        return None
+    seen: set[str] = set()
+    for attribute in attributes:
+        expanded = _expanded_name(attribute, namespaces, attribute=True)
+        if expanded in seen:
+            return expanded
+        seen.add(expanded)
+    return None
 
 
-def _reject_duplicate_container_attributes(payload: bytes, part: CanonicalPartURI) -> None:
-    text = _decoded_xml_for_attribute_scan(payload)
-    if text is None:
-        return
-    for name, raw_attributes in _start_tags(text):
-        if name.rsplit(":", 1)[-1] != "conditionalFormatting":
-            continue
-        names = _attribute_names(raw_attributes)
-        if names is None:
-            continue
-        seen: set[str] = set()
-        for attribute in names:
-            if attribute in seen:
-                _fail("duplicate-native-cf-attribute", part.value, "attribute", attribute)
-            seen.add(attribute)
+def _inventory_xml(payload: bytes, part: CanonicalPartURI) -> tuple[ET.Element, str | None]:
+    """One expat event pipeline, including expanded-QName duplicate detection."""
+    parser = expat.ParserCreate()
+    parser.ordered_attributes = True
+    frames: list[_XmlFrame] = []
+    root: ET.Element | None = None
+    duplicate: str | None = None
+
+    def start(name: str, values: list[str]) -> None:
+        nonlocal duplicate, root
+        parent_namespaces = frames[-1].namespaces if frames else {}
+        namespaces = dict(parent_namespaces)
+        pairs = tuple(zip(values[::2], values[1::2], strict=True))
+        for attribute, value in pairs:
+            if attribute == "xmlns":
+                namespaces[""] = value
+            elif attribute.startswith("xmlns:"):
+                namespaces[attribute[6:]] = value
+        tag = _expanded_name(name, namespaces, attribute=False)
+        attributes: dict[str, str] = {}
+        for attribute, value in pairs:
+            if attribute == "xmlns" or attribute.startswith("xmlns:"):
+                continue
+            expanded = _expanded_name(attribute, namespaces, attribute=True)
+            if (
+                duplicate is None
+                and frames
+                and frames[-1].element.tag == _WORKSHEET
+                and tag == _CONTAINER
+                and expanded in attributes
+            ):
+                duplicate = expanded
+            attributes[expanded] = value
+        element = ET.Element(tag, attributes)
+        if frames:
+            frames[-1].element.append(element)
+            frames[-1].last_child = element
+        else:
+            root = element
+        frames.append(_XmlFrame(element, namespaces))
+
+    def end(name: str) -> None:
+        del name
+        frames.pop()
+
+    def characters(value: str) -> None:
+        if not frames:
+            return
+        frame = frames[-1]
+        if frame.last_child is None:
+            frame.element.text = (frame.element.text or "") + value
+        else:
+            frame.last_child.tail = (frame.last_child.tail or "") + value
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = characters
+    try:
+        parser.Parse(payload, True)
+    except (LookupError, ValueError, expat.ExpatError) as error:
+        if isinstance(error, expat.ExpatError) and "duplicate attribute" in str(error).lower():
+            duplicate = duplicate or _native_cf_duplicate_from_parse_error(payload, parser, frames)
+            if duplicate is not None and root is not None:
+                if root.tag != _WORKSHEET:
+                    _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
+                return root, duplicate
+        _xml_parse_failure(payload, part, error)
+    if root is None or frames:
+        _fail("malformed-worksheet-xml", part.value, "xml", "xml")
+    if root.tag != _WORKSHEET:
+        _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
+    return root, duplicate
 
 
 def _container_inventory(container: ET.Element, part: CanonicalPartURI, index: int) -> NativeCfContainerInventory:
@@ -497,9 +553,10 @@ def read_worksheet_native_cf_container_inventory(
     for worksheet in topology.worksheets:
         part = worksheet.worksheet_part
         payload = _member(path, part)
-        _reject_duplicate_container_attributes(payload, part)
-        root = _xml(payload, part)
+        root, duplicate = _inventory_xml(payload, part)
         _x14_hard_stop(root, part)
+        if duplicate is not None:
+            _fail("duplicate-native-cf-attribute", part.value, "attribute", duplicate)
         _validate_owned_placement(root, part)
         records.append(WorksheetNativeCfContainerInventory(worksheet, _inventory(root, part)))
     return WorkbookNativeCfContainerInventory(tuple(records))

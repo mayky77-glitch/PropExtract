@@ -307,6 +307,10 @@ def test_inventory_projects_ordered_containers_ranges_and_immutable_records(tmp_
         result.worksheets[0].containers[0].rule_count = 0
     with pytest.raises(FrozenInstanceError):
         result.worksheets[0].containers[0].sqref[0].start_coordinate = "B6"
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets = ()
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].containers = ()
 
 
 def test_inventory_absent_containers_are_empty_tuples(tmp_path):
@@ -339,11 +343,15 @@ def test_inventory_normalizes_strict_a1_endpoints(tmp_path, sqref, expected):
     ("A0", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A0")),
     ("XFE1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "XFE1")),
     ("A1048577", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1048577")),
+    ("A11111111", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A11111111")),
     ("A1:B0", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1:B0")),
     ("B2:A1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2:A1")),
+    ("A1 A1", ("duplicate-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1")),
     ("A1:A1 A1", ("duplicate-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1")),
     ("$A$1 A1", ("duplicate-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1")),
+    ("A1:C3 B2:B2", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2:B2")),
     ("A1:B2 B2:C3", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2:C3")),
+    ("A1:C2 B1:B3", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B1:B3")),
 ])
 def test_inventory_rejects_non_a1_duplicate_and_overlapping_sqrefs(tmp_path, sqref, expected):
     xml = f'<conditionalFormatting sqref="{sqref}"/>'
@@ -367,6 +375,41 @@ def test_inventory_rejects_duplicate_container_attribute_before_xml_parser(tmp_p
     payload = worksheet('<conditionalFormatting sqref="A1" sqref="B2"/>')
     assert inventory_error(package(tmp_path / "duplicate.xlsx", sheet_one=payload)) == (
         "duplicate-native-cf-attribute", "xl/worksheets/first.xml", "attribute", "sqref",
+    )
+
+
+def test_inventory_duplicate_expanded_attribute_name_is_typed(tmp_path):
+    body = (
+        '<conditionalFormatting sqref="A1" '
+        'xmlns:one="http://schemas.microsoft.com/office/spreadsheetml/2014/revision" '
+        'xmlns:two="http://schemas.microsoft.com/office/spreadsheetml/2014/revision" '
+        'one:uid="{01234567-89ab-cdef-0123-456789abcdef}" '
+        'two:uid="{fedcba98-7654-3210-fedc-ba9876543210}"/>'
+    )
+    assert inventory_error(package(tmp_path / "expanded-duplicate.xlsx", sheet_one=worksheet(body))) == (
+        "duplicate-native-cf-attribute", "xl/worksheets/first.xml", "attribute",
+        "{http://schemas.microsoft.com/office/spreadsheetml/2014/revision}uid",
+    )
+
+
+def test_inventory_duplicate_detection_uses_xml_events_not_unused_dtd_text(tmp_path):
+    payload = (
+        b'<!DOCTYPE worksheet [<!ENTITY fake \'<conditionalFormatting sqref="A1" sqref="B2"/>\'>]>'
+        + worksheet('<conditionalFormatting sqref="A1"/>')
+    )
+    result = read_worksheet_native_cf_container_inventory(package(tmp_path / "unused-dtd.xlsx", sheet_one=payload))
+    assert result.worksheets[0].containers[0].sqref == (NativeCfA1Range("A1", "A1", 1, 1, 1, 1),)
+
+
+def test_inventory_xml_and_x14_precede_duplicate_attribute_semantics(tmp_path):
+    utf7 = b'<?xml version="1.0" encoding="UTF-7"?><worksheet><conditionalFormatting sqref="A1" sqref="B2"/></worksheet>'
+    assert inventory_error(package(tmp_path / "utf7-duplicate.xlsx", sheet_one=utf7)) == (
+        "unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding",
+    )
+    x14 = worksheet('<x14:cfRule/><conditionalFormatting sqref="A1" sqref="B2"/>')
+    assert inventory_error(package(tmp_path / "x14-duplicate.xlsx", sheet_one=x14)) == (
+        "unsupported_x14_content", "xl/worksheets/first.xml", "tag",
+        "{http://schemas.microsoft.com/office/spreadsheetml/2009/9/main}cfRule",
     )
 
 
