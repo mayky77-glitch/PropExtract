@@ -56,3 +56,5 @@ Acceptance commands:
 ## Implementation evidence
 
 Implemented from direct parent `d6d007528ceed65ed6c6597015c187ea536ee544` without rejected X14-envelope ancestry. 2026-08-20 validation passed: focused `15`, compatibility `398`, full `1150` tests (one existing openpyxl extension warning), `compileall`, and `git diff --check`.
+
+P6 remediation replaced grouped ownership checks with event-ordered full-tree validation, parent-specific native allowances, and a proved DV descendants carve; the same focused, compatibility, full-suite, compile, and diff checks passed.
