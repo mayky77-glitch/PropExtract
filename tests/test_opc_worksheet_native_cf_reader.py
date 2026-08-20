@@ -11,13 +11,18 @@ from rns_import_server.opc_workbook_topology import WorkbookTopology, WorksheetD
 from rns_import_server.opc_worksheet_native_cf_reader import (
     NativeCfA1Range,
     NativeCfContainerInventory,
+    NativeCfRuleCore,
+    NativeCfRuleCoreContainer,
     OPCWorksheetNativeCfReaderError,
     WorkbookNativeCfContainerInventory,
     WorkbookNativeCfPresence,
+    WorkbookNativeCfRuleCoreSemantics,
     WorksheetNativeCfContainerInventory,
     WorksheetNativeCfPresence,
+    WorksheetNativeCfRuleCoreSemantics,
     read_worksheet_native_cf_container_inventory,
     read_worksheet_native_cf_presence,
+    read_worksheet_native_cf_rule_core_semantics,
 )
 from tests.opc_worksheet_native_cf_fixture_factory import package, worksheet
 
@@ -34,6 +39,12 @@ def error(path):
 def inventory_error(path):
     with pytest.raises(OPCWorksheetNativeCfReaderError) as captured:
         read_worksheet_native_cf_container_inventory(path)
+    return captured.value.as_tuple()
+
+
+def rule_core_error(path):
+    with pytest.raises(OPCWorksheetNativeCfReaderError) as captured:
+        read_worksheet_native_cf_rule_core_semantics(path)
     return captured.value.as_tuple()
 
 
@@ -460,10 +471,12 @@ def test_container_inventory_bom_encoding_and_unused_dtd_text(tmp_path, filename
 @pytest.mark.parametrize("read", [
     read_worksheet_native_cf_presence,
     read_worksheet_native_cf_container_inventory,
+    read_worksheet_native_cf_rule_core_semantics,
 ])
 def test_each_public_reader_uses_one_elementtree_parse_per_worksheet(monkeypatch, tmp_path, read):
     isolated_topology(monkeypatch)
-    path = package(tmp_path / "single-parse.xlsx", sheet_one=worksheet('<conditionalFormatting sqref="A6"/>'))
+    payload = worksheet('<conditionalFormatting sqref="A6"><cfRule type="uniqueValues" priority="1"/></conditionalFormatting>')
+    path = package(tmp_path / "single-parse.xlsx", sheet_one=payload)
     original = reader.ET.fromstring
     calls = []
 
@@ -473,4 +486,208 @@ def test_each_public_reader_uses_one_elementtree_parse_per_worksheet(monkeypatch
 
     monkeypatch.setattr(reader.ET, "fromstring", counted)
     read(path)
-    assert calls == [worksheet('<conditionalFormatting sqref="A6"/>')]
+    assert calls == [payload]
+
+
+def test_rule_core_projects_two_sheets_in_document_order_and_is_immutable(tmp_path):
+    first_payload = worksheet(
+        '<conditionalFormatting sqref="A6">'
+        '<cfRule type="expression" priority=" \t+001\n" dxfId="-0" stopIfTrue="false">'
+        '<formula>OR(A6=1,B10=2,C104=3)</formula></cfRule>'
+        '<cfRule type="uniqueValues" priority="2"/></conditionalFormatting>'
+        '<conditionalFormatting sqref="B10"><cfRule type="duplicateValues" priority="3" '
+        'dxfId="4294967295" stopIfTrue="true"/></conditionalFormatting>'
+    )
+    second_payload = worksheet(
+        '<conditionalFormatting sqref="C104"><cfRule type="containsBlanks" priority="1"/></conditionalFormatting>'
+        '<conditionalFormatting sqref="D104"><cfRule type="notContainsBlanks" priority="2"/></conditionalFormatting>'
+        '<conditionalFormatting sqref="E104"><cfRule type="containsErrors" priority="3"/></conditionalFormatting>'
+        '<conditionalFormatting sqref="F104"><cfRule type="notContainsErrors" priority="4"/></conditionalFormatting>'
+    )
+    result = read_worksheet_native_cf_rule_core_semantics(
+        package(tmp_path / "rule-core.xlsx", sheet_one=first_payload, sheet_two=second_payload),
+    )
+    first = WorksheetDescriptor("Первый", 1, "visible", "one", PART)
+    second = WorksheetDescriptor("Второй", 2, "visible", "two", CanonicalPartURI("xl/worksheets/второй.xml"))
+    def container(owner_path, coordinate, row, column, rule_count):
+        return NativeCfContainerInventory(
+            owner_path,
+            (NativeCfA1Range(coordinate, coordinate, row, column, row, column),),
+            None,
+            None,
+            rule_count,
+        )
+
+    first_one = container("xl/worksheets/first.xml/worksheet/conditionalFormatting[1]", "A6", 6, 1, 2)
+    first_two = container("xl/worksheets/first.xml/worksheet/conditionalFormatting[2]", "B10", 10, 2, 1)
+    second_one = container("xl/worksheets/второй.xml/worksheet/conditionalFormatting[1]", "C104", 104, 3, 1)
+    second_two = container("xl/worksheets/второй.xml/worksheet/conditionalFormatting[2]", "D104", 104, 4, 1)
+    second_three = container("xl/worksheets/второй.xml/worksheet/conditionalFormatting[3]", "E104", 104, 5, 1)
+    second_four = container("xl/worksheets/второй.xml/worksheet/conditionalFormatting[4]", "F104", 104, 6, 1)
+    assert result == WorkbookNativeCfRuleCoreSemantics((
+        WorksheetNativeCfRuleCoreSemantics(first, (
+            NativeCfRuleCoreContainer(first_one, (
+                NativeCfRuleCore(
+                    "xl/worksheets/first.xml/worksheet/conditionalFormatting[1]/cfRule[1]",
+                    1, "expression", 1, 0, False, ("OR(A6=1,B10=2,C104=3)",),
+                ),
+                NativeCfRuleCore(
+                    "xl/worksheets/first.xml/worksheet/conditionalFormatting[1]/cfRule[2]",
+                    2, "uniqueValues", 2, None, None, (),
+                ),
+            )),
+            NativeCfRuleCoreContainer(first_two, (
+                NativeCfRuleCore(
+                    "xl/worksheets/first.xml/worksheet/conditionalFormatting[2]/cfRule[1]",
+                    3, "duplicateValues", 3, 4_294_967_295, True, (),
+                ),
+            )),
+        )),
+        WorksheetNativeCfRuleCoreSemantics(second, (
+            NativeCfRuleCoreContainer(second_one, (NativeCfRuleCore(
+                "xl/worksheets/второй.xml/worksheet/conditionalFormatting[1]/cfRule[1]",
+                1, "containsBlanks", 1, None, None, (),
+            ),)),
+            NativeCfRuleCoreContainer(second_two, (NativeCfRuleCore(
+                "xl/worksheets/второй.xml/worksheet/conditionalFormatting[2]/cfRule[1]",
+                2, "notContainsBlanks", 2, None, None, (),
+            ),)),
+            NativeCfRuleCoreContainer(second_three, (NativeCfRuleCore(
+                "xl/worksheets/второй.xml/worksheet/conditionalFormatting[3]/cfRule[1]",
+                3, "containsErrors", 3, None, None, (),
+            ),)),
+            NativeCfRuleCoreContainer(second_four, (NativeCfRuleCore(
+                "xl/worksheets/второй.xml/worksheet/conditionalFormatting[4]/cfRule[1]",
+                4, "notContainsErrors", 4, None, None, (),
+            ),)),
+        )),
+    ))
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets = ()
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].containers = ()
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].containers[0].container = first_two
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].containers[0].rules[0].priority = 0
+
+
+def test_rule_core_record_field_order_is_frozen():
+    assert tuple(NativeCfRuleCore.__dataclass_fields__) == (
+        "owner_path", "document_order", "type", "priority", "dxf_id", "stop_if_true", "formulas",
+    )
+    assert tuple(NativeCfRuleCoreContainer.__dataclass_fields__) == ("container", "rules")
+    assert tuple(WorksheetNativeCfRuleCoreSemantics.__dataclass_fields__) == ("worksheet", "containers")
+    assert tuple(WorkbookNativeCfRuleCoreSemantics.__dataclass_fields__) == ("worksheets",)
+
+
+@pytest.mark.parametrize(("priority", "expected"), [
+    ("+0001", None),
+    (" \t+0001\n", None),
+    ("", ("invalid-native-cf-priority", "priority", "")),
+    ("one", ("invalid-native-cf-priority", "priority", "one")),
+    ("0", ("invalid-native-cf-priority", "priority", "0")),
+    ("-1", ("invalid-native-cf-priority", "priority", "-1")),
+    ("2147483648", ("invalid-native-cf-priority", "priority", "2147483648")),
+    ("9" * 10_000, ("invalid-native-cf-priority", "priority", "9" * 10_000)),
+])
+def test_rule_core_priority_lexical_matrix(tmp_path, priority, expected):
+    path = package(tmp_path / "priority.xlsx", sheet_one=worksheet(
+        f'<conditionalFormatting sqref="A6"><cfRule type="uniqueValues" priority="{priority}"/></conditionalFormatting>',
+    ))
+    if expected is None:
+        assert read_worksheet_native_cf_rule_core_semantics(path).worksheets[0].containers[0].rules[0].priority == 1
+    else:
+        code, field, detail = expected
+        assert rule_core_error(path) == (code, "xl/worksheets/first.xml", field, detail)
+
+
+def test_rule_core_rejects_worksheet_global_duplicate_priority_with_raw_lexical_detail(tmp_path):
+    path = package(tmp_path / "duplicate-priority.xlsx", sheet_one=worksheet(
+        '<conditionalFormatting sqref="A6"><cfRule type="uniqueValues" priority="1"/></conditionalFormatting>'
+        '<conditionalFormatting sqref="B10"><cfRule type="duplicateValues" priority=" +001 "/></conditionalFormatting>',
+    ))
+    assert rule_core_error(path) == (
+        "duplicate-native-cf-priority", "xl/worksheets/first.xml", "priority", " +001 ",
+    )
+
+
+@pytest.mark.parametrize(("dxf_id", "expected"), [
+    ("0", 0), ("+0002", 2), ("-000", 0), ("4294967295", 4_294_967_295),
+    ("-1", "invalid-native-cf-dxf-id"), ("4294967296", "invalid-native-cf-dxf-id"), ("one", "invalid-native-cf-dxf-id"),
+    ("9" * 10_000, "invalid-native-cf-dxf-id"),
+])
+def test_rule_core_dxf_uint32_matrix(tmp_path, dxf_id, expected):
+    path = package(tmp_path / "dxf.xlsx", sheet_one=worksheet(
+        f'<conditionalFormatting sqref="A6"><cfRule type="uniqueValues" priority="1" dxfId="{dxf_id}"/></conditionalFormatting>',
+    ))
+    if isinstance(expected, int):
+        assert read_worksheet_native_cf_rule_core_semantics(path).worksheets[0].containers[0].rules[0].dxf_id == expected
+    else:
+        assert rule_core_error(path) == (expected, "xl/worksheets/first.xml", "dxfId", dxf_id)
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("0", False), ("1", True), ("false", False), ("true", True), ("False", "invalid-native-cf-boolean"),
+])
+def test_rule_core_stop_if_true_is_exact(tmp_path, value, expected):
+    path = package(tmp_path / "stop.xlsx", sheet_one=worksheet(
+        f'<conditionalFormatting sqref="A6"><cfRule type="uniqueValues" priority="1" stopIfTrue="{value}"/></conditionalFormatting>',
+    ))
+    if isinstance(expected, bool):
+        assert read_worksheet_native_cf_rule_core_semantics(path).worksheets[0].containers[0].rules[0].stop_if_true is expected
+    else:
+        assert rule_core_error(path) == (expected, "xl/worksheets/first.xml", "stopIfTrue", value)
+
+
+@pytest.mark.parametrize(("body", "expected"), [
+    ('<cfRule priority="1"/>', ("missing-native-cf-rule-attribute", "attribute", "type")),
+    ('<cfRule type="uniqueValues"/>', ("missing-native-cf-rule-attribute", "attribute", "priority")),
+    ('<cfRule type="uniqueValues" priority="1" z="x" a="x"/>', ("unknown-native-cf-rule-attribute", "attribute", "a")),
+    ('<cfRule type="cellIs" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "cellIs")),
+    ('<cfRule type="containsText" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "containsText")),
+    ('<cfRule type="notContainsText" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "notContainsText")),
+    ('<cfRule type="beginsWith" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "beginsWith")),
+    ('<cfRule type="endsWith" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "endsWith")),
+    ('<cfRule type="top10" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "top10")),
+    ('<cfRule type="aboveAverage" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "aboveAverage")),
+    ('<cfRule type="timePeriod" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "timePeriod")),
+    ('<cfRule type="colorScale" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "colorScale")),
+    ('<cfRule type="dataBar" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "dataBar")),
+    ('<cfRule type="iconSet" priority="1"/>', ("unsupported-native-cf-rule-type", "type", "iconSet")),
+])
+def test_rule_core_attributes_and_unsupported_types(tmp_path, body, expected):
+    path = package(tmp_path / "rule-attrs.xlsx", sheet_one=worksheet(
+        f'<conditionalFormatting sqref="A6">{body}</conditionalFormatting>',
+    ))
+    assert rule_core_error(path) == (expected[0], "xl/worksheets/first.xml", expected[1], expected[2])
+
+
+@pytest.mark.parametrize(("body", "expected"), [
+    ('<cfRule type="expression" priority="1"/>', ("invalid-native-cf-formula-cardinality", "type", "expression")),
+    ('<cfRule type="expression" priority="1"><formula>A6</formula><formula>B10</formula></cfRule>', ("invalid-native-cf-formula-cardinality", "type", "expression")),
+    ('<cfRule type="expression" priority="1"><formula/></cfRule>', ("invalid-native-cf-formula-content", "formula", "blank")),
+    ('<cfRule type="expression" priority="1"><formula> \t\r\n </formula></cfRule>', ("invalid-native-cf-formula-content", "formula", "blank")),
+    ('<cfRule type="expression" priority="1"><formula bad="x">A6</formula></cfRule>', ("invalid-native-cf-formula-attribute", "attribute", "bad")),
+    ('<cfRule type="expression" priority="1"><formula><x/></formula></cfRule>', ("invalid-native-cf-formula-content", "formula", "nested")),
+    ('<cfRule type="expression" priority="1"><formula>A6</formula>tail</cfRule>', ("invalid-native-cf-content", "cfRule", "tail")),
+    ('<cfRule type="expression" priority="1"><x:formula>A6</x:formula></cfRule>', ("invalid-native-cf-rule-child", "tag", "{urn:foreign}formula")),
+    ('<cfRule type="uniqueValues" priority="1"><formula>A6</formula></cfRule>', ("invalid-native-cf-formula-cardinality", "type", "uniqueValues")),
+    ('<cfRule type="uniqueValues" priority="1"><extLst/></cfRule>', ("invalid-native-cf-rule-child", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}extLst")),
+    ('<cfRule type="uniqueValues" priority="1"><colorScale/></cfRule>', ("invalid-native-cf-rule-child", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}colorScale")),
+])
+def test_rule_core_formula_and_payload_boundary(tmp_path, body, expected):
+    path = package(tmp_path / "formula.xlsx", sheet_one=worksheet(
+        f'<conditionalFormatting sqref="A6" xmlns:x="urn:foreign">{body}</conditionalFormatting>',
+    ))
+    assert rule_core_error(path) == (expected[0], "xl/worksheets/first.xml", expected[1], expected[2])
+
+
+def test_rule_core_x14_precedes_rule_semantics(tmp_path):
+    path = package(tmp_path / "x14-rule.xlsx", sheet_one=worksheet(
+        '<conditionalFormatting sqref="bad"><cfRule type="cellIs" priority="0"><x14:cfRule/></cfRule></conditionalFormatting>',
+    ))
+    assert rule_core_error(path) == (
+        "unsupported_x14_content", "xl/worksheets/first.xml", "tag",
+        "{http://schemas.microsoft.com/office/spreadsheetml/2009/9/main}cfRule",
+    )

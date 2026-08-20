@@ -18,6 +18,7 @@ _XR: Final = "http://schemas.microsoft.com/office/spreadsheetml/2014/revision"
 _WORKSHEET: Final = f"{{{_SML}}}worksheet"
 _CONTAINER: Final = f"{{{_SML}}}conditionalFormatting"
 _RULE: Final = f"{{{_SML}}}cfRule"
+_FORMULA: Final = f"{{{_SML}}}formula"
 _UID: Final = f"{{{_XR}}}uid"
 _X14_LOCALS: Final = frozenset({"conditionalFormattings", "conditionalFormatting", "cfRule"})
 _OWNED_LOCALS: Final = frozenset({"conditionalFormatting", "cfRule"})
@@ -25,17 +26,34 @@ _XML_WHITESPACE: Final = frozenset({" ", "\t", "\r", "\n"})
 _BOOLEANS: Final = {"0": False, "1": True, "false": False, "true": True}
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
+_MAX_INT32: Final = 2_147_483_647
+_MAX_UINT32: Final = 4_294_967_295
+_SUPPORTED_RULE_TYPES: Final = frozenset({
+    "expression",
+    "uniqueValues",
+    "duplicateValues",
+    "containsBlanks",
+    "notContainsBlanks",
+    "containsErrors",
+    "notContainsErrors",
+})
+_RULE_ATTRIBUTES: Final = frozenset({"type", "priority", "dxfId", "stopIfTrue"})
 
 __all__ = (
     "NativeCfA1Range",
     "NativeCfContainerInventory",
+    "NativeCfRuleCore",
+    "NativeCfRuleCoreContainer",
     "OPCWorksheetNativeCfReaderError",
     "WorkbookNativeCfContainerInventory",
     "WorkbookNativeCfPresence",
+    "WorkbookNativeCfRuleCoreSemantics",
     "WorksheetNativeCfContainerInventory",
     "WorksheetNativeCfPresence",
+    "WorksheetNativeCfRuleCoreSemantics",
     "read_worksheet_native_cf_container_inventory",
     "read_worksheet_native_cf_presence",
+    "read_worksheet_native_cf_rule_core_semantics",
 )
 
 
@@ -67,6 +85,34 @@ class WorksheetNativeCfContainerInventory:
 @dataclass(frozen=True)
 class WorkbookNativeCfContainerInventory:
     worksheets: tuple[WorksheetNativeCfContainerInventory, ...]
+
+
+@dataclass(frozen=True)
+class NativeCfRuleCore:
+    owner_path: str
+    document_order: int
+    type: str
+    priority: int
+    dxf_id: int | None
+    stop_if_true: bool | None
+    formulas: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NativeCfRuleCoreContainer:
+    container: NativeCfContainerInventory
+    rules: tuple[NativeCfRuleCore, ...]
+
+
+@dataclass(frozen=True)
+class WorksheetNativeCfRuleCoreSemantics:
+    worksheet: WorksheetDescriptor
+    containers: tuple[NativeCfRuleCoreContainer, ...]
+
+
+@dataclass(frozen=True)
+class WorkbookNativeCfRuleCoreSemantics:
+    worksheets: tuple[WorksheetNativeCfRuleCoreSemantics, ...]
 
 
 @dataclass(frozen=True)
@@ -254,6 +300,52 @@ def _boolean(value: str, part: CanonicalPartURI, field: str) -> bool:
     return result
 
 
+def _collapse_xml_whitespace(value: str) -> str:
+    """Normalize only the four XML whitespace characters."""
+    words = _sqref_tokens(value)
+    return " ".join(words)
+
+
+def _ascii_digits(value: str) -> bool:
+    return bool(value) and all("0" <= character <= "9" for character in value)
+
+
+def _bounded_decimal(value: str, maximum: int) -> int | None:
+    """Return an unsigned decimal without converting unbounded lexical input."""
+    significant = value.lstrip("0") or "0"
+    maximum_text = str(maximum)
+    if len(significant) > len(maximum_text) or (
+        len(significant) == len(maximum_text) and significant > maximum_text
+    ):
+        return None
+    return int(significant)
+
+
+def _signed_int32(value: str, part: CanonicalPartURI, field: str) -> int:
+    lexical = _collapse_xml_whitespace(value)
+    sign = -1 if lexical.startswith("-") else 1
+    digits = lexical[1:] if lexical.startswith(("+", "-")) else lexical
+    if not _ascii_digits(digits):
+        _fail("invalid-native-cf-priority", part.value, field, value)
+    result = _bounded_decimal(digits, _MAX_INT32)
+    if result is None or sign * result < 1:
+        _fail("invalid-native-cf-priority", part.value, field, value)
+    return result
+
+
+def _uint32(value: str, part: CanonicalPartURI, field: str) -> int:
+    lexical = _collapse_xml_whitespace(value)
+    negative = lexical.startswith("-")
+    digits = lexical[1:] if lexical.startswith(("+", "-")) else lexical
+    valid = _ascii_digits(digits) and (not negative or set(digits) == {"0"})
+    if not valid:
+        _fail("invalid-native-cf-dxf-id", part.value, field, value)
+    result = _bounded_decimal(digits, _MAX_UINT32)
+    if result is None:
+        _fail("invalid-native-cf-dxf-id", part.value, field, value)
+    return result
+
+
 def _a1_endpoint(value: str, part: CanonicalPartURI, sqref: str) -> tuple[str, int, int]:
     position = 0
     if position < len(value) and value[position] == "$":
@@ -360,6 +452,68 @@ def _container_inventory(element: ET.Element, part: CanonicalPartURI, index: int
     )
 
 
+def _rule_owner_path(container: NativeCfContainerInventory, index: int) -> str:
+    return f"{container.owner_path}/cfRule[{index}]"
+
+
+def _rule_attributes(element: ET.Element, part: CanonicalPartURI) -> tuple[str, int, int | None, bool | None]:
+    unknown = sorted(set(element.attrib) - _RULE_ATTRIBUTES)
+    if unknown:
+        _fail("unknown-native-cf-rule-attribute", part.value, "attribute", unknown[0])
+    for name in ("type", "priority"):
+        if name not in element.attrib:
+            _fail("missing-native-cf-rule-attribute", part.value, "attribute", name)
+    rule_type = element.attrib["type"]
+    if rule_type not in _SUPPORTED_RULE_TYPES:
+        _fail("unsupported-native-cf-rule-type", part.value, "type", rule_type)
+    priority = _signed_int32(element.attrib["priority"], part, "priority")
+    dxf_id = _uint32(element.attrib["dxfId"], part, "dxfId") if "dxfId" in element.attrib else None
+    stop_if_true = _boolean(element.attrib["stopIfTrue"], part, "stopIfTrue") if "stopIfTrue" in element.attrib else None
+    return rule_type, priority, dxf_id, stop_if_true
+
+
+def _formula(element: ET.Element, part: CanonicalPartURI) -> str:
+    if element.attrib:
+        _fail("invalid-native-cf-formula-attribute", part.value, "attribute", sorted(element.attrib)[0])
+    if list(element):
+        _fail("invalid-native-cf-formula-content", part.value, "formula", "nested")
+    text = element.text
+    if text is None or not _collapse_xml_whitespace(text):
+        _fail("invalid-native-cf-formula-content", part.value, "formula", "blank")
+    return text
+
+
+def _rule_core(
+    element: ET.Element,
+    part: CanonicalPartURI,
+    container: NativeCfContainerInventory,
+    rule_index: int,
+    document_order: int,
+    priorities: set[int],
+) -> NativeCfRuleCore:
+    rule_type, priority, dxf_id, stop_if_true = _rule_attributes(element, part)
+    if priority in priorities:
+        _fail("duplicate-native-cf-priority", part.value, "priority", element.attrib["priority"])
+    formulas: list[str] = []
+    for child in element:
+        if child.tag != _FORMULA:
+            _fail("invalid-native-cf-rule-child", part.value, "tag", str(child.tag))
+        formulas.append(_formula(child, part))
+    expected = 1 if rule_type == "expression" else 0
+    if len(formulas) != expected:
+        _fail("invalid-native-cf-formula-cardinality", part.value, "type", rule_type)
+    priorities.add(priority)
+    return NativeCfRuleCore(
+        _rule_owner_path(container, rule_index),
+        document_order,
+        rule_type,
+        priority,
+        dxf_id,
+        stop_if_true,
+        tuple(formulas),
+    )
+
+
 def read_worksheet_native_cf_presence(package_path: os.PathLike[str] | str) -> WorkbookNativeCfPresence:
     """Inventory native CF container presence; never parse semantic CF content."""
     records = []
@@ -388,3 +542,27 @@ def read_worksheet_native_cf_container_inventory(
         )
         records.append(WorksheetNativeCfContainerInventory(worksheet, containers))
     return WorkbookNativeCfContainerInventory(tuple(records))
+
+
+def read_worksheet_native_cf_rule_core_semantics(
+    package_path: os.PathLike[str] | str,
+) -> WorkbookNativeCfRuleCoreSemantics:
+    """Read the frozen native-CF rule core after the accepted container boundary."""
+    records = []
+    for worksheet, part, root in _worksheet_trees(package_path):
+        _x14_hard_stop(root, part)
+        _validate_worksheet_root(root, part)
+        _validate_owned_placement(root, part)
+        _validate_presence_content(root, part)
+        priorities: set[int] = set()
+        document_order = 0
+        containers = []
+        for container_index, element in enumerate((child for child in root if child.tag == _CONTAINER), start=1):
+            container = _container_inventory(element, part, container_index)
+            rules = []
+            for rule_index, rule in enumerate(element, start=1):
+                document_order += 1
+                rules.append(_rule_core(rule, part, container, rule_index, document_order, priorities))
+            containers.append(NativeCfRuleCoreContainer(container, tuple(rules)))
+        records.append(WorksheetNativeCfRuleCoreSemantics(worksheet, tuple(containers)))
+    return WorkbookNativeCfRuleCoreSemantics(tuple(records))

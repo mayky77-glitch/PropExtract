@@ -57,3 +57,9 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_native_cf_r
 - Exact missing/unknown attrs, every unsupported type, formula missing/two/blank/whitespace/attr/nested/tail/wrong child/namespace, rule extLst/payload, and x14 precedence at every owned/foreign depth. Assert full four-field tuples, public field order, and `FrozenInstanceError` at every new record level.
 - Re-run all accepted presence/container PathLike/topology/member/XML/native-placement/sqref/x14 tests and prove one parse per worksheet for the new reader.
 - Exclude dxf table/style semantics, `cellIs` operator/cardinality, text/top10/aboveAverage/time attributes, payload/cfvo/color semantics, native extension interpretation, x14 parsing/composition, mutation/range mapping/insertion safety, DV/styles/COM/UI/CrossOver/native Excel/source PDF/XLSX/README. Further extended-rule, payload/dxf, and x14 Gates remain mandatory before CF insertion qualification.
+
+## Completion evidence
+
+- Added the immutable rule-core projection and retained the accepted single PathLike→topology→member→`ElementTree.fromstring(bytes)` pipeline, XML/x14 precedence, and existing presence/container APIs.
+- The gate admits only `expression` plus the six formula-free rule types; it validates worksheet-global priorities, `dxfId` as an unresolved index, exact `stopIfTrue`, and strict direct formula XML without resolving styles or evaluating payloads.
+- Passed `python3 -m pytest -q tests/test_opc_worksheet_native_cf_reader.py tests/test_opc_workbook_topology.py tests/test_opc_worksheet_cell_reader.py tests/test_opc_worksheet_structure_reader.py` (383 passed) and `python3 -m pytest -q` (1135 passed, one pre-existing OpenPyXL extension warning); compileall and `git diff --check` also passed.
