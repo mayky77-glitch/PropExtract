@@ -55,3 +55,10 @@ Independent P6 must inspect XML-event precedence, X1 compatibility, exact anti-s
 - The reader and X2a projection use `_accepted`: one package-path coercion, workbook topology read, canonical member read and XML parse per worksheet, followed by complete X1 validation before any envelope work. X2a does not invoke the public X1 reader.
 - Added direct-rule projection, worksheet-global numeric priority uniqueness, immutable records, and a synthetic two-sheet test corpus. `xm:sqref` remains neither read into the projection nor validated by X2a.
 - Validation: focused X2a suite (33 passed); frozen acceptance command (552 passed); full suite (1304 passed, one pre-existing openpyxl extension warning); compileall and `git diff --check` passed.
+
+## P6 remediation evidence
+
+- Priority stripping now accepts only XML whitespace (`SP`, `TAB`, `CR`, `LF`); NBSP, U+0085, U+2003 and all other non-XML whitespace remain lexical failures. It bounds significant digits before `int`, so a positive priority with 5,000 leading zeros is accepted safely.
+- Rule child validation is a single XML-order state machine. It checks each `f`/`dxf` as encountered and defers only missing-child cardinality to rule exit; combined order/attribute repros retain their earliest event.
+- Expanded X2a evidence includes exact recursive projection, accepted-owner equality, record immutability, opaque inline font/fill dxf descendants, XML/non-XML whitespace, event precedence, PathLike/topology-sentinel/one-worksheet-parse checks, and two-sheet atomicity.
+- Post-remediation validation: focused acceptance (568 passed); full suite (1320 passed, one known openpyxl extension warning); compileall and `git diff --check` passed.

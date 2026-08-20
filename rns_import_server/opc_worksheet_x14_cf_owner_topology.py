@@ -202,13 +202,13 @@ def _rule_fail(code:str,part:CanonicalPartURI,field:str,detail:str)->None:
     _fail(code,part.value,field,detail)
 
 def _priority(value:str,part:CanonicalPartURI)->int:
-    collapsed=" ".join(value.split())
-    if not collapsed or "\u00a0" in value or not re.fullmatch(r"\+?[0-9]+",collapsed):
+    collapsed=value.strip(" \t\r\n")
+    if not collapsed or not re.fullmatch(r"\+?[0-9]+",collapsed):
         _rule_fail("invalid-x14-cf-priority",part,"priority",value)
     digits=collapsed.removeprefix("+").lstrip("0") or "0"
     if len(digits)>10:
         _rule_fail("invalid-x14-cf-priority",part,"priority",value)
-    result=int(collapsed)
+    result=int(digits)
     if result < 1 or result > _INT32_MAX:
         _rule_fail("invalid-x14-cf-priority",part,"priority",value)
     return result
@@ -230,20 +230,25 @@ def _rule(rule:ET.Element,part:CanonicalPartURI,owner:X14CfContainerOwner,docume
     else:_rule_fail("invalid-x14-cf-boolean",part,"stopIfTrue",stop)
     rule_id=rule.attrib["id"]
     if not _GUID.fullmatch(rule_id):_rule_fail("invalid-x14-cf-id",part,"id",rule_id)
-    children=list(rule)
-    formulas=[child for child in children if child.tag==_F]
-    dxfs=[child for child in children if child.tag==_DXF]
-    if len(formulas)!=1:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","f")
-    if len(dxfs)!=1:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","dxf")
-    formula,dxf=formulas[0],dxfs[0]
-    if children.index(formula)!=0 or children.index(dxf)!=1:_rule_fail("invalid-x14-cf-order",part,"cfRule","f,dxf")
-    if formula.attrib:_rule_fail("invalid-x14-cf-formula",part,"f","attribute")
-    if list(formula):_rule_fail("invalid-x14-cf-formula",part,"f","child")
-    if not _nonwhite(formula.text):_rule_fail("invalid-x14-cf-formula",part,"f","text")
-    if _nonwhite(formula.tail):_rule_fail("invalid-x14-cf-formula",part,"f","tail")
-    if dxf.attrib:_rule_fail("invalid-x14-cf-dxf",part,"dxf","attribute")
-    if _nonwhite(dxf.text):_rule_fail("invalid-x14-cf-dxf",part,"dxf","text")
-    if _nonwhite(dxf.tail):_rule_fail("invalid-x14-cf-dxf",part,"dxf","tail")
+    formula=None; dxf=None
+    for child in rule:
+        if child.tag==_F:
+            if formula is not None:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","f")
+            if dxf is not None:_rule_fail("invalid-x14-cf-order",part,"cfRule","f,dxf")
+            formula=child
+            if formula.attrib:_rule_fail("invalid-x14-cf-formula",part,"f","attribute")
+            if list(formula):_rule_fail("invalid-x14-cf-formula",part,"f","child")
+            if not _nonwhite(formula.text):_rule_fail("invalid-x14-cf-formula",part,"f","text")
+            if _nonwhite(formula.tail):_rule_fail("invalid-x14-cf-formula",part,"f","tail")
+        elif child.tag==_DXF:
+            if dxf is not None:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","dxf")
+            if formula is None:_rule_fail("invalid-x14-cf-order",part,"cfRule","f,dxf")
+            dxf=child
+            if dxf.attrib:_rule_fail("invalid-x14-cf-dxf",part,"dxf","attribute")
+            if _nonwhite(dxf.text):_rule_fail("invalid-x14-cf-dxf",part,"dxf","text")
+            if _nonwhite(dxf.tail):_rule_fail("invalid-x14-cf-dxf",part,"dxf","tail")
+    if formula is None:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","f")
+    if dxf is None:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","dxf")
     priorities.add(priority)
     return X14CfRuleEnvelope(f"{owner.owner_path}/cfRule[{path_index}]",document_order,kind,priority,stop_value,rule_id,formula.text,True)
 
