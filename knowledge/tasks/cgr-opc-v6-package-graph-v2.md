@@ -1,6 +1,6 @@
 ---
 card_id: cgr-opc-v6-package-graph-v2
-status: ready
+status: review
 version: 2
 work_id: cgr-opc-package-graph-v2-20260820
 task_id: package-graph-v2
@@ -9,6 +9,10 @@ role: developer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
+launch_status: inherited
+actual_model: unknown
+actual_reasoning_effort: unknown
+fallback_reason: collaboration runtime did not expose launch override confirmation
 planning_parent_sha: 332ad6076ed6135bb53f592377a99ac18767a586
 dependency_shas: [d31d974551c44e9ae6b91b4e629362ffcb50a5b4, 4ce7f5b296721ebdc0b188d138b7c380602ffb03, bfb0065ce4c8915dc5163b74e3b841bd72bab5c9]
 branch: codex/cgr-opc-package-graph-v2
@@ -42,3 +46,9 @@ Implement fresh from accepted integration `332ad60`; do not merge, cherry-pick, 
 - Valid root/nested/root-level-source relationships; missing source/target; external relative/rooted/network/absolute; Unicode source/target; exact duplicate/percent alias including content-types alias; root escape; misplaced `.rels`; invalid content-types root; corrupt/non-ZIP/encrypted/unsupported-encoding/NUL path; deterministic order; immutable records.
 - Replay every accepted independent V6 corpus fixture by its `expected_mutations`, without fixture-name branches: all empty-mutation cases including Unicode succeed; every invalid case fails with stable first category and context derived from bytes.
 - Regression commands pass. Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
+
+## Implementation evidence
+
+- Fresh v2 graph implementation and focused regression suite added in the reserved paths only.
+- `python3 -m pytest -q tests/test_opc_package_graph.py tests/test_opc_part_uri.py tests/test_opc_relationship_xml.py tests/test_opc_package_v6_corpus.py` → 132 passed.
+- `python3 -m pytest -q` → 418 passed, 1 existing openpyxl warning; `git diff --check` passed.
