@@ -1,8 +1,8 @@
 ---
 type: task
-status: planned
+status: completed
 work_id: cgr-opc-v6-worksheet-x14-cf-rule-mixed-content-v1
-tags: [task/implementation, feature/x14-cf-owner-topology, status/planned]
+tags: [task/implementation, feature/x14-cf-owner-topology, status/completed]
 last_verified: 2026-08-20
 updated: 2026-08-20
 ---
@@ -34,3 +34,9 @@ Acceptance commands:
 `git diff --check`
 
 Verify fixture/card hashes, exact scope/authorship/remote/clean state. P6 independent review is required; after ACCEPT, fresh corpus qualification only—do not edit the suspended corpus branch. No UI, bottle, native Excel, insertion, or publication claim. A non-force commit/push requires the verified human identity `mayky77-glitch <274605240+mayky77-glitch@users.noreply.github.com>`; AI attribution and force push are forbidden.
+
+## Implementation evidence
+
+Implemented the `_RULE` structural mixed-content boundary in the existing single ElementTree DFS: nonwhite direct rule text and a nonwhite tail after any direct rule child now produce `invalid-x14-cf-content` with owner `cfRule` and the exact `text` or `tail` detail. No lower rule attributes, formula text, dxf payload, or priority semantics were inspected.
+
+Required coverage includes direct text, XM `f` tail, X14 `dxf` tail, first tail among multiple children, XML-whitespace-only positive content, tier-1-before-later-tail, and earlier unknown-child-before-later-tail precedence. On 2026-08-20, focused `42`, compatibility `425`, and full `1177` tests passed; the full suite emitted one pre-existing OpenPyXL unknown-extension warning.
