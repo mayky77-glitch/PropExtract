@@ -95,3 +95,76 @@ def test_rejects_mixed_nested_hyperlink_and_formula_payload_matrix(tmp_path):
     assert error(package(tmp_path / "inline-formula.xlsx", sheet_one=inline_formula)) == ("invalid-formula-payload", "xl/worksheets/first.xml", "t", "inlineStr")
     shared_formula = worksheet('<row r="6"><c r="A6" t="s"><f>A1</f><v>1</v></c></row>')
     assert error(package(tmp_path / "shared-formula.xlsx", sheet_one=shared_formula)) == ("invalid-formula-payload", "xl/worksheets/first.xml", "t", "s")
+
+
+def test_rejects_row_text_and_cell_tail_before_cell_consumption(tmp_path):
+    text = worksheet('<row r="6">bad<c r="A6"><v>1</v></c></row>')
+    assert error(package(tmp_path / "row-text.xlsx", sheet_one=text)) == ("invalid-worksheet-content", "xl/worksheets/first.xml", "row", "text")
+    tail = worksheet('<row r="6"><c r="A6"><v>1</v></c>bad<c r="B6"><v>2</v></c></row>')
+    assert error(package(tmp_path / "cell-tail.xlsx", sheet_one=tail)) == ("invalid-worksheet-content", "xl/worksheets/first.xml", "row", "tail")
+
+
+@pytest.mark.parametrize(("sheet", "expected"), [
+    (worksheet('<row r="1"><c r="A0"><v>1</v></c></row>'), ("invalid-a1-reference", "xl/worksheets/first.xml", "r", "A0")),
+    (worksheet('<row r="1"><c r="XFE1"><v>1</v></c></row>'), ("invalid-a1-reference", "xl/worksheets/first.xml", "r", "XFE1")),
+    (worksheet('<row r="1048576"><c r="XFD1048576"><v>1</v></c></row>'), None),
+    (worksheet('<row r="6"><c r="A6"><v>1</v></c><c r="A6"><v>2</v></c></row>'), ("duplicate-cell-coordinate", "xl/worksheets/first.xml", "r", "A6")),
+    (worksheet('<row r="6"><c r="A6" t="inlineStr"><is><r><t>x</t></r></is></c></row>'), ("invalid-inline-string", "xl/worksheets/first.xml", "is", "structure")),
+])
+def test_a1_boundaries_duplicates_and_rich_inline_are_frozen(tmp_path, sheet, expected):
+    path = package(tmp_path / "a1.xlsx", sheet_one=sheet)
+    if expected is None:
+        assert [cell.coordinate for cell in read_worksheet_cell_semantics(path).worksheets[0].cells] == ["XFD1048576"]
+    else:
+        assert error(path) == expected
+
+
+def test_hyperlink_anchor_attribute_and_relationship_failures_are_typed(tmp_path):
+    base = '<row r="6"><c r="A6"><v>1</v></c><c r="B6"><v>2</v></c></row>'
+    neither = worksheet(base, '<hyperlinks><hyperlink ref="A6"/></hyperlinks>')
+    assert error(package(tmp_path / "neither.xlsx", sheet_one=neither)) == ("invalid-hyperlink-anchor", "xl/worksheets/first.xml", "anchor", "A6")
+    both = worksheet(base, '<hyperlinks><hyperlink ref="A6" r:id="x" location="here"/></hyperlinks>')
+    assert error(package(tmp_path / "both.xlsx", sheet_one=both, sheet_one_rels=relationship("x", f"{OFFICE_REL_NS}/hyperlink", "https://x", "External"))) == ("invalid-hyperlink-anchor", "xl/worksheets/first.xml", "anchor", "A6")
+    blank = worksheet(base, '<hyperlinks><hyperlink ref="A6" location="x" display=" "/></hyperlinks>')
+    assert error(package(tmp_path / "blank.xlsx", sheet_one=blank)) == ("blank-hyperlink-attribute", "xl/worksheets/first.xml", "display", "")
+    duplicate_id = worksheet(base, '<hyperlinks><hyperlink ref="A6" r:id="x"/><hyperlink ref="B6" r:id="x"/></hyperlinks>')
+    rels = relationship("x", f"{OFFICE_REL_NS}/hyperlink", "https://x", "External")
+    assert error(package(tmp_path / "duplicate-id.xlsx", sheet_one=duplicate_id, sheet_one_rels=rels)) == ("duplicate-hyperlink-relationship-id", "xl/worksheets/first.xml", "r:id", "x")
+    bad_ref = worksheet(base, '<hyperlinks><hyperlink ref="A6:A5" location="x"/></hyperlinks>')
+    assert error(package(tmp_path / "bad-ref.xlsx", sheet_one=bad_ref)) == ("invalid-a1-reference", "xl/worksheets/first.xml", "ref", "A6:A5")
+
+
+class _BadPath:
+    def __init__(self, exception): self.exception = exception
+    def __fspath__(self): raise self.exception
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (b"book.xlsx", ("invalid-package-path", "builtins.bytes", "path", "bytes")),
+    (_BadPath(TypeError()), ("invalid-package-path", f"{__name__}._BadPath", "path", "TypeError")),
+    (_BadPath(ValueError()), ("unreadable-package", f"{__name__}._BadPath", "path", "ValueError")),
+    ("bad\x00.xlsx", ("unreadable-package", "bad\x00.xlsx", "path", "embedded-nul")),
+])
+def test_pathlike_failures_are_one_boundary_tuples(value, expected):
+    assert error(value) == expected
+
+
+def test_graph_forwarded_missing_and_canonical_alias_members_are_deterministic(tmp_path):
+    missing = package(tmp_path / "missing.xlsx", sheet_one_name="xl/worksheets/missing.xml")
+    # The fixture relationship still targets first.xml, so graph construction rejects it before XML reading.
+    assert error(missing) == ("missing-internal-target", "xl/workbook.xml", "Target", "worksheets/first.xml")
+    alias = package(tmp_path / "alias.xlsx", sheet_one_name="xl/worksheets/%66irst.xml")
+    assert read_worksheet_cell_semantics(alias).worksheets[0].worksheet.worksheet_part.value == "xl/worksheets/first.xml"
+
+
+@pytest.mark.parametrize(("sheet", "rels", "expected"), [
+    (b'<worksheet xmlns="urn:wrong"><sheetData/></worksheet>', "", ("invalid-worksheet-root", "xl/worksheets/first.xml", "root", "{urn:wrong}worksheet")),
+    (b'<worksheet', "", ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" location=" "/></hyperlinks>'), "", ("blank-hyperlink-attribute", "xl/worksheets/first.xml", "location", "")),
+    (worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" r:id=" "/></hyperlinks>'), "", ("blank-hyperlink-attribute", "xl/worksheets/first.xml", "r:id", "")),
+    (worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" location="x" tooltip=" "/></hyperlinks>'), "", ("blank-hyperlink-attribute", "xl/worksheets/first.xml", "tooltip", "")),
+    (worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" r:id="x"/></hyperlinks>'), relationship("x", f"{OFFICE_REL_NS}/hyperlink", "https://x", "Bad"), ("invalid-target-mode", "xl/worksheets/first.xml", "TargetMode", "Bad")),
+    (worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" r:id="x"/></hyperlinks>'), relationship("x", f"{OFFICE_REL_NS}/hyperlink", "missing.xml"), ("missing-internal-target", "xl/worksheets/first.xml", "Target", "missing.xml")),
+])
+def test_malformed_and_hyperlink_boundary_failures_are_frozen(tmp_path, sheet, rels, expected):
+    assert error(package(tmp_path / "negative.xlsx", sheet_one=sheet, sheet_one_rels=rels)) == expected

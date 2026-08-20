@@ -240,7 +240,9 @@ def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previo
     if row != expected_row:
         _fail("cell-row-mismatch", part.value, "r", coordinate)
     current = (row, column)
-    if previous is not None and current <= previous:
+    if previous is not None and current == previous:
+        _fail("duplicate-cell-coordinate", part.value, "r", coordinate)
+    if previous is not None and current < previous:
         _fail("out-of-order-cell", part.value, "r", coordinate)
     cell_type = element.attrib.get("t", "")
     if cell_type not in _CELL_TYPES:
@@ -301,6 +303,7 @@ def _cells(root: ET.Element, part: CanonicalPartURI) -> tuple[WorksheetCell, ...
     for row_element in structures[0]:
         if row_element.tag != _ROW:
             _fail("invalid-sheet-data-child", part.value, "tag", str(row_element.tag))
+        _no_mixed(row_element, part, "row")
         if set(row_element.attrib) - {"r", "spans"}: _fail("unknown-row-attribute", part.value, "attribute", sorted(set(row_element.attrib) - {"r", "spans"})[0])
         if "spans" in row_element.attrib:
             spans = row_element.attrib["spans"].split(":")
