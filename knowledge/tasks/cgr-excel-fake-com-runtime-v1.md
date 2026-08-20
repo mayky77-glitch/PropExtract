@@ -31,3 +31,5 @@ Repair only `tests/support/WindowsExcelFakeCom.psm1` runtime behavior. Keep the 
 - No PowerShell executable is available on this macOS host; exact Windows Pester remains required.
 - Run7 at `fdd112fe948171242e14b7e5c93f71eed26e7914` proved generated members execute outside module session state: first `Workbooks` getter and `Release` cannot resolve private `Add-WindowsExcelFakeComCall`.
 - Each proxy now captures private function `CommandInfo` objects for add-call, fault, and recursive proxy creation. Every generated member invokes those captured commands; no generated body performs unbound private-helper name resolution.
+- Local CrossOver pwsh `7.6.5` / Pester `5.6.1` evidence at `348f02b` passes all three 55-event success cases. The six remaining fault cases are `MethodInvocationException` wrappers around intended controlled `InvalidOperationException` values.
+- Envelope resolution now walks at most four `InnerException` values, stops on cycles, and accepts only the first exception carrying `Data['stage']`. Unstructured outer exceptions retain explicit nonblocking telemetry; there is no generic fallback or altered assertion.
