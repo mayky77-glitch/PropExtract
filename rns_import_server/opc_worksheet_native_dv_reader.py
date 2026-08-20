@@ -208,6 +208,7 @@ def _sqref(value: str | None, part: str) -> tuple[str, ...]:
     if not text or any(not token for token in tokens):
         _fail("invalid-native-dv-sqref", part, "sqref", text)
     rectangles: list[tuple[int, int, int, int]] = []
+    lexical_tokens: set[str] = set()
     for token in tokens:
         endpoints = token.split(":")
         if len(endpoints) not in {1, 2}:
@@ -217,8 +218,9 @@ def _sqref(value: str | None, part: str) -> tuple[str, ...]:
         if first[0] > last[0] or first[1] > last[1]:
             _fail("invalid-native-dv-sqref", part, "sqref", text)
         rectangle = (first[0], first[1], last[0], last[1])
-        if rectangle in rectangles:
+        if token in lexical_tokens:
             _fail("duplicate-native-dv-sqref", part, "sqref", token)
+        lexical_tokens.add(token)
         if any(not (rectangle[2] < prior[0] or prior[2] < rectangle[0] or rectangle[3] < prior[1] or prior[3] < rectangle[1]) for prior in rectangles):
             _fail("overlapping-native-dv-sqref", part, "sqref", token)
         rectangles.append(rectangle)
@@ -314,7 +316,12 @@ def _rule(element: ET.Element, part: CanonicalPartURI, index: int) -> NativeData
     elif kind in {"list", "custom"}:
         valid = operator is None and formula1 is not None and not formula1.isspace() and formula1 != "" and formula2 is None
     elif kind in _COMPARISON_TYPES:
-        valid = operator is not None and formula1 is not None and ((operator in _RANGE_OPERATORS) == (formula2 is not None))
+        valid = (
+            operator is not None
+            and _nonwhite(formula1)
+            and ((operator in _RANGE_OPERATORS) == (formula2 is not None))
+            and (operator not in _RANGE_OPERATORS or _nonwhite(formula2))
+        )
     else:
         valid = False
     if not valid:

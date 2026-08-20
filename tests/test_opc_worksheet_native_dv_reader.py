@@ -112,6 +112,7 @@ def test_rejects_non_xml_boolean_lexemes(tmp_path, attribute, value):
     ("A6:B5", ("invalid-native-dv-sqref", "xl/worksheets/first.xml", "sqref", "A6:B5")),
     ("B6:A7", ("invalid-native-dv-sqref", "xl/worksheets/first.xml", "sqref", "B6:A7")),
     ("A6 A6", ("duplicate-native-dv-sqref", "xl/worksheets/first.xml", "sqref", "A6")),
+    ("$A$6 A6", ("overlapping-native-dv-sqref", "xl/worksheets/first.xml", "sqref", "A6")),
     ("A6:A7 A7:A8", ("overlapping-native-dv-sqref", "xl/worksheets/first.xml", "sqref", "A7:A8")),
     ("A99999999", ("invalid-native-dv-sqref", "xl/worksheets/first.xml", "sqref", "A99999999")),
 ])
@@ -184,6 +185,12 @@ def test_pathlike_failures_are_typed_and_called_once(outcome, code, detail):
     value = _PathLike(outcome)
     assert error(value) == (code, f"{_PathLike.__module__}.{_PathLike.__qualname__}", "path", detail)
     assert value.calls == 1
+
+
+def test_direct_bytes_caller_is_typed_before_topology():
+    assert error(b"not-a-package-path") == (
+        "invalid-package-path", "builtins.bytes", "path", "bytes",
+    )
 
 
 def test_nul_path_is_typed_and_called_once():
@@ -272,6 +279,36 @@ def test_every_native_type_and_operator_positive(tmp_path, kind, operator, formu
     xml = f'<dataValidations count="1"><dataValidation sqref="A6" type="{kind}"{op}>{formulas}</dataValidation></dataValidations>'
     record = read_worksheet_native_data_validation_semantics(package(tmp_path / f"{kind}.xlsx", sheet_one=worksheet(xml))).worksheets[0].container.rules[0]
     assert (record.type, record.operator) == (kind, operator)
+
+
+@pytest.mark.parametrize("operator", [
+    "between", "notBetween", "equal", "notEqual", "lessThan",
+    "lessThanOrEqual", "greaterThan", "greaterThanOrEqual",
+])
+@pytest.mark.parametrize("formula", ["", " \t\r\n "])
+def test_every_comparison_operator_rejects_empty_or_whitespace_formula1(tmp_path, operator, formula):
+    xml = (
+        '<dataValidations count="1"><dataValidation sqref="A6" type="whole" '
+        f'operator="{operator}"><formula1>{formula}</formula1>'
+        f'{"<formula2>2</formula2>" if operator in {"between", "notBetween"} else ""}'
+        '</dataValidation></dataValidations>'
+    )
+    assert error(package(tmp_path / f"{operator}-{len(formula)}.xlsx", sheet_one=worksheet(xml))) == (
+        "invalid-native-dv-formula-cardinality", "xl/worksheets/first.xml", "formula", "whole",
+    )
+
+
+@pytest.mark.parametrize("operator", ["between", "notBetween"])
+@pytest.mark.parametrize("formula", ["", " \t\r\n "])
+def test_range_comparison_operators_reject_empty_or_whitespace_formula2(tmp_path, operator, formula):
+    xml = (
+        '<dataValidations count="1"><dataValidation sqref="A6" type="whole" '
+        f'operator="{operator}"><formula1>1</formula1><formula2>{formula}</formula2>'
+        '</dataValidation></dataValidations>'
+    )
+    assert error(package(tmp_path / f"{operator}-formula2-{len(formula)}.xlsx", sheet_one=worksheet(xml))) == (
+        "invalid-native-dv-formula-cardinality", "xl/worksheets/first.xml", "formula", "whole",
+    )
 
 
 @pytest.mark.parametrize(("attribute", "value", "field", "code"), [
@@ -366,22 +403,103 @@ def test_braced_xr_uid_is_preserved_or_typed(tmp_path, uid, expected):
         assert error(path) == expected
 
 
-def test_full_two_sheet_projection_default_zero_populated_and_all_records_frozen(tmp_path):
-    first = worksheet('<dataValidations count="0"/>')
+def test_full_two_sheet_projection_and_complete_immutability(tmp_path):
+    first = worksheet(
+        '<dataValidations count="1"><dataValidation sqref="A6" type="list">'
+        '<formula1>"default"</formula1></dataValidation></dataValidations>'
+    )
     second = worksheet(
         '<dataValidations count="1" disablePrompts="true" xWindow="1" yWindow="2">'
         '<dataValidation sqref="A6 B10:C10 R104:R154 S104:S159 XFD104" type="list" allowBlank="false" showDropDown="true" showInputMessage="false" showErrorMessage="true" errorStyle="stop" imeMode="on" errorTitle="E" error="e" promptTitle="P" prompt="p"><formula1>Sheet1!$A$1:$A$2</formula1></dataValidation>'
         '</dataValidations>'
     )
     result = read_worksheet_native_data_validation_semantics(package(tmp_path / "projection.xlsx", sheet_one=first, sheet_two=second))
-    assert [(item.worksheet.name, item.container is None if item.container is None else item.container.count) for item in result.worksheets] == [("Первый", 0), ("Второй", 1)]
-    container = result.worksheets[1].container
+    first_descriptor = WorksheetDescriptor("Первый", 1, "visible", "one", CanonicalPartURI("xl/worksheets/first.xml"))
+    second_descriptor = WorksheetDescriptor("Второй", 2, "visible", "two", CanonicalPartURI("xl/worksheets/второй.xml"))
+    assert result == reader.WorkbookNativeDvSemantics((
+        reader.WorksheetNativeDvSemantics(
+            first_descriptor,
+            reader.NativeDataValidations(
+                "xl/worksheets/first.xml/worksheet/dataValidations", 1, None, None, None,
+                (reader.NativeDataValidation(
+                    "xl/worksheets/first.xml/worksheet/dataValidations/dataValidation[1]", ("A6",), "list", None,
+                    None, None, None, None, None, None, None, None, None, None, None, '"default"', None,
+                ),),
+            ),
+        ),
+        reader.WorksheetNativeDvSemantics(
+            second_descriptor,
+            reader.NativeDataValidations(
+                "xl/worksheets/второй.xml/worksheet/dataValidations", 1, True, 1, 2,
+                (reader.NativeDataValidation(
+                    "xl/worksheets/второй.xml/worksheet/dataValidations/dataValidation[1]",
+                    ("A6", "B10:C10", "R104:R154", "S104:S159", "XFD104"), "list", None,
+                    False, True, False, True, "stop", "on", "E", "e", "P", "p", None,
+                    "Sheet1!$A$1:$A$2", None,
+                ),),
+            ),
+        ),
+    ))
+    first_container = result.worksheets[0].container
+    second_container = result.worksheets[1].container
+    assert first_container is not None and second_container is not None
+    assert (first_container.disable_prompts, first_container.rules[0].allow_blank,
+            first_container.rules[0].show_drop_down, first_container.rules[0].show_input_message,
+            first_container.rules[0].show_error_message) == (None, None, None, None, None)
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets = ()
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].worksheet = second_descriptor
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].worksheet.name = "изменено"
+    with pytest.raises(FrozenInstanceError):
+        first_container.count = 2
+    with pytest.raises(FrozenInstanceError):
+        first_container.rules[0].formula1 = "changed"
+    with pytest.raises(TypeError):
+        result.worksheets[0] = result.worksheets[1]
+    with pytest.raises(TypeError):
+        second_container.rules[0] = first_container.rules[0]
+
+
+def test_insertion_reference_fingerprints_are_evidence_only_and_do_not_mutate_projection(tmp_path):
+    source = worksheet(
+        '<dataValidations count="1"><dataValidation sqref="A6 B10:C10 R104:R154 S104:S159 XFD104" '
+        'type="list"><formula1>Sheet1!$A$1:$A$2</formula1></dataValidation></dataValidations>'
+    )
+    result = read_worksheet_native_data_validation_semantics(package(tmp_path / "insertion-evidence.xlsx", sheet_one=source))
+    container = result.worksheets[0].container
     assert container is not None
     rule = container.rules[0]
-    assert (container.disable_prompts, container.x_window, container.y_window, rule.sqref, rule.formula1) == (
-        True, 1, 2, ("A6", "B10:C10", "R104:R154", "S104:S159", "XFD104"), "Sheet1!$A$1:$A$2",
-    )
-    with pytest.raises(FrozenInstanceError): result.worksheets = ()
-    with pytest.raises(FrozenInstanceError): result.worksheets[0].container = None
-    with pytest.raises(FrozenInstanceError): container.count = 2
-    with pytest.raises(FrozenInstanceError): rule.formula1 = "changed"
+    reader_fingerprint = (rule.owner_path, rule.type, rule.operator, rule.allow_blank, rule.show_drop_down,
+                          rule.show_input_message, rule.show_error_message, rule.error_style, rule.ime_mode,
+                          rule.error_title, rule.error, rule.prompt_title, rule.prompt, rule.uid,
+                          rule.formula1, rule.formula2)
+    candidate_targets = {
+        6: (("A7", "shifted"), ("B11:C11", "shifted"), ("R105:R155", "shifted"),
+            ("S105:S160", "shifted"), ("XFD105", "shifted")),
+        10: (("A6", "unchanged"), ("B11:C11", "shifted"), ("R105:R155", "shifted"),
+             ("S105:S160", "shifted"), ("XFD105", "shifted")),
+        104: (("A6", "unchanged"), ("B10:C10", "unchanged"), ("R104:R155", "expanded"),
+              ("S104:S160", "expanded"), ("XFD105", "shifted")),
+    }
+    candidates = {
+        row: tuple((source, target, status) for source, (target, status) in zip(rule.sqref, targets))
+        for row, targets in candidate_targets.items()
+    }
+    assert candidates == {
+        6: (("A6", "A7", "shifted"), ("B10:C10", "B11:C11", "shifted"),
+            ("R104:R154", "R105:R155", "shifted"), ("S104:S159", "S105:S160", "shifted"),
+            ("XFD104", "XFD105", "shifted")),
+        10: (("A6", "A6", "unchanged"), ("B10:C10", "B11:C11", "shifted"),
+             ("R104:R154", "R105:R155", "shifted"), ("S104:S159", "S105:S160", "shifted"),
+             ("XFD104", "XFD105", "shifted")),
+        104: (("A6", "A6", "unchanged"), ("B10:C10", "B10:C10", "unchanged"),
+              ("R104:R154", "R104:R155", "expanded"), ("S104:S159", "S104:S160", "expanded"),
+              ("XFD104", "XFD105", "shifted")),
+    }
+    assert rule.sqref == ("A6", "B10:C10", "R104:R154", "S104:S159", "XFD104")
+    assert reader_fingerprint == (rule.owner_path, rule.type, rule.operator, rule.allow_blank, rule.show_drop_down,
+                                  rule.show_input_message, rule.show_error_message, rule.error_style, rule.ime_mode,
+                                  rule.error_title, rule.error, rule.prompt_title, rule.prompt, rule.uid,
+                                  rule.formula1, rule.formula2)
