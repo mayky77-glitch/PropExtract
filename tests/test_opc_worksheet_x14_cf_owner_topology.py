@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, asdict, fields
+from pathlib import Path
+from types import SimpleNamespace
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 
@@ -84,8 +87,8 @@ def test_native_cf_and_sml_formula_remain_opaque(tmp_path):
 def test_full_asdict_projection_is_frozen(tmp_path):
     result = read_worksheet_x14_cf_owner_topology(package(
         tmp_path / "projection.xlsx",
-        sheet_one=worksheet(ext('<x14:conditionalFormatting/><x14:conditionalFormatting/>')),
-        sheet_two=worksheet(ext('<x14:conditionalFormatting/>')),
+        sheet_one=worksheet('<sheetData><row r="6"/><row r="10"/></sheetData>' + ext('<x14:conditionalFormatting/><x14:conditionalFormatting/>')),
+        sheet_two=worksheet('<sheetData><row r="104"/></sheetData>' + ext('<x14:conditionalFormatting/>')),
     ))
     assert asdict(result) == {
         "worksheets": (
@@ -222,3 +225,127 @@ def test_one_worksheet_xml_parse_per_topology_worksheet(monkeypatch, tmp_path):
     monkeypatch.setattr(owner_topology.ET, "fromstring", counted)
     read_worksheet_x14_cf_owner_topology(package(tmp_path / "count.xlsx"))
     assert sum(payload.startswith(b"<worksheet") for payload in calls) == 2
+
+
+class _RaisingPathLike:
+    def __init__(self, exception): self.exception = exception; self.calls = 0
+    def __fspath__(self): self.calls += 1; raise self.exception
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (_RaisingPathLike(TypeError("type")), ("invalid-package-path", "path", "TypeError")),
+    (_RaisingPathLike(ValueError("value")), ("unreadable-package", "path", "ValueError")),
+    (_RaisingPathLike(OSError("os")), ("unreadable-package", "path", "OSError")),
+    ("bad\0path", ("unreadable-package", "path", "embedded-nul")),
+])
+def test_path_boundaries_are_exact_and_coerced_once(value, expected):
+    assert error(value) == (expected[0], "bad\0path" if expected[2] == "embedded-nul" else f"{__name__}.{type(value).__qualname__}", expected[1], expected[2])
+    if hasattr(value, "calls"):
+        assert value.calls == 1
+
+
+def test_non_string_fspath_result_is_an_exact_typed_failure(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(owner_topology, "os", SimpleNamespace(fspath=lambda value: 7))
+    assert error(sentinel) == ("invalid-package-path", "builtins.object", "path", "int")
+
+
+def _member_archive(destination: Path, names: tuple[str, ...], *, payload: bytes | None = None) -> Path:
+    with ZipFile(destination, "w", compression=ZIP_DEFLATED) as archive:
+        for name in names:
+            info = ZipInfo(name); info.compress_type = ZIP_DEFLATED
+            archive.writestr(info, payload or worksheet())
+    return destination
+
+
+def _one_sheet_topology(monkeypatch):
+    descriptor = WorksheetDescriptor("Only", 1, "visible", "only", CanonicalPartURI("xl/worksheets/first.xml"))
+    monkeypatch.setattr(owner_topology, "read_workbook_topology", lambda _: SimpleNamespace(worksheets=(descriptor,)))
+
+
+@pytest.mark.parametrize(("names", "expected"), [
+    ((), ("missing-worksheet-member", "member", "xl/worksheets/first.xml")),
+    (("XL/WORKSHEETS/FIRST.XML",), ("noncanonical-worksheet-member", "member", "XL/WORKSHEETS/FIRST.XML")),
+    (("xl/worksheets/./first.xml",), ("noncanonical-worksheet-member", "member", "xl/worksheets/./first.xml")),
+    (("xl/worksheets/%66irst.xml",), ("noncanonical-worksheet-member", "member", "xl/worksheets/%66irst.xml")),
+    (("xl/worksheets/first.xml", "XL/WORKSHEETS/FIRST.XML"), ("ambiguous-worksheet-member", "member", "xl/worksheets/first.xml")),
+    (("xl/worksheets/first.xml", "xl/worksheets/./first.xml"), ("ambiguous-worksheet-member", "member", "xl/worksheets/first.xml")),
+])
+def test_worksheet_member_alias_matrix(monkeypatch, tmp_path, names, expected):
+    _one_sheet_topology(monkeypatch)
+    assert error(_member_archive(tmp_path / "members.xlsx", names)) == (expected[0], "xl/worksheets/first.xml", expected[1], expected[2])
+
+
+def test_worksheet_member_read_and_decompression_failures_are_exact(monkeypatch, tmp_path):
+    _one_sheet_topology(monkeypatch)
+    archive = _member_archive(tmp_path / "member.xlsx", ("xl/worksheets/first.xml",))
+    original = owner_topology.ZipFile.read
+    monkeypatch.setattr(owner_topology.ZipFile, "read", lambda self, member: (_ for _ in ()).throw(OSError("read")))
+    assert error(archive) == ("unreadable-worksheet-part", "xl/worksheets/first.xml", "xml", "OSError")
+    monkeypatch.setattr(owner_topology.ZipFile, "read", lambda self, member: (_ for _ in ()).throw(owner_topology.zlib.error("zlib")))
+    assert error(archive) == ("unreadable-worksheet-part", "xl/worksheets/first.xml", "xml", "error")
+    monkeypatch.setattr(owner_topology.ZipFile, "read", original)
+
+
+@pytest.mark.parametrize(("payload", "expected"), [
+    (b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>', None),
+    ('<?xml version="1.0" encoding="UTF-16"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'.encode("utf-16"), None),
+    (b'<?xml version="1.0" encoding="no-such-encoding"?><worksheet/>', ("unsupported-xml-encoding", "xml", "encoding")),
+    (b'<x:worksheet/>', ("malformed-worksheet-xml", "xml", "xml")),
+    (b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" a="1" a="2"/>', ("malformed-worksheet-xml", "xml", "xml")),
+])
+def test_xml_byte_encoding_and_parser_boundaries(monkeypatch, tmp_path, payload, expected):
+    _one_sheet_topology(monkeypatch)
+    target = _member_archive(tmp_path / "bytes.xlsx", ("xl/worksheets/first.xml",), payload=payload)
+    if expected is None:
+        assert read_worksheet_x14_cf_owner_topology(target).worksheets[0].containers == ()
+    else:
+        assert error(target) == (expected[0], "xl/worksheets/first.xml", expected[1], expected[2])
+
+
+@pytest.mark.parametrize("local", ("conditionalFormattings", "conditionalFormatting", "cfRule", "dxf", "f", "sqref"))
+@pytest.mark.parametrize("body", (
+    "<{local}/>",
+    "<extLst><{local}/></extLst>",
+    "<extLst><ext uri=\"wrong\"><{local}/></ext></extLst>",
+    "<outer><extLst><ext uri=\"wrong\"><{local}/></ext></extLst></outer>",
+))
+def test_all_owned_locals_are_rejected_at_every_nonowner_depth(tmp_path, local, body):
+    tag = f"{{{X14 if local not in {'f', 'sqref'} else 'http://schemas.microsoft.com/office/excel/2006/main'}}}{local}"
+    actual = error(package(tmp_path / f"misplaced-{local}.xlsx", sheet_one=worksheet(body.format(local=f"x14:{local}" if local not in {"f", "sqref"} else f"xm:{local}"))))
+    if local == "conditionalFormattings" and body.startswith("<extLst><ext uri=\"wrong\""):
+        assert actual == ("unsupported-x14-cf-extension-uri", "xl/worksheets/first.xml", "uri", "wrong")
+    else:
+        assert actual == ("invalid-x14-cf-parent", "xl/worksheets/first.xml", "tag", tag)
+
+
+@pytest.mark.parametrize("local", ("conditionalFormattings", "conditionalFormatting", "cfRule", "dxf", "f", "sqref"))
+@pytest.mark.parametrize("namespace", ("urn:wrong", X14.upper()))
+def test_owned_local_wrong_uri_and_case_collisions_are_exact(tmp_path, local, namespace):
+    tag = f"{{{namespace}}}{local}"
+    assert error(package(tmp_path / f"collision-{local}.xlsx", sheet_one=worksheet(f'<x:{local} xmlns:x="{namespace}"/>'))) == (
+        "x14-cf-namespace-collision", "xl/worksheets/first.xml", "tag", tag,
+    )
+
+
+@pytest.mark.parametrize(("body", "tag"), (
+    ('<foreign:conditionalFormatting xmlns:foreign="urn:foreign"/>', "{urn:foreign}conditionalFormatting"),
+    ('<foreign:cfRule xmlns:foreign="urn:foreign"/>', "{urn:foreign}cfRule"),
+    ('<conditionalFormatting xmlns=""/>', "conditionalFormatting"),
+    ('<cfRule xmlns=""/>', "cfRule"),
+))
+def test_foreign_and_empty_owned_local_collisions_are_exact(tmp_path, body, tag):
+    assert error(package(tmp_path / "foreign.xlsx", sheet_one=worksheet(body))) == (
+        "x14-cf-namespace-collision", "xl/worksheets/first.xml", "tag", tag,
+    )
+
+
+@pytest.mark.parametrize(("body", "field", "detail"), [
+    (f'<extLst><ext uri="{CF_URI}"><x14:conditionalFormattings><x14:conditionalFormatting/></x14:conditionalFormattings>tail</ext></extLst>', "ext", "tail"),
+    (f'<extLst><ext uri="{CF_URI}"><x14:conditionalFormattings><x14:conditionalFormatting/>tail<x14:conditionalFormatting/>later</x14:conditionalFormattings></ext></extLst>', "conditionalFormattings", "tail"),
+    (f'<extLst><ext uri="{CF_URI}"><x14:conditionalFormattings><x14:conditionalFormatting>text</x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>', "conditionalFormatting", "text"),
+])
+def test_ext_and_container_mixed_content_exact_tuples(tmp_path, body, field, detail):
+    assert error(package(tmp_path / "tails.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-content", "xl/worksheets/first.xml", field, detail,
+    )
