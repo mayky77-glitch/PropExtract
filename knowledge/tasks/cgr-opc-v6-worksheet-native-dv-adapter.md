@@ -2,7 +2,7 @@
 card_id: cgr-opc-v6-worksheet-native-dv-adapter
 status: frozen
 version: 1
-work_id: cgr-opc-worksheet-native-dv-adapter-v1-20260820
+work_id: cgr-opc-worksheet-native-dv-adapter-v2-20260820
 task_id: cgr-opc-worksheet-native-dv-adapter-v1
 purpose: Read strict native worksheet data-validation semantics from topology-owned package parts and fail closed on x14 DV.
 role: developer
@@ -10,7 +10,8 @@ route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
 planning_parent_sha: d3d40ac02eca22fc5a053c38ae1ecf754a381479
-dependency_shas: [d3d40ac02eca22fc5a053c38ae1ecf754a381479, e66392bdf51937487ce9ed6a73eee28e54f3a6b0]
+dependency_shas: [d3d40ac02eca22fc5a053c38ae1ecf754a381479]
+contract_reference_shas: [e66392bdf51937487ce9ed6a73eee28e54f3a6b0]
 branch: codex/cgr-opc-worksheet-native-dv-adapter-v1
 card_path: knowledge/tasks/cgr-opc-v6-worksheet-native-dv-adapter.md
 write_scope: [rns_import_server/opc_worksheet_native_dv_reader.py, tests/opc_worksheet_native_dv_fixture_factory.py, tests/test_opc_worksheet_native_dv_reader.py, knowledge/tasks/cgr-opc-v6-worksheet-native-dv-adapter.md]
