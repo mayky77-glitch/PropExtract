@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import ipaddress
 import re
 from typing import Final
+import unicodedata
 from xml.etree import ElementTree as ET
 
 
@@ -106,11 +107,22 @@ def _has_valid_percent_escapes(value: str) -> bool:
 
 
 def _is_pchar(character: str) -> bool:
-    return character in _UNRESERVED or character in _SUB_DELIMS or character in {":", "@", "%"}
+    return character in _UNRESERVED or character in _SUB_DELIMS or character in {":", "@", "%"} or ord(character) > 0x7F
+
+
+def _is_nfc_uri_component(value: str) -> bool:
+    """Accept Unicode only as canonical, non-ambiguous URI component text."""
+    if value != unicodedata.normalize("NFC", value):
+        return False
+    return all(
+        not (ord(character) <= 0x1F or 0x7F <= ord(character) <= 0x9F)
+        and unicodedata.category(character) not in {"Cf", "Cs"}
+        for character in value
+    )
 
 
 def _is_valid_path(value: str, *, no_colon_first_segment: bool = False) -> bool:
-    if not _has_valid_percent_escapes(value) or any(character != "/" and not _is_pchar(character) for character in value):
+    if not _is_nfc_uri_component(value) or not _has_valid_percent_escapes(value) or any(character != "/" and not _is_pchar(character) for character in value):
         return False
     if no_colon_first_segment and ":" in value.partition("/")[0]:
         return False
@@ -162,9 +174,9 @@ def _is_valid_authority(value: str) -> bool:
 
 
 def _split_uri_reference(value: str) -> tuple[str | None, str, str | None, str | None] | None:
-    if not value or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value):
+    if not value or any(ord(character) <= 0x20 or 0x7F <= ord(character) <= 0x9F for character in value):
         return None
-    if any(ord(character) > 0x7F or character in {'\\', '"', '<', '>', '^', '`', '{', '|', '}'} for character in value):
+    if any(unicodedata.category(character) in {"Cf", "Cs"} or character in {'\\', '"', '<', '>', '^', '`', '{', '|', '}'} for character in value):
         return None
     if value.count("#") > 1:
         return None
@@ -177,9 +189,9 @@ def _split_uri_reference(value: str) -> tuple[str | None, str, str | None, str |
     path_part = before_query[len(scheme) + 1 :] if scheme else before_query
     if not _has_valid_percent_escapes(before_query):
         return None
-    if query is not None and (not _has_valid_percent_escapes(query) or any(not _is_pchar(character) and character not in {"/", "?"} for character in query)):
+    if query is not None and (not _is_nfc_uri_component(query) or not _has_valid_percent_escapes(query) or any(not _is_pchar(character) and character not in {"/", "?"} for character in query)):
         return None
-    if fragment is not None and (not _has_valid_percent_escapes(fragment) or any(not _is_pchar(character) and character not in {"/", "?"} for character in fragment)):
+    if fragment is not None and (not _is_nfc_uri_component(fragment) or not _has_valid_percent_escapes(fragment) or any(not _is_pchar(character) and character not in {"/", "?"} for character in fragment)):
         return None
     if path_part.startswith("//"):
         authority, slash, path = path_part[2:].partition("/")

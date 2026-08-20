@@ -1,6 +1,6 @@
 ---
 card_id: cgr-opc-v6-unicode-relationship-uri
-status: ready
+status: review
 version: 1
 work_id: cgr-opc-unicode-relationship-uri-v1-20260820
 task_id: unicode-relationship-uri-v1
@@ -21,6 +21,16 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_relationship_xml.py t
 # Unicode relationship URI-reference v1
 
 Owner decision: preserve the accepted corpus case `worksheets/лист.xml` as valid. Extend only the accepted relationship XML URI grammar; do not special-case the graph and do not reuse rejected V5 code.
+
+Implemented NFC-only Unicode acceptance in relationship URI path/query/fragment
+components. Scheme and authority remain ASCII-only; controls, format/surrogate
+code points, raw backslashes, and non-NFC forms fail closed with existing typed
+errors.
+
+Evidence: relationship suite `62 passed`; required composite URI/corpus suite
+`115 passed`; full suite `401 passed` (one existing openpyxl extension warning);
+`python3 -m compileall -q rns_import_server/opc_relationship_xml.py` and
+`git diff --check` passed. No V5 code reused.
 
 ## Frozen contract
 
