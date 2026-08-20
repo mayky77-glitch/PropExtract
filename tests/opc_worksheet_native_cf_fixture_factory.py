@@ -8,11 +8,12 @@ from tests.opc_workbook_fixture_factory import OFFICE_REL_NS, REL_NS, relationsh
 
 SML = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 X14 = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+XR = "http://schemas.microsoft.com/office/spreadsheetml/2014/revision"
 _TIME = (1980, 1, 1, 0, 0, 0)
 
 
 def worksheet(conditional_formatting: str = "") -> bytes:
-    return f'<worksheet xmlns="{SML}" xmlns:x14="{X14}">{conditional_formatting}</worksheet>'.encode()
+    return f'<worksheet xmlns="{SML}" xmlns:x14="{X14}" xmlns:xr="{XR}">{conditional_formatting}</worksheet>'.encode()
 
 
 def package(destination: Path, *, sheet_one: bytes | None = None, sheet_two: bytes | None = None,

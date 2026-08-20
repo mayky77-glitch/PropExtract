@@ -55,3 +55,11 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_native_cf_r
 - Exact XML precedence: UTF-8/UTF-16 BOM/declarations; malformed/unknown/UTF-7; undeclared prefix; duplicate same-name and two-prefix same-expanded-name attrs all malformed; nested x14 plus malformed duplicate remains malformed because no complete tree; well-formed nested x14 plus native semantic defect returns x14; unused DTD text never acts as markup.
 - Re-run every accepted presence PathLike/topology identity/member alias/decompression/XML/native-placement/x14 regression. Assert complete recursive records, field order, and `FrozenInstanceError` at all new levels.
 - Exclude rule type/priority/dxfId/stopIfTrue/formulas/cardinality, payloads/cfvo/colors, dxf resolution, native extension interpretation, x14 parsing/composition, mutation/mapping/insertion safety, DV/styles/COM/UI/CrossOver/native Excel/source PDF/XLSX/README. Rule-core remains the next separate Gate after V2 acceptance.
+
+## Implementation evidence
+
+- Implemented the frozen V2 inventory records and reader while retaining the accepted presence API and values.
+- Both readers use the same private package/topology/member/byte-ElementTree pipeline; each worksheet payload crosses one ElementTree.fromstring(payload_bytes) boundary before x14 or native validation.
+- Added exact projection, immutability, strict A1/sqref, attribute/child, XML/x14 precedence, and single-parse regression coverage.
+- Validation on 2026-08-20: targeted acceptance 314 passed; full suite 1066 passed (one existing OpenPyXL extension warning).
+- P6 parity remediation on 2026-08-20: inventory now executes the accepted content boundary after placement and before projection; focused acceptance 332 passed and full suite 1084 passed (the same existing OpenPyXL warning).
