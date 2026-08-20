@@ -219,11 +219,26 @@ def test_rejects_non_string_paths_before_zip_open(value, code: str) -> None:
     ),
 )
 def test_coerces_pathlike_once_and_maps_fspath_failures(exception: Exception, code: str) -> None:
-    path = RaisingPath(exception)
-    with pytest.raises(OPCPackageGraphError) as caught:
-        build_opc_package_graph(path)
-    assert caught.value.code == code
-    assert path.calls == 1
+    tuples = []
+    for _ in range(2):
+        path = RaisingPath(exception)
+        with pytest.raises(OPCPackageGraphError) as caught:
+            build_opc_package_graph(path)
+        tuples.append(caught.value.as_tuple())
+        assert path.calls == 1
+    assert tuples[0] == tuples[1] == (code, f"{RaisingPath.__module__}.{RaisingPath.__qualname__}", "path", type(exception).__name__)
+
+
+@pytest.mark.parametrize("encoding", ("us-ascii", "iso-8859-1", "cp1251", "windows-1252", "iso-2022-jp"))
+def test_preserves_parser_accepted_xml_declarations_for_content_types_and_relationships(tmp_path: Path, encoding: str) -> None:
+    content_types = f'<?xml version="1.0" encoding="{encoding}"?><Types xmlns="{CONTENT_TYPES_NAMESPACE}"/>'.encode(encoding)
+    package_members = list(members())
+    package_members[0] = ("[Content_Types].xml", content_types)
+    package_members[3] = (
+        "xl/_rels/workbook.xml.rels",
+        f'<?xml version="1.0" encoding="{encoding}"?><Relationships xmlns="{REL_NS}"><Relationship Id="sheet" Type="https://example.test/sheet" Target="worksheets/sheet1.xml"/></Relationships>'.encode(encoding),
+    )
+    assert build_opc_package_graph(write_package(tmp_path, tuple(package_members))).relationships
 
 
 def test_replays_corpus_by_expected_mutations_without_fixture_name_branches(tmp_path: Path) -> None:
