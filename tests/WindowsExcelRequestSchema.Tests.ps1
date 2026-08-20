@@ -1,28 +1,31 @@
 $ErrorActionPreference = 'Stop'
-$module = Join-Path $PSScriptRoot '..' 'scripts' 'WindowsExcelRequestSchema.psm1'
-Import-Module $module -Force
-
-function New-ValidRequestJson([int]$NextHeader = 6) {
-    $request = [ordered]@{
-        operation_id='operation-1'; owner_nonce='owner-1'; pair_nonce='pair-1'
-        control='C:\staged\control.xlsx'; candidate='C:\staged\candidate.xlsx'; sheet='Реестр РНС'
-        workbook_identity='workbook-sha256'; sheet_identity='sheet-identity'; lease_file='C:\lease.json'; ack_file='C:\ack.json'
-        worksheet_last_row=($NextHeader + 4); group_start=4; group_end=($NextHeader - 1); next_header=$NextHeader; insertion_row=$NextHeader
-        source_row=($NextHeader - 1); template_row=($NextHeader - 1); ordinal_mapping=@([ordered]@{ row=$NextHeader; ordinal=1 })
-        fields=[ordered]@{'6'='38-1-1-2026'; '27'=''}; formulas=[ordered]@{y='=IF(RC[-24]<>"",ROW(),"")';z='=IF(RC[-20]<>"",ROW(),"")'}
-        hyperlink=[ordered]@{address='file:///C:/document.pdf';display='document.pdf'}
-    }
-    return ($request | ConvertTo-Json -Depth 8 -Compress)
-}
-
-function Assert-Rejected([string]$Json, [string]$Expected) {
-    $script:called = $false
-    try { Test-WindowsExcelRequestSchema -RequestJson $Json -BeforeCom { $script:called = $true } | Out-Null; throw 'expected schema failure' }
-    catch { $_.Exception.Message | Should -Match $Expected }
-    $script:called | Should -BeFalse
-}
 
 Describe 'Windows Excel request schema v1' {
+    BeforeAll {
+        $module = Join-Path $PSScriptRoot '..' 'scripts' 'WindowsExcelRequestSchema.psm1'
+        Import-Module $module -Force
+
+        function New-ValidRequestJson([int]$NextHeader = 6) {
+            $request = [ordered]@{
+                operation_id='operation-1'; owner_nonce='owner-1'; pair_nonce='pair-1'
+                control='C:\staged\control.xlsx'; candidate='C:\staged\candidate.xlsx'; sheet='Реестр РНС'
+                workbook_identity='workbook-sha256'; sheet_identity='sheet-identity'; lease_file='C:\lease.json'; ack_file='C:\ack.json'
+                worksheet_last_row=($NextHeader + 4); group_start=4; group_end=($NextHeader - 1); next_header=$NextHeader; insertion_row=$NextHeader
+                source_row=($NextHeader - 1); template_row=($NextHeader - 1); ordinal_mapping=@([ordered]@{ row=$NextHeader; ordinal=1 })
+                fields=[ordered]@{'6'='38-1-1-2026'; '27'=''}; formulas=[ordered]@{y='=IF(RC[-24]<>"",ROW(),"")';z='=IF(RC[-20]<>"",ROW(),"")'}
+                hyperlink=[ordered]@{address='file:///C:/document.pdf';display='document.pdf'}
+            }
+            return ($request | ConvertTo-Json -Depth 8 -Compress)
+        }
+
+        function Assert-Rejected([string]$Json, [string]$Expected) {
+            $script:called = $false
+            try { Test-WindowsExcelRequestSchema -RequestJson $Json -BeforeCom { $script:called = $true } | Out-Null; throw 'expected schema failure' }
+            catch { $_.Exception.Message | Should -Match $Expected }
+            $script:called | Should -BeFalse
+        }
+    }
+
     It 'accepts the exact boundary cases 6, 10, and 104 before the COM callback' {
         foreach ($header in 6, 10, 104) {
             $script:called = $false
