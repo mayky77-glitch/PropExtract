@@ -10,14 +10,43 @@ def error(path):
     with pytest.raises((OPCWorksheetStructureReaderError, OPCWorksheetCellReaderError, OPCWorkbookTopologyError)) as captured: read_worksheet_structure_semantics(path)
     return captured.value.as_tuple()
 
+
+def range_projection(value):
+    if value is None:
+        return None
+    return (value.start, value.end, value.min_row, value.max_row, value.min_column, value.max_column)
+
+
+def row_projection(value):
+    return (value.row, value.height, value.style_index, value.custom_height, value.custom_format,
+            value.hidden, value.outline_level, value.collapsed)
+
+
+def structure_projection(value):
+    return (
+        (value.worksheet.name, value.worksheet.sheet_id, value.worksheet.state,
+         value.worksheet.relationship_id, value.worksheet.worksheet_part.value),
+        range_projection(value.dimension), tuple(row_projection(row) for row in value.rows),
+        tuple(range_projection(merge) for merge in value.merges),
+        None if value.auto_filter is None else range_projection(value.auto_filter.reference),
+    )
+
 def test_reads_immutable_native_geometry_and_row_properties(tmp_path):
     rows = '<row r="6" ht="12.5" s="3" customHeight="1" customFormat="0" hidden="true" outlineLevel="7" collapsed="false"><c r="A6"><v>1</v></c></row><row r="10"><c r="B10"><v>2</v></c></row><row r="104"><c r="C104"><v>3</v></c></row>'
     result = read_worksheet_structure_semantics(package(tmp_path / "ok.xlsx", sheet_one=worksheet(rows=rows)))
     first = result.worksheets[0]
-    assert [(row.row, row.height, row.style_index, row.hidden, row.outline_level) for row in first.rows] == [(6, 12.5, 3, True, 7), (10, None, None, None, None), (104, None, None, None, None)]
-    assert [(item.start, item.end) for item in first.merges] == [("A6", "B6"), ("A10", "C104")]
-    assert first.dimension and first.dimension.max_row == 104 and first.auto_filter and first.auto_filter.reference.start == "A6"
+    assert structure_projection(first) == (
+        ("Первый", 1, "visible", "one", "xl/worksheets/first.xml"),
+        ("A6", "C104", 6, 104, 1, 3),
+        ((6, 12.5, 3, True, False, True, 7, False),
+         (10, None, None, None, None, None, None, None),
+         (104, None, None, None, None, None, None, None)),
+        (("A6", "B6", 6, 6, 1, 2), ("A10", "C104", 10, 104, 1, 3)),
+        ("A6", "C104", 6, 104, 1, 3),
+    )
     with pytest.raises(FrozenInstanceError): first.rows[0].row = 7
+    with pytest.raises(FrozenInstanceError): first.dimension.start = "A7"
+    with pytest.raises(FrozenInstanceError): first.merges = ()
 
 @pytest.mark.parametrize(("sheet", "expected"), [
     (worksheet(dimension='<dimension ref="A:A"/>'), ("invalid-a1-range", "xl/worksheets/first.xml", "ref", "A:A")),
@@ -34,7 +63,12 @@ def test_typed_structure_defects(tmp_path, sheet, expected):
 def test_boundaries_optional_containers_and_order(tmp_path):
     good = worksheet(dimension='<dimension ref="$A$1:$XFD$1048576"/>', rows='<row r="1"><c r="A1"><v>1</v></c></row><row r="1048576"><c r="XFD1048576"><v>2</v></c></row>', auto_filter='', merges='')
     record = read_worksheet_structure_semantics(package(tmp_path / "limits.xlsx", sheet_one=good)).worksheets[0]
-    assert record.dimension and (record.dimension.start, record.dimension.end) == ("A1", "XFD1048576")
+    assert structure_projection(record) == (
+        ("Первый", 1, "visible", "one", "xl/worksheets/first.xml"),
+        ("A1", "XFD1048576", 1, 1048576, 1, 16384),
+        ((1, None, None, None, None, None, None, None),
+         (1048576, None, None, None, None, None, None, None)), (), None,
+    )
     bad_order = f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData><mergeCells count="0"/><autoFilter ref="A6"/></worksheet>'.encode()
     assert error(package(tmp_path / "order.xlsx", sheet_one=bad_order)) == ("invalid-worksheet-child-order", "xl/worksheets/first.xml", "tag", "['{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheetData', '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}mergeCells', '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}autoFilter']")
 
@@ -53,12 +87,18 @@ def test_rejects_owned_unknown_duplicate_mixed_and_nested_content(tmp_path):
     assert error(package(tmp_path / "nested.xlsx", sheet_one=nested)) == ("invalid-auto-filter-content", "xl/worksheets/first.xml", "autoFilter", "nested")
 
 
-def test_reports_preflight_evidence_without_claiming_safety(tmp_path):
+def test_preflight_geometry_has_exact_immutable_projection(tmp_path):
     sheet = worksheet(merges='<mergeCells count="1"><mergeCell ref="A6:C104"/></mergeCells>')
     record = read_worksheet_structure_semantics(package(tmp_path / "preflight.xlsx", sheet_one=sheet)).worksheets[0]
-    assert any(item.min_row < 10 <= item.max_row for item in record.merges)
-    assert record.dimension and record.dimension.min_row <= 10 <= record.dimension.max_row
-    assert record.auto_filter and record.auto_filter.reference.min_row <= 10 <= record.auto_filter.reference.max_row
+    assert structure_projection(record) == (
+        ("Первый", 1, "visible", "one", "xl/worksheets/first.xml"),
+        ("A6", "C104", 6, 104, 1, 3),
+        ((6, None, None, None, None, None, None, None),
+         (10, None, None, None, None, None, None, None),
+         (104, None, None, None, None, None, None, None)),
+        (("A6", "C104", 6, 104, 1, 3),), ("A6", "C104", 6, 104, 1, 3),
+    )
+    with pytest.raises(FrozenInstanceError): record.auto_filter.reference.end = "C10"
 
 class _Once:
     def __init__(self, value): self.value=value; self.calls=0
@@ -69,7 +109,11 @@ class _Once:
 
 def test_coerces_path_once_and_dependency_errors_forward(tmp_path):
     path = _Once(str(package(tmp_path / "once.xlsx")))
-    assert len(read_worksheet_structure_semantics(path).worksheets) == 2 and path.calls == 1
+    result = read_worksheet_structure_semantics(path)
+    assert tuple(item.worksheet.worksheet_part.value for item in result.worksheets) == (
+        "xl/worksheets/first.xml", "xl/worksheets/второй.xml"
+    )
+    assert path.calls == 1
     missing = package(tmp_path / "missing.xlsx", sheet_one_name="xl/worksheets/missing.xml")
     assert error(missing) == ("missing-internal-target", "xl/workbook.xml", "Target", "worksheets/first.xml")
 
@@ -166,8 +210,10 @@ def test_rejects_owned_tags_outside_their_exact_legal_parent(tmp_path, leak, tag
 class _PathLikeFailure:
     def __init__(self, outcome):
         self.outcome = outcome
+        self.calls = 0
 
     def __fspath__(self):
+        self.calls += 1
         if isinstance(self.outcome, BaseException):
             raise self.outcome
         return self.outcome
@@ -184,6 +230,8 @@ class _PathLikeFailure:
 ])
 def test_pathlike_boundary_matrix_is_exact(value, expected):
     assert error(value) == expected
+    if isinstance(value, _PathLikeFailure):
+        assert value.calls == 1
 
 
 def test_member_alias_and_canonical_collision_are_distinct_and_typed(tmp_path):
@@ -336,6 +384,13 @@ def test_row_failure_boundaries_are_exact(tmp_path, row, expected):
     assert error(package(tmp_path / "row-failure.xlsx", sheet_one=worksheet(rows=row))) == expected
 
 
+def test_duplicate_row_is_a_standalone_exact_failure(tmp_path):
+    rows = '<row r="6"/><row r="6"/>'
+    assert error(package(tmp_path / "duplicate-row.xlsx", sheet_one=worksheet(rows=rows))) == (
+        "out-of-order-row", "xl/worksheets/first.xml", "r", "6"
+    )
+
+
 def test_merge_matrix_count_order_and_normalized_duplicate_are_exact(tmp_path):
     cases = [
         ('<mergeCells count=""><mergeCell ref="A6"/></mergeCells>', ("invalid-merge-count", "xl/worksheets/first.xml", "count", "")),
@@ -358,10 +413,91 @@ def test_second_sheet_values_are_independent_and_ordered(tmp_path):
         merges='<mergeCells count="1"><mergeCell ref="B10:C10"/></mergeCells>',
     )
     result = read_worksheet_structure_semantics(package(tmp_path / "second.xlsx", sheet_two=second))
-    assert [(item.worksheet.name, item.dimension.start if item.dimension else None, [row.row for row in item.rows], [(merge.start, merge.end) for merge in item.merges], item.auto_filter.reference.end if item.auto_filter else None) for item in result.worksheets] == [
-        ("Первый", "A6", [6, 10, 104], [("A6", "B6"), ("A10", "C104")], "C104"),
-        ("Второй", "B10", [10, 1048576], [("B10", "C10")], "XFD1048576"),
-    ]
+    assert tuple(structure_projection(item) for item in result.worksheets) == (
+        (
+            ("Первый", 1, "visible", "one", "xl/worksheets/first.xml"),
+            ("A6", "C104", 6, 104, 1, 3),
+            ((6, None, None, None, None, None, None, None),
+             (10, None, None, None, None, None, None, None),
+             (104, None, None, None, None, None, None, None)),
+            (("A6", "B6", 6, 6, 1, 2), ("A10", "C104", 10, 104, 1, 3)),
+            ("A6", "C104", 6, 104, 1, 3),
+        ),
+        (
+            ("Второй", 2, "visible", "two", "xl/worksheets/второй.xml"),
+            ("B10", "XFD1048576", 10, 1048576, 2, 16384),
+            ((10, None, None, None, None, None, None, None),
+             (1048576, None, None, None, None, None, None, None)),
+            (("B10", "C10", 10, 10, 2, 3),),
+            ("B10", "XFD1048576", 10, 1048576, 2, 16384),
+        ),
+    )
+
+
+def test_second_sheet_complete_properties_optional_containers_and_immutability(tmp_path):
+    second = worksheet(
+        dimension='',
+        rows=(
+            '<row r="6" ht="0" s="0" customHeight="0" customFormat="false" hidden="0" outlineLevel="0" collapsed="false"><c r="A6"><v>1</v></c></row>'
+            '<row r="10" ht="12.5" s="3" customHeight="true" customFormat="1" hidden="true" outlineLevel="7" collapsed="1"><c r="A10"><v>2</v></c></row>'
+            '<row r="104"><c r="A104"><v>3</v></c></row>'
+        ),
+        auto_filter='', merges='',
+    )
+    record = read_worksheet_structure_semantics(
+        package(tmp_path / "second-complete.xlsx", sheet_two=second)
+    ).worksheets[1]
+    assert structure_projection(record) == (
+        ("Второй", 2, "visible", "two", "xl/worksheets/второй.xml"), None,
+        ((6, 0.0, 0, False, False, False, 0, False),
+         (10, 12.5, 3, True, True, True, 7, True),
+         (104, None, None, None, None, None, None, None)), (), None,
+    )
+    with pytest.raises(FrozenInstanceError): record.rows = ()
+
+
+def _owned_child_or_tail_payload(owner, variant):
+    if owner == "worksheet":
+        body = '<sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData>'
+        return (
+            f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{body}<sheetData/></worksheet>'
+            if variant == "child" else
+            f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{body}<x/>bad</worksheet>'
+        ).encode()
+    if owner == "dimension":
+        return worksheet(dimension='<dimension ref="A6"><x/></dimension>' if variant == "child" else '<dimension ref="A6"/>bad')
+    if owner == "sheetData":
+        return worksheet(rows='<bogus/>' if variant == "child" else '<row r="6"><c r="A6"><v>1</v></c></row>bad')
+    if owner == "row":
+        return worksheet(rows='<row r="6"><bogus/></row>' if variant == "child" else '<row r="6"><c r="A6"><v>1</v></c>bad</row>')
+    if owner == "autoFilter":
+        return worksheet(auto_filter='<autoFilter ref="A6"><x/></autoFilter>' if variant == "child" else '<autoFilter ref="A6"/>bad')
+    if owner == "mergeCells":
+        return worksheet(merges='<mergeCells count="1"><bogus/></mergeCells>' if variant == "child" else '<mergeCells count="1"><mergeCell ref="A6"/>bad</mergeCells>')
+    return worksheet(merges='<mergeCells count="1"><mergeCell ref="A6"><x/></mergeCell></mergeCells>' if variant == "child" else '<mergeCells count="1"><mergeCell ref="A6"/>bad</mergeCells>')
+
+
+@pytest.mark.parametrize(("owner", "variant", "expected"), [
+    ("worksheet", "child", ("duplicate-sheet-data", "xl/worksheets/first.xml", "sheetData", "")),
+    ("worksheet", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "tail")),
+    ("dimension", "child", ("invalid-worksheet-content", "xl/worksheets/first.xml", "dimension", "nested")),
+    ("dimension", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "tail")),
+    ("sheetData", "child", ("invalid-sheet-data-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bogus")),
+    ("sheetData", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "sheetData", "tail")),
+    ("row", "child", ("invalid-row-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bogus")),
+    ("row", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "row", "tail")),
+    ("autoFilter", "child", ("invalid-auto-filter-content", "xl/worksheets/first.xml", "autoFilter", "nested")),
+    ("autoFilter", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "tail")),
+    ("mergeCells", "child", ("invalid-merge-cells-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bogus")),
+    ("mergeCells", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCells", "tail")),
+    ("mergeCell", "child", ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCell", "nested")),
+    ("mergeCell", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCells", "tail")),
+])
+def test_owned_structure_child_and_tail_matrix_is_exact(tmp_path, owner, variant, expected):
+    assert error(package(
+        tmp_path / f"owned-{owner}-{variant}.xlsx",
+        sheet_one=_owned_child_or_tail_payload(owner, variant),
+    )) == expected
 
 
 def test_dependency_precedence_is_topology_then_cell_then_structure(tmp_path):

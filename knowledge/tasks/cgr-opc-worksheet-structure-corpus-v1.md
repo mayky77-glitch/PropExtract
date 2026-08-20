@@ -34,3 +34,9 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_structure_r
 - Added exact test-only adversarial coverage for PathLike coercion, canonical worksheet members, XML boundary forwarding, mixed content and attributes, owned namespace collisions, A1 normalisation/bounds, row properties, merge ordering/counts, two-sheet projection, and topology/cell/structure precedence.
 - Production reader blobs remain unchanged from dependency `4bd72e8bd7d261786e3fc19802a85837f6685085`.
 - Validation: focused composite 244 passed; full 681 passed with one pre-existing OpenPyXL x14 warning; compileall and diff checks clean.
+
+## P6 corpus remediation — 2026-08-20
+
+- Added standalone duplicate-row exact tuple, one-call evidence for every custom `PathLike`, complete immutable first/second-sheet projections, and explicit empty merge/auto-filter projections.
+- Added parameterized exact child/tail cases for `worksheet`, `dimension`, `sheetData`, `row`, `autoFilter`, `mergeCells`, and `mergeCell`.
+- Validation: focused composite 260 passed; full 697 passed with the pre-existing OpenPyXL x14 warning; compileall and diff checks clean.
