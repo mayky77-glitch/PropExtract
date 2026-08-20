@@ -37,6 +37,7 @@ _XML_DECLARATION_ENCODING: Final = re.compile(
 )
 _SHEET_ID: Final = re.compile(r"\+?[0-9]+\Z")
 _MAX_SHEET_ID: Final = 4_294_967_295
+_MAX_SHEET_ID_LEXEME_LENGTH: Final = 11
 _SHEET_ATTRIBUTES: Final = frozenset({"name", "sheetId", "state", _RELATIONSHIP_ID})
 _SHEET_STATES: Final = frozenset({"visible", "hidden", "veryHidden"})
 
@@ -212,7 +213,7 @@ def _descriptor(
     if name in names:
         _fail("duplicate-sheet-name", workbook_part.value, "name", name)
     sheet_id_text = element.attrib["sheetId"]
-    if _SHEET_ID.fullmatch(sheet_id_text) is None:
+    if _SHEET_ID.fullmatch(sheet_id_text) is None or len(sheet_id_text) > _MAX_SHEET_ID_LEXEME_LENGTH:
         _fail("invalid-sheet-id", workbook_part.value, "sheetId", sheet_id_text)
     numeric_text = sheet_id_text.removeprefix("+").lstrip("0") or "0"
     if len(numeric_text) > 10:

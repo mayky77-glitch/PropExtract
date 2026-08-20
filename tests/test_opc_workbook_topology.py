@@ -117,11 +117,13 @@ def test_detects_duplicate_normalized_sheet_ids(tmp_path):
     ('<sheet name="A" r:id="rSheet1"/>', ("missing-sheet-attribute", "xl/workbook.xml", "attribute", "sheetId")),
     ('<sheet name="A" sheetId="1"/>', ("missing-sheet-attribute", "xl/workbook.xml", "attribute", f"{{{OFFICE_REL_NS}}}id")),
     ('<sheet name=" " sheetId="1" r:id="rSheet1"/>', ("blank-sheet-attribute", "xl/workbook.xml", "attribute", "name")),
+    ('<sheet name="A" sheetId=" " r:id="rSheet1"/>', ("blank-sheet-attribute", "xl/workbook.xml", "attribute", "sheetId")),
     ('<sheet name="A" sheetId="1" r:id=" "/>', ("blank-sheet-attribute", "xl/workbook.xml", "attribute", f"{{{OFFICE_REL_NS}}}id")),
     ('<sheet name="A" sheetId="-1" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "-1")),
     ('<sheet name="A" sheetId="0" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "0")),
     ('<sheet name="A" sheetId="x" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "x")),
     ('<sheet name="A" sheetId="' + "9" * 5000 + '" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "9" * 5000)),
+    ('<sheet name="A" sheetId="' + "0" * 5000 + '1" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "0" * 5000 + "1")),
     ('<sheet name="A" sheetId="1" r:id="rSheet1" state="gone"/>', ("invalid-sheet-state", "xl/workbook.xml", "state", "gone")),
 ])
 def test_rejects_required_sheet_boundaries_with_exact_tuples(tmp_path, sheets, expected):
