@@ -28,6 +28,14 @@ _UINT: Final = re.compile(r"[0-9]+\Z")
 _INT: Final = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
 _BOOL: Final = {"0": False, "1": True, "false": False, "true": True}
 _MAX_UINT: Final = 4_294_967_295
+_ARGB: Final = re.compile(r"[0-9A-Fa-f]{8}\Z")
+_UNDERLINE: Final = frozenset({"single", "double", "singleAccounting", "doubleAccounting", "none"})
+_VERT_ALIGN: Final = frozenset({"baseline", "superscript", "subscript"})
+_SCHEME: Final = frozenset({"major", "minor", "none"})
+_PATTERNS: Final = frozenset({"none", "solid", "mediumGray", "darkGray", "lightGray", "darkHorizontal", "darkVertical", "darkDown", "darkUp", "darkGrid", "darkTrellis", "lightHorizontal", "lightVertical", "lightDown", "lightUp", "lightGrid", "lightTrellis", "gray125", "gray0625"})
+_BORDER_STYLES: Final = frozenset({"none", "thin", "medium", "dashed", "dotted", "thick", "double", "hair", "mediumDashed", "dashDot", "mediumDashDot", "dashDotDot", "mediumDashDotDot", "slantDashDot"})
+_HORIZONTAL: Final = frozenset({"general", "left", "center", "right", "fill", "justify", "centerContinuous", "distributed"})
+_VERTICAL: Final = frozenset({"top", "center", "bottom", "justify", "distributed"})
 
 
 @dataclass(frozen=True)
@@ -133,7 +141,10 @@ def _read_member(path: str, part: CanonicalPartURI) -> bytes:
             for info in zf.infolist():
                 try: canonical = canonicalize_part_uri(info.filename)
                 except OPCPartURIError: _fail("unreadable-styles-part", part.value, "member", "invalid-member-name")
-                if canonical == part: matches.append(info)
+                if canonical == part:
+                    if info.filename != part.value:
+                        _fail("noncanonical-styles-member", part.value, "member", info.filename)
+                    matches.append(info)
             if not matches: _fail("missing-styles-member", part.value, "member", part.value)
             if len(matches) != 1: _fail("ambiguous-styles-member", part.value, "member", part.value)
             return zf.read(matches[0])
@@ -150,6 +161,7 @@ def _xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
     except LookupError: _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
     except (ET.ParseError, UnicodeError, ValueError): _fail("malformed-styles-xml", part.value, "xml", "xml")
     if root.tag != _STYLES: _fail("invalid-styles-root", part.value, "root", str(root.tag))
+    if root.attrib: _fail("unknown-styles-attribute", part.value, "attribute", sorted(root.attrib)[0])
     _mixed(root, part.value, "styleSheet")
     return root
 
@@ -165,6 +177,8 @@ def _color(element: ET.Element, part: str) -> StyleColor:
     if "tint" in element.attrib:
         try: float(element.attrib["tint"])
         except ValueError: _fail("invalid-styles-content", part, "tint", element.attrib["tint"])
+    if "rgb" in element.attrib and _ARGB.fullmatch(element.attrib["rgb"]) is None:
+        _fail("invalid-styles-content", part, "rgb", element.attrib["rgb"])
     if len(element) or _nonwhite(element.text): _fail("invalid-styles-content", part, "color", "nested")
     return StyleColor(element.attrib.get("rgb"), indexed, theme, element.attrib.get("tint"), auto)
 
@@ -193,15 +207,20 @@ def _font(element: ET.Element, part: str) -> FontStyle:
         return True if raw is None and name in values else (_bool(raw, part, name) if raw is not None else False)
     for name in ("family", "charset"):
         if val(name) is not None: _uint(val(name), part, name)
+    if val("u") is not None and val("u") not in _UNDERLINE: _fail("invalid-styles-content", part, "u", val("u"))
+    if val("vertAlign") is not None and val("vertAlign") not in _VERT_ALIGN: _fail("invalid-styles-content", part, "vertAlign", val("vertAlign"))
+    if val("scheme") is not None and val("scheme") not in _SCHEME: _fail("invalid-styles-content", part, "scheme", val("scheme"))
     return FontStyle(val("name"), val("sz"), _uint(val("family"), part, "family") if val("family") is not None else None, _uint(val("charset"), part, "charset") if val("charset") is not None else None, val("scheme"), _color(values["color"], part) if "color" in values else None, flag("b"), flag("i"), val("u"), flag("strike"), flag("outline"), flag("shadow"), val("condense"), val("extend"), val("vertAlign"))
 
 def _fill(element: ET.Element, part: str) -> FillStyle:
+    if element.attrib: _fail("unknown-styles-attribute", part, "attribute", sorted(element.attrib)[0])
     _mixed(element, part, "fill")
     if len(element) != 1: _fail("invalid-styles-content", part, "fill", "structure")
     child = element[0]
     if child.tag == f"{{{_SML}}}patternFill":
         if set(child.attrib) - {"patternType"}: _fail("unknown-styles-attribute", part, "attribute", sorted(set(child.attrib) - {"patternType"})[0])
         _mixed(child, part, "patternFill")
+        if child.attrib.get("patternType") not in {None, *_PATTERNS}: _fail("invalid-styles-content", part, "patternType", child.attrib["patternType"])
         allowed = {f"{{{_SML}}}fgColor", f"{{{_SML}}}bgColor"}
         if any(item.tag not in allowed for item in child): _fail("invalid-styles-content", part, "patternFill", str(next(item.tag for item in child if item.tag not in allowed)))
         return FillStyle("pattern", child.attrib.get("patternType"), _single_color(child, "fgColor", part), _single_color(child, "bgColor", part), None, None, None, None, None, None, ())
@@ -209,6 +228,7 @@ def _fill(element: ET.Element, part: str) -> FillStyle:
         allowed_attr = {"type", "degree", "left", "right", "top", "bottom"}
         if set(child.attrib) - allowed_attr: _fail("unknown-styles-attribute", part, "attribute", sorted(set(child.attrib) - allowed_attr)[0])
         _mixed(child, part, "gradientFill"); stops = []
+        if child.attrib.get("type", "linear") not in {"linear", "path"}: _fail("invalid-styles-content", part, "type", child.attrib["type"])
         for stop in child:
             if stop.tag != f"{{{_SML}}}stop" or set(stop.attrib) != {"position"} or len(stop) != 1: _fail("invalid-styles-content", part, "gradientFill", "stop")
             _mixed(stop, part, "stop")
@@ -221,6 +241,7 @@ def _fill(element: ET.Element, part: str) -> FillStyle:
 def _border_side(element: ET.Element, part: str) -> BorderSide:
     if set(element.attrib) - {"style"}: _fail("unknown-styles-attribute", part, "attribute", sorted(set(element.attrib) - {"style"})[0])
     _mixed(element, part, "border-side")
+    if element.attrib.get("style") not in {None, *_BORDER_STYLES}: _fail("invalid-styles-content", part, "style", element.attrib["style"])
     if len(element) > 1 or (len(element) == 1 and element[0].tag != f"{{{_SML}}}color"): _fail("invalid-styles-content", part, "border-side", "structure")
     return BorderSide(element.attrib.get("style"), _color(element[0], part) if len(element) == 1 else None)
 
@@ -240,7 +261,17 @@ def _alignment(element: ET.Element, part: str) -> CellAlignment:
     if unknown: _fail("unknown-styles-attribute", part, "attribute", unknown[0])
     if len(element) or _nonwhite(element.text): _fail("invalid-styles-content", part, "alignment", "nested")
     a = element.attrib
-    return CellAlignment(a.get("horizontal"), a.get("vertical"), _int(a["textRotation"], part, "textRotation") if "textRotation" in a else None, _bool(a["wrapText"], part, "wrapText") if "wrapText" in a else None, _bool(a["shrinkToFit"], part, "shrinkToFit") if "shrinkToFit" in a else None, _uint(a["indent"], part, "indent") if "indent" in a else None, _int(a["relativeIndent"], part, "relativeIndent") if "relativeIndent" in a else None, _bool(a["justifyLastLine"], part, "justifyLastLine") if "justifyLastLine" in a else None, _uint(a["readingOrder"], part, "readingOrder") if "readingOrder" in a else None)
+    if a.get("horizontal") not in {None, *_HORIZONTAL}: _fail("invalid-styles-content", part, "horizontal", a["horizontal"])
+    if a.get("vertical") not in {None, *_VERTICAL}: _fail("invalid-styles-content", part, "vertical", a["vertical"])
+    rotation = _int(a["textRotation"], part, "textRotation") if "textRotation" in a else None
+    if rotation is not None and rotation not in {*range(-90, 181), 255}: _fail("invalid-styles-content", part, "textRotation", a["textRotation"])
+    indent = _uint(a["indent"], part, "indent") if "indent" in a else None
+    if indent is not None and indent > 250: _fail("invalid-styles-content", part, "indent", a["indent"])
+    relative = _int(a["relativeIndent"], part, "relativeIndent") if "relativeIndent" in a else None
+    if relative is not None and not -15 <= relative <= 15: _fail("invalid-styles-content", part, "relativeIndent", a["relativeIndent"])
+    reading = _uint(a["readingOrder"], part, "readingOrder") if "readingOrder" in a else None
+    if reading is not None and reading > 2: _fail("invalid-styles-content", part, "readingOrder", a["readingOrder"])
+    return CellAlignment(a.get("horizontal"), a.get("vertical"), rotation, _bool(a["wrapText"], part, "wrapText") if "wrapText" in a else None, _bool(a["shrinkToFit"], part, "shrinkToFit") if "shrinkToFit" in a else None, indent, relative, _bool(a["justifyLastLine"], part, "justifyLastLine") if "justifyLastLine" in a else None, reading)
 
 def _protection(element: ET.Element, part: str) -> CellProtection:
     if set(element.attrib) - {"locked", "hidden"}: _fail("unknown-styles-attribute", part, "attribute", sorted(set(element.attrib) - {"locked", "hidden"})[0])
@@ -259,7 +290,7 @@ def _xf(element: ET.Element, part: str, *, style_xfs: tuple[CellFormat, ...] | N
     if xf_id is not None and (style_xfs is None or xf_id >= len(style_xfs)): _fail("invalid-xf-id", part, "xfId", element.attrib["xfId"])
     _mixed(element, part, "xf"); align = None; protect = None
     for child in element:
-        if child.tag == f"{{{_SML}}}alignment" and align is None: align = _alignment(child, part)
+        if child.tag == f"{{{_SML}}}alignment" and align is None and protect is None: align = _alignment(child, part)
         elif child.tag == f"{{{_SML}}}protection" and protect is None: protect = _protection(child, part)
         else: _fail("invalid-styles-content", part, "xf", str(child.tag))
     def flag(key: str) -> bool | None: return _bool(element.attrib[key], part, key) if key in element.attrib else None
@@ -303,7 +334,10 @@ def _styles_relationship(topology: WorkbookTopology, path: str) -> CanonicalPart
     try: graph = build_opc_package_graph(path)
     except OPCPackageGraphError as error: _fail(error.code, error.subject, error.field, error.detail)
     rels = [item for item in graph.relationships if item.source == topology.workbook_part and item.type_uri == _STYLES_REL]
-    if not rels: _fail("missing-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
+    if not rels:
+        wrong = [item for item in graph.relationships if item.source == topology.workbook_part and item.target.endswith("styles.xml")]
+        if wrong: _fail("wrong-styles-relationship-type", topology.workbook_part.value, "Type", wrong[0].type_uri)
+        _fail("missing-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
     if len(rels) != 1: _fail("ambiguous-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
     relationship = rels[0]
     if relationship.target_mode != "Internal": _fail("external-styles-relationship", topology.workbook_part.value, "TargetMode", relationship.target_mode)
@@ -324,7 +358,9 @@ def _content_type(path: str, part: CanonicalPartURI) -> None:
         raw = child.attrib["PartName"]
         try: canonical = canonicalize_part_uri(raw[1:]) if raw.startswith("/") else None
         except OPCPartURIError: canonical = None
-        if canonical == part: values.append(child.attrib["ContentType"])
+        if canonical == part:
+            if raw != expected: _fail("noncanonical-styles-content-type", part.value, "PartName", raw)
+            values.append(child.attrib["ContentType"])
     if not values: _fail("missing-styles-content-type", part.value, "PartName", expected)
     if len(values) != 1: _fail("ambiguous-styles-content-type", part.value, "PartName", expected)
     if values[0] != _STYLES_CONTENT_TYPE: _fail("wrong-styles-content-type", part.value, "ContentType", values[0])
@@ -346,8 +382,19 @@ def _explicit_usage(path: str, cells: WorkbookCellSemantics, table: StyleTable) 
     for sheet in cells.worksheets:
         payload = _read_member(path, sheet.worksheet.worksheet_part)
         root = _xml_worksheet(payload, sheet.worksheet.worksheet_part)
-        records=[]
+        records=[]; direct_cells=[]
+        sheet_data = [child for child in root if child.tag == f"{{{_SML}}}sheetData"]
+        if len(sheet_data) != 1: _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "sheetData", "structure")
+        for row in sheet_data[0]:
+            if row.tag != f"{{{_SML}}}row": _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "sheetData", "child")
+            for cell in row:
+                if cell.tag != f"{{{_SML}}}c": _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "row", "child")
+                direct_cells.append(cell)
         for cell in root.iter(f"{{{_SML}}}c"):
+            if cell not in direct_cells: _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "cell", "nested")
+        if tuple(cell.attrib.get("r", "") for cell in direct_cells) != tuple(item.coordinate for item in sheet.cells):
+            _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "cell", "projection-mismatch")
+        for cell in direct_cells:
             if "s" in cell.attrib:
                 index = _uint(cell.attrib["s"], sheet.worksheet.worksheet_part.value, "s")
                 if index >= len(table.cell_xfs): _fail("invalid-cell-style-reference", sheet.worksheet.worksheet_part.value, "s", cell.attrib["s"])
