@@ -110,6 +110,35 @@ function New-FinalPublicationException {
     return $failure
 }
 
+function New-FinalArtifactInvalidationException {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Artifact,
+        [Parameter(Mandatory = $true)]$InvalidationException
+    )
+
+    return [System.InvalidOperationException]::new(('excel_atomic_protocol_final_artifact_invalidation_failed:{0}:{1}' -f $Artifact, $InvalidationException.Message), $InvalidationException)
+}
+
+function Invalidate-AtomicProtocolFinalArtifacts {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ResultFile,
+        [Parameter(Mandatory = $true)][string]$ErrorFile
+    )
+
+    foreach ($entry in @(@{ artifact = 'result'; path = $ResultFile }, @{ artifact = 'error'; path = $ErrorFile })) {
+        try {
+            if ([System.IO.File]::Exists([string]$entry.path)) { [System.IO.File]::Delete([string]$entry.path) }
+        }
+        catch {
+            # This gate runs before any callback. A retained old artifact is
+            # never allowed to be interpreted as this operation's result.
+            throw (New-FinalArtifactInvalidationException -Artifact $entry.artifact -InvalidationException $_.Exception)
+        }
+    }
+}
+
 function Publish-AtomicProtocolFinalArtifact {
     [CmdletBinding()]
     param(
@@ -125,6 +154,9 @@ function Publish-AtomicProtocolFinalArtifact {
         # A stale opposite outcome must be gone before the sole final outcome
         # is atomically published. If either delete or publication fails, the
         # protocol raises a deterministic failure and never reports success.
+        # The selected target is also cleared first: if its replacement fails,
+        # a prior selected artifact cannot be exposed as a current outcome.
+        if ([System.IO.File]::Exists($Destination)) { [System.IO.File]::Delete($Destination) }
         if ([System.IO.File]::Exists($StaleOpposite)) { [System.IO.File]::Delete($StaleOpposite) }
         Write-AtomicProtocolJson -Path $Destination -Value $Value
     }
@@ -157,6 +189,7 @@ function Invoke-WindowsExcelAtomicProtocol {
             throw ('missing_atomic_protocol_callback:{0}' -f $required)
         }
     }
+    Invalidate-AtomicProtocolFinalArtifacts -ResultFile $ResultFile -ErrorFile $ErrorFile
 
     $primary = $null
     $cleanupFailure = $null

@@ -86,6 +86,29 @@ Describe 'Windows Excel atomic protocol' {
         Test-Path -LiteralPath $script:error | Should -BeTrue
     }
 
+    It 'rejects a locked stale final artifact before entering any operation callback' {
+        [System.IO.File]::WriteAllText($script:result, '{"status":"ok","operation":"old"}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($script:error, '{"status":"error","operation":"old"}', [System.Text.UTF8Encoding]::new($false))
+        $callbacks = @{
+            BuildLease = { param($r) $script:events.Add('lease'); @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
+            ReadAck = { param($r) $script:events.Add('ack'); @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
+            Open = { param($r) $script:events.Add('open') }
+            Execute = { param($r) $script:events.Add('execute') }
+        }
+        $lock = $null
+        try {
+            $lock = New-Object System.IO.FileStream($script:error, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+            { Invoke-WindowsExcelAtomicProtocol -Request $script:request -Callbacks $callbacks -LeaseFile $script:lease -ResultFile $script:result -ErrorFile $script:error } | Should -Throw 'excel_atomic_protocol_final_artifact_invalidation_failed:error:'
+            $script:events.Count | Should -Be 0
+            Test-Path -LiteralPath $script:lease | Should -BeFalse
+            Test-Path -LiteralPath $script:result | Should -BeFalse
+        }
+        finally {
+            if ($null -ne $lock) { $lock.Dispose() }
+        }
+        (Get-Content -Raw -LiteralPath $script:error | ConvertFrom-Json).operation | Should -Be 'old'
+    }
+
     It 'does not open on an invalid ACK and records the exact primary failure' {
         $callbacks = @{
             BuildLease = { param($r) $script:events.Add('lease'); @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
@@ -183,8 +206,12 @@ Describe 'Windows Excel atomic protocol' {
         $remove = $source.IndexOf('[System.IO.File]::Delete($StaleOpposite)', [System.StringComparison]::Ordinal)
         $write = $source.IndexOf('Write-AtomicProtocolJson -Path $Destination', [System.StringComparison]::Ordinal)
         $failure = $source.IndexOf('excel_atomic_protocol_final_publication_failed:', [System.StringComparison]::Ordinal)
+        $invalidation = $source.IndexOf('Invalidate-AtomicProtocolFinalArtifacts -ResultFile $ResultFile -ErrorFile $ErrorFile', [System.StringComparison]::Ordinal)
+        $leaseCallback = $source.IndexOf('$Callbacks.BuildLease', [System.StringComparison]::Ordinal)
         $remove | Should -BeGreaterThan -1
         $write | Should -BeGreaterThan $remove
         $failure | Should -BeGreaterThan -1
+        $invalidation | Should -BeGreaterThan -1
+        $leaseCallback | Should -BeGreaterThan $invalidation
     }
 }
