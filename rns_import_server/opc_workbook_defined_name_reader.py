@@ -28,6 +28,7 @@ _UNQUOTED_SHEET: Final = re.compile(r"[A-Za-z_\u0080-\U0010ffff][A-Za-z0-9_.\u00
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
 _MAX_UNSIGNED: Final = 4_294_967_295
+_MAX_FILTER_EXPRESSION_LENGTH: Final = 32_767
 _FILTER_DATABASE: Final = "_xlnm._FilterDatabase"
 _RANGE_OWNING_BUILT_INS: Final = frozenset({
     "_xlnm.Print_Area", "_xlnm.Print_Titles", "_xlnm.Criteria", "_xlnm.Extract",
@@ -39,6 +40,9 @@ _DEFINED_NAME_ATTRIBUTES: Final = frozenset({
     "functionGroupId", "shortcutKey", "publishToServer", "workbookParameter",
 })
 _XML_BOOLEANS: Final = {"0": False, "1": True, "false": False, "true": True}
+_BOOLEAN_ATTRIBUTES: Final = (
+    "hidden", "function", "vbProcedure", "xlm", "publishToServer", "workbookParameter",
+)
 
 
 @dataclass(frozen=True)
@@ -171,15 +175,23 @@ def _owned_tag_checks(root: ET.Element, part: CanonicalPartURI) -> tuple[ET.Elem
     return container, parents
 
 
-def _local_sheet_index(value: str | None, part: str, worksheet_count: int) -> int | None:
-    if value is None:
-        return None
+def _unsigned_integer(value: str, part: str, field: str, code: str) -> int:
+    """Read a bounded XML-whitespace non-negative integer without coercion."""
     lexical = _XML_WHITESPACE.sub(" ", value).strip(" ")
     digits = lexical.removeprefix("+")
     if _NONNEGATIVE_INTEGER.fullmatch(lexical) is None or len(digits) > 10:
-        _fail("invalid-local-sheet-index", part, "localSheetId", value)
-    index = int(lexical)
-    if index > _MAX_UNSIGNED or index >= worksheet_count:
+        _fail(code, part, field, value)
+    number = int(lexical)
+    if number > _MAX_UNSIGNED:
+        _fail(code, part, field, value)
+    return number
+
+
+def _local_sheet_index(value: str | None, part: str, worksheet_count: int) -> int | None:
+    if value is None:
+        return None
+    index = _unsigned_integer(value, part, "localSheetId", "invalid-local-sheet-index")
+    if index >= worksheet_count:
         _fail("invalid-local-sheet-index", part, "localSheetId", value)
     return index
 
@@ -190,6 +202,24 @@ def _hidden(value: str | None, part: str) -> bool | None:
     if value not in _XML_BOOLEANS:
         _fail("invalid-defined-name-hidden", part, "hidden", value)
     return _XML_BOOLEANS[value]
+
+
+def _boolean_attribute(value: str, part: str, field: str) -> None:
+    if value not in _XML_BOOLEANS:
+        _fail("invalid-defined-name-boolean", part, field, value)
+
+
+def _validate_native_attributes(element: ET.Element, part: str) -> None:
+    """Validate every accepted non-opaque lexical type before semantic mapping."""
+    for field in _BOOLEAN_ATTRIBUTES:
+        if field == "hidden":
+            continue
+        if field in element.attrib:
+            _boolean_attribute(element.attrib[field], part, field)
+    if "functionGroupId" in element.attrib:
+        _unsigned_integer(
+            element.attrib["functionGroupId"], part, "functionGroupId", "invalid-defined-name-function-group-id",
+        )
 
 
 def _range(value: str, part: str) -> A1Range:
@@ -215,9 +245,25 @@ def _range(value: str, part: str) -> A1Range:
 
 
 def _filter_database_reference(expression: str, worksheet: WorksheetDescriptor, part: str) -> A1Range:
-    if not expression or expression.count("!") != 1:
+    if not expression or len(expression) > _MAX_FILTER_EXPRESSION_LENGTH:
         _fail("invalid-filter-database-expression", part, "expression", expression)
-    sheet_text, reference_text = expression.split("!", 1)
+    delimiters: list[int] = []
+    quoted = False
+    position = 0
+    while position < len(expression):
+        character = expression[position]
+        if character == "'":
+            if quoted and position + 1 < len(expression) and expression[position + 1] == "'":
+                position += 2
+                continue
+            quoted = not quoted
+        elif character == "!" and not quoted:
+            delimiters.append(position)
+        position += 1
+    if quoted or len(delimiters) != 1:
+        _fail("invalid-filter-database-expression", part, "expression", expression)
+    delimiter = delimiters[0]
+    sheet_text, reference_text = expression[:delimiter], expression[delimiter + 1:]
     if sheet_text.startswith("'"):
         if len(sheet_text) < 2 or not sheet_text.endswith("'"):
             _fail("invalid-filter-database-expression", part, "expression", expression)
@@ -251,6 +297,7 @@ def _defined_name(
         _fail("blank-defined-name", part, "name", name)
     local_sheet_index = _local_sheet_index(element.attrib.get("localSheetId"), part, len(worksheets))
     hidden = _hidden(element.attrib.get("hidden"), part)
+    _validate_native_attributes(element, part)
     expression = element.text or ""
     return WorkbookDefinedName(name, local_sheet_index, hidden, expression)
 
