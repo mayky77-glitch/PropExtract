@@ -344,8 +344,14 @@ def _styles_relationship(topology: WorkbookTopology, path: str) -> CanonicalPart
     except OPCPackageGraphError as error: _fail(error.code, error.subject, error.field, error.detail)
     rels = [item for item in graph.relationships if item.source == topology.workbook_part and item.type_uri == _STYLES_REL]
     if not rels:
-        candidate = canonicalize_part_uri("xl/styles.xml")
-        wrong = [item for item in graph.relationships if item.source == topology.workbook_part and item.resolved_target == candidate]
+        candidates = _styles_content_type_parts(path)
+        wrong = [
+            item
+            for item in graph.relationships
+            if item.source == topology.workbook_part
+            and item.target_mode == "Internal"
+            and item.resolved_target in candidates
+        ]
         if wrong: _fail("wrong-styles-relationship-type", topology.workbook_part.value, "Type", wrong[0].type_uri)
         _fail("missing-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
     if len(rels) != 1: _fail("ambiguous-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
@@ -353,6 +359,31 @@ def _styles_relationship(topology: WorkbookTopology, path: str) -> CanonicalPart
     if relationship.target_mode != "Internal": _fail("external-styles-relationship", topology.workbook_part.value, "TargetMode", relationship.target_mode)
     if relationship.resolved_target is None: _fail("dangling-styles-relationship", topology.workbook_part.value, "Target", relationship.target)
     return relationship.resolved_target
+
+def _styles_content_type_parts(path: str) -> frozenset[CanonicalPartURI]:
+    try:
+        with ZipFile(path) as zf: payload = zf.read("[Content_Types].xml")
+    except (BadZipFile, LargeZipFile, KeyError, OSError, RuntimeError, ValueError) as error:
+        _fail("unreadable-styles-content-type", "workbook", "content-type", type(error).__name__)
+    try: root = ET.fromstring(payload)
+    except (ET.ParseError, LookupError, UnicodeError, ValueError):
+        _fail("malformed-styles-content-type", "workbook", "content-type", "xml")
+    if root.tag != _TYPES: _fail("invalid-styles-content-type", "workbook", "root", str(root.tag))
+    parts: set[CanonicalPartURI] = set()
+    for child in root:
+        if child.tag != _OVERRIDE or child.attrib.get("ContentType") != _STYLES_CONTENT_TYPE:
+            continue
+        if set(child.attrib) != {"PartName", "ContentType"}:
+            _fail("invalid-styles-content-type", "workbook", "Override", "attribute")
+        raw = child.attrib["PartName"]
+        if not raw.startswith("/"):
+            _fail("invalid-styles-content-type", "workbook", "PartName", raw)
+        try: part = canonicalize_part_uri(raw[1:])
+        except OPCPartURIError: _fail("invalid-styles-content-type", "workbook", "PartName", raw)
+        if raw != f"/{part.value}":
+            _fail("noncanonical-styles-content-type", part.value, "PartName", raw)
+        parts.add(part)
+    return frozenset(parts)
 
 def _content_type(path: str, part: CanonicalPartURI) -> None:
     try:

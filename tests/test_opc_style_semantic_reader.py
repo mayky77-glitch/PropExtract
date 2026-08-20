@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import FrozenInstanceError
-from dataclasses import fields
+from dataclasses import asdict
 import pytest
 from rns_import_server.opc_style_semantic_reader import OPCStyleSemanticReaderError, read_workbook_style_semantics
 from tests.opc_style_fixture_factory import STYLES_CT, STYLES_REL, package, relationship, styles
@@ -22,7 +22,7 @@ def test_reads_immutable_ordered_styles_and_explicit_boundary_usage(tmp_path):
     assert [x.num_fmt_id for x in result.style_table.number_formats]==[164]
     assert result.style_table.fonts[0].color and result.style_table.fonts[0].color.rgb=="FF010203"
     assert result.style_table.fills[1].stops[0][0]==0.0
-    assert [(x.coordinate,x.style_index) for x in result.worksheets[0].cells]==[("A6",0),("C104",1)]
+    assert [(x.coordinate,x.style_index) for x in result.worksheets[0].cells]==[("A6",0),("B10",0),("C104",1)]
     assert [(x.coordinate,x.style_index) for x in result.worksheets[1].cells]==[("A6",1),("B10",0),("C104",1)]
     assert result.style_table.cell_xfs[1].apply_number_format is True
     assert result.style_table.cell_xfs[1].apply_font is False
@@ -54,6 +54,9 @@ def test_wrong_relationship_type_and_canonical_aliases_are_not_accepted(tmp_path
     assert error(package(tmp_path / "wrong-type.xlsx", styles_relationship=wrong)) == ("wrong-styles-relationship-type", "xl/workbook.xml", "Type", "https://example.test/not-styles")
     unrelated = relationship("other", "https://example.test/not-styles", "mystyles.xml")
     assert error(package(tmp_path / "unrelated-type.xlsx", styles_relationship=unrelated, extra_members=(("xl/mystyles.xml", b"<x/>"),))) == ("missing-styles-relationship", "xl/workbook.xml", "Type", STYLES_REL)
+    custom_name = "xl/custom-style-part.xml"
+    custom_wrong = relationship("style", "https://example.test/not-styles", "custom-style-part.xml")
+    assert error(package(tmp_path / "custom-wrong-type.xlsx", style_name=custom_name, styles_relationship=custom_wrong)) == ("wrong-styles-relationship-type", "xl/workbook.xml", "Type", "https://example.test/not-styles")
     exact_override = f'<Override PartName="/xl/styles.xml" ContentType="{STYLES_CT}"/>'
     assert error(package(tmp_path / "member-alias.xlsx", style_name="xl/%73tyles.xml", style_override=exact_override)) == ("noncanonical-styles-member", "xl/styles.xml", "member", "xl/%73tyles.xml")
     override = f'<Override PartName="/xl/%73tyles.xml" ContentType="{STYLES_CT}"/>'
@@ -116,8 +119,63 @@ def test_typed_scalars_defaults_and_public_records(tmp_path):
     assert protection and (protection.locked, protection.hidden) == (True, False)
     assert (border.left.style, border.left.color.rgb if border.left.color else None, border.right.style, border.top.style, border.bottom.style, border.diagonal.style, border.diagonal_up, border.diagonal_down, border.outline) == ("thin", "FF000001", "double", None, None, None, True, False, True)
     assert border.vertical and border.horizontal and border.vertical.style is None and border.horizontal.style is None
-    for record in (result, result.style_table, font, result.style_table.fills[0], border, result.style_table.cell_xfs[0], alignment, protection, result.worksheets[0].cells[0]):
-        assert all(hasattr(record, field.name) for field in fields(record))
+    assert asdict(result) == {
+        "style_part": {"value": "xl/styles.xml"},
+        "style_table": {
+            "number_formats": (),
+            "fonts": (
+                {"name": None, "size": None, "family": None, "charset": None, "scheme": None, "color": None,
+                 "bold": False, "italic": False, "underline": None, "strike": False, "outline": False,
+                 "shadow": False, "condense": False, "extend": False, "vert_align": None},
+                {"name": None, "size": 11.5, "family": None, "charset": None, "scheme": None,
+                 "color": {"rgb": None, "indexed": None, "theme": None, "tint": -1.0, "auto": True},
+                 "bold": False, "italic": False, "underline": "single", "strike": False, "outline": False,
+                 "shadow": False, "condense": False, "extend": True, "vert_align": None},
+            ),
+            "fills": ({"kind": "gradient", "pattern_type": None, "foreground": None, "background": None,
+                       "gradient_type": None, "degree": None, "left": None, "right": None, "top": None,
+                       "bottom": None, "stops": ((1.0, {"rgb": None, "indexed": 2, "theme": None,
+                                                        "tint": None, "auto": None}),)},),
+            "borders": ({
+                "left": {"style": "thin", "color": {"rgb": "FF000001", "indexed": None, "theme": None,
+                                                       "tint": None, "auto": None}},
+                "right": {"style": "double", "color": None},
+                "top": {"style": None, "color": None},
+                "bottom": {"style": None, "color": None},
+                "diagonal": {"style": None, "color": None},
+                "diagonal_up": True, "diagonal_down": False, "outline": True,
+                "vertical": {"style": None, "color": None},
+                "horizontal": {"style": None, "color": None},
+            },),
+            "cell_style_xfs": ({
+                "num_fmt_id": 0, "font_id": 0, "fill_id": 0, "border_id": 0, "xf_id": None,
+                "apply_number_format": None, "apply_font": None, "apply_fill": None, "apply_border": None,
+                "apply_alignment": None, "apply_protection": None, "quote_prefix": None, "pivot_button": None,
+                "alignment": None, "protection": None,
+            },),
+            "cell_xfs": (
+                {"num_fmt_id": 0, "font_id": 1, "fill_id": 0, "border_id": 0, "xf_id": 0,
+                 "apply_number_format": None, "apply_font": None, "apply_fill": None, "apply_border": None,
+                 "apply_alignment": None, "apply_protection": None, "quote_prefix": None, "pivot_button": None,
+                 "alignment": {"horizontal": "left", "vertical": "top", "text_rotation": 180,
+                               "wrap_text": True, "shrink_to_fit": False, "indent": 250,
+                               "relative_indent": -15, "justify_last_line": True, "reading_order": 2},
+                 "protection": {"locked": True, "hidden": False}},
+                {"num_fmt_id": 0, "font_id": 1, "fill_id": 0, "border_id": 0, "xf_id": 0,
+                 "apply_number_format": None, "apply_font": None, "apply_fill": None, "apply_border": None,
+                 "apply_alignment": None, "apply_protection": None, "quote_prefix": None, "pivot_button": None,
+                 "alignment": None, "protection": None},
+            ),
+        },
+        "worksheets": (
+            {"worksheet_name": "Первый", "worksheet_part": {"value": "xl/worksheets/first.xml"}, "cells": (
+                {"coordinate": "A6", "row": 6, "column": 1, "style_index": 0},
+                {"coordinate": "B10", "row": 10, "column": 2, "style_index": 0},
+                {"coordinate": "C104", "row": 104, "column": 3, "style_index": 1},
+            )},
+            {"worksheet_name": "Второй", "worksheet_part": {"value": "xl/worksheets/second.xml"}, "cells": ()},
+        ),
+    }
 
 @pytest.mark.parametrize(("fragment", "expected"), [
     ('<fonts count="1"><font><sz val="0"/></font></fonts>', ("invalid-styles-content", "xl/styles.xml", "sz", "0")),
