@@ -37,6 +37,7 @@ Implement fresh from the exact frozen base. Do not merge, cherry-pick, import, o
 4. Resolve every sheet relationship through the accepted graph. It must be Internal, exist, and use the supported worksheet relationship type. Reject dangling, external, non-worksheet, duplicate, or ambiguous mappings deterministically.
 5. Reject missing/multiple workbook parts, malformed or unsupported-encoding workbook XML, missing/duplicate sheets structures, unknown required attributes, and graph/read failures with stable typed context.
 6. This block does not parse worksheet cells, formulas, hyperlinks, shared strings, styles, defined names, cached values, or mutate a package.
+7. The uniquely resolved workbook part must have exactly one content-types Override and its content type must be an accepted SpreadsheetML main-workbook type.
 
 ## Required verification
 
@@ -44,3 +45,11 @@ Implement fresh from the exact frozen base. Do not merge, cherry-pick, import, o
 - Row-number fixture boundaries 6, 10, and 104 are represented in direct ZIP/XML fixtures for the next reader without parsing their cells here.
 - Missing/multiple workbook relationship; malformed root/sheets; duplicate name/sheetId/rId; zero/negative/non-integer sheetId; missing/external/dangling/non-worksheet relationship; unsupported XML encoding; deterministic exact error tuples.
 - Focused composite, full suite, compileall, and diff checks pass. Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
+
+## Implementation evidence
+
+- The reader uses `build_opc_package_graph` as the sole package/relationship resolver.  It reads only the already-resolved workbook part and the mandatory content-types control part; no sheet payload is read.
+- Main-workbook content type is required as a single Override for the resolved part and is limited to `.xlsx` and macro-enabled SpreadsheetML main types.
+- ZIP member names and Override part names are compared using accepted canonical OPC part identities; raw percent aliases therefore resolve correctly, while canonical collisions remain typed failures.
+- The public boundary coerces a `PathLike` exactly once before graph and ZIP reads.  Sheet IDs are lexically bounded and range-checked before integer conversion; two sheets cannot resolve to one canonical worksheet part.
+- Direct fixtures cover preserved order/state, Unicode, row-boundary sheet IDs 6/10/104, malformed identity and mapping states, encoding, and missing/wrong content type.
