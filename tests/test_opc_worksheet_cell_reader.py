@@ -104,6 +104,16 @@ def test_rejects_row_text_and_cell_tail_before_cell_consumption(tmp_path):
     assert error(package(tmp_path / "cell-tail.xlsx", sheet_one=tail)) == ("invalid-worksheet-content", "xl/worksheets/first.xml", "row", "tail")
 
 
+@pytest.mark.parametrize(("second", "expected"), [
+    ('<c r="A6"><v>2</v></c>', ("duplicate-cell-coordinate", "xl/worksheets/first.xml", "r", "A6")),
+    ('<c r="A6"><v>2</v>bad</c>', ("invalid-cell-content", "xl/worksheets/first.xml", "tail", "A6")),
+    ('<c r="A6"><bad/></c>', ("invalid-cell-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bad")),
+])
+def test_duplicate_coordinate_is_checked_after_current_cell_validation(tmp_path, second, expected):
+    sheet = worksheet(f'<row r="6"><c r="A6"><v>1</v></c>{second}</row>')
+    assert error(package(tmp_path / "precedence.xlsx", sheet_one=sheet)) == expected
+
+
 @pytest.mark.parametrize(("sheet", "expected"), [
     (worksheet('<row r="1"><c r="A0"><v>1</v></c></row>'), ("invalid-a1-reference", "xl/worksheets/first.xml", "r", "A0")),
     (worksheet('<row r="1"><c r="XFE1"><v>1</v></c></row>'), ("invalid-a1-reference", "xl/worksheets/first.xml", "r", "XFE1")),

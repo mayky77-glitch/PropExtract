@@ -240,8 +240,6 @@ def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previo
     if row != expected_row:
         _fail("cell-row-mismatch", part.value, "r", coordinate)
     current = (row, column)
-    if previous is not None and current == previous:
-        _fail("duplicate-cell-coordinate", part.value, "r", coordinate)
     if previous is not None and current < previous:
         _fail("out-of-order-cell", part.value, "r", coordinate)
     cell_type = element.attrib.get("t", "")
