@@ -1,7 +1,7 @@
 ---
 card_id: cgr-excel-fake-com-pester-scope-v1
-status: frozen
-version: 1
+status: implemented_pending_windows_pester
+version: 2
 work_id: cgr-excel-fake-com-pester-scope-v1-20260820
 task_id: fake-com-pester-scope-v1
 purpose: Restore exact fake-COM corpus execution under Pester 5 run scope without changing product behavior.
@@ -25,3 +25,10 @@ Windows run `32335701771` at qualification SHA `6725aa82468115426e45cc5c6519d69a
 Move fake-module import and all four test helpers (`New-ExpectedFakeComCall`, `Get-ExpectedFakeComTrace`, `Assert-ExactFakeComTrace`, `Assert-ExactFailureEnvelope`) into the suite `BeforeAll`. Replace scalar datasets with named hashtable cases for `row` and `stage`. Preserve exactly nine expanded test cases, full 55-event trace comparison, fault occurrence/envelope assertions, and fail-closed wrapper. Do not edit production or weaken a release-only assertion; first verify whether its null-valued-expression result remains after Pester scope/data repair.
 
 Local macOS validation is restricted to static/diff checks because `pwsh` and `powershell` are unavailable. Exact-SHA Windows Pester evidence remains mandatory for acceptance.
+
+## Implementation evidence
+
+- Feature test SHA: `1da4223d`.
+- `BeforeAll` now imports `WindowsExcelFakeCom.psm1` and declares every helper used by `It` bodies, so Pester 5 run scope receives all required functions.
+- The three parameterized `It` blocks use named hashtable cases: rows 6/10/104; stages open/insert; stages calc/save. Expanded count remains 3 + 2 + 2 + 1 + 1 = 9.
+- The production support module was not changed. Run `32335701771` already reproduces a separate release-only null-valued-expression defect, but it cannot be localized until this Pester scope/data repair gets exact Windows evidence. No assertion was weakened or removed.
