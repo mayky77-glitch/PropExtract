@@ -20,4 +20,6 @@ acceptance_commands: ["pwsh -NoProfile -File tests/WindowsExcelFakeCom.Tests.ps1
 
 # Fake COM fault corpus v1
 
-Build a real executable fake object graph for Application→Workbooks→Workbook→Worksheets→Sheet→Rows/Cells/Hyperlinks, logging every proxy acquisition, insert/mutation/save/close/Quit and reverse release. Inject open/insert/calc/save/cleanup/release faults and self-validate expected calls/envelopes for 6/10/104. Every chained/returned proxy, including Hyperlinks.Add result, is observable. No production imports or source-string assertions. Windows Pester mandatory. Human commit/push; no merge/rebase/amend/force.
+Implemented test-only fake COM graph in `tests/support/WindowsExcelFakeCom.psm1` with observable proxy acquisition/release, operation trace envelopes, and injectable open/insert/calc/save/cleanup/release faults. `tests/WindowsExcelFakeCom.Tests.ps1` self-validates rows 6, 10, and 104, including returned `Hyperlinks.Add` proxy and reverse release order. It imports only the fake module, never production code.
+
+Validation is blocked on this macOS host because neither `pwsh` nor `powershell` is installed. Static/diff checks are required locally; Windows Pester remains mandatory before acceptance.
