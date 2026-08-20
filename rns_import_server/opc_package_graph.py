@@ -23,7 +23,6 @@ _XML_DECLARATION_ENCODING: Final = re.compile(
     br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']',
     re.IGNORECASE,
 )
-_SUPPORTED_XML_ENCODINGS: Final = frozenset({b"utf-8", b"utf8", b"utf-16", b"utf-16le", b"utf-16be"})
 _ZIP_MEMBER_ERRORS: Final = (
     BadZipFile,
     EOFError,
@@ -81,18 +80,16 @@ def _fail(code: str, subject: str, field: str, detail: str) -> None:
 
 
 def _safe_path_subject(package_path: object) -> str:
-    try:
-        return repr(package_path)
-    except Exception:
-        return type(package_path).__name__
+    path_type = type(package_path)
+    return f"{path_type.__module__}.{path_type.__qualname__}"
 
 
 def _coerce_package_path(package_path: os.PathLike[str] | str) -> str:
     subject = _safe_path_subject(package_path)
     try:
         value = os.fspath(package_path)
-    except TypeError:
-        _fail("invalid-package-path", subject, "path", type(package_path).__name__)
+    except TypeError as error:
+        _fail("invalid-package-path", subject, "path", type(error).__name__)
     except (ValueError, OSError) as error:
         _fail("unreadable-package", subject, "path", type(error).__name__)
     if not isinstance(value, str):
@@ -135,15 +132,19 @@ def _canonicalize_member(info: ZipInfo) -> CanonicalPartURI:
     raise AssertionError("unreachable")
 
 
-def _reject_unsupported_xml_encoding(payload: bytes, subject: str, field: str) -> None:
+def _reject_parser_unsupported_xml_encoding(payload: bytes, subject: str, field: str) -> None:
     candidate = payload[3:] if payload.startswith(b"\xef\xbb\xbf") else payload
     match = _XML_DECLARATION_ENCODING.match(candidate)
-    if match is not None and match.group(1).lower() not in _SUPPORTED_XML_ENCODINGS:
+    if match is None:
+        return
+    try:
+        ET.fromstring(payload)
+    except (LookupError, ValueError):
         _fail("unsupported-xml-encoding", subject, field, "encoding")
 
 
 def _validate_content_types(payload: bytes, package_subject: str) -> None:
-    _reject_unsupported_xml_encoding(payload, package_subject, "content-types")
+    _reject_parser_unsupported_xml_encoding(payload, package_subject, "content-types")
     try:
         root = ET.fromstring(payload)
     except LookupError:
@@ -267,7 +268,7 @@ def build_opc_package_graph(package_path: os.PathLike[str] | str) -> OPCPackageG
                 _fail("invalid-relationship-source", relationship_part.value, "source", source.value)
             try:
                 payload = _read_member(package, info)
-                _reject_unsupported_xml_encoding(payload, relationship_part.value, "xml")
+                _reject_parser_unsupported_xml_encoding(payload, relationship_part.value, "xml")
                 parsed = parse_relationship_xml(relationship_part.value, payload)
             except OPCRelationshipXMLError as error:
                 _relationship_error(error, relationship_part, source)
