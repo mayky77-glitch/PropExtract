@@ -72,3 +72,13 @@ Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
   failed when the runner can continue, while the always-upload step retains
   `if-no-files-found: error`; consequently an artifact failure cannot make the
   qualification succeed.
+
+## Windows runner remediation record
+
+- Exact-SHA run `32334164237` correctly failed closed during request-schema
+  discovery: Windows PowerShell 5.1 decoded the UTF-8-no-BOM Cyrillic source
+  through its ANSI default and Pester consequently discovered zero tests.
+- Every workflow script step now uses `pwsh` (PowerShell 7), including summary
+  initialization, checkout verification/failure recording, installation, and
+  all three suites. This preserves UTF-8 source decoding without weakening the
+  reviewed SHA, result, or artifact gates.

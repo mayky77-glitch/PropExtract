@@ -23,7 +23,7 @@ jobs:
       CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Initialize qualification summary
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $summary = [ordered]@{
@@ -45,7 +45,7 @@ jobs:
           ref: ${{ env.CANDIDATE_SHA }}
 
       - name: Verify candidate checkout
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
@@ -59,7 +59,7 @@ jobs:
 
       - name: Record checkout failure
         if: failure()
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
@@ -68,7 +68,7 @@ jobs:
           $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
 
       - name: Install and verify Pester 5.6.1
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Install-Module -Name Pester -RequiredVersion 5.6.1 -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
@@ -82,7 +82,7 @@ jobs:
           Write-Host "pester_version=$($pester.Version) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA"
 
       - name: Qualify request-schema suite
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
@@ -101,7 +101,7 @@ jobs:
           if ($suite.status -ne 'passed') { throw 'request-schema Pester qualification did not complete cleanly' }
 
       - name: Qualify atomic-protocol suite
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
@@ -122,7 +122,7 @@ jobs:
           if ($suite.status -ne 'passed') { throw 'atomic-protocol Pester qualification did not complete cleanly' }
 
       - name: Qualify fake-COM suite
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
