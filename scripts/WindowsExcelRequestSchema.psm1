@@ -12,7 +12,7 @@ function Read-JsonStringEnd {
     if ($Text[$Index] -ne '"') { Throw-RequestSchemaError 'request_schema_json_string_expected' }
     $cursor = $Index + 1
     while ($cursor -lt $Text.Length) {
-        if ($Text[$cursor] -eq '\\') {
+        if ($Text[$cursor] -eq '\') {
             $cursor++
             if ($cursor -ge $Text.Length) { Throw-RequestSchemaError 'request_schema_json_escape_invalid' }
             if ($Text[$cursor] -eq 'u') {
@@ -20,6 +20,8 @@ function Read-JsonStringEnd {
                     Throw-RequestSchemaError 'request_schema_json_escape_invalid'
                 }
                 $cursor += 4
+            } elseif ($Text[$cursor] -notin @('"', '\', '/', 'b', 'f', 'n', 'r', 't')) {
+                Throw-RequestSchemaError 'request_schema_json_escape_invalid'
             }
         } elseif ($Text[$cursor] -eq '"') {
             return $cursor + 1

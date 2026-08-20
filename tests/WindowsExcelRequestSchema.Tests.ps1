@@ -5,8 +5,8 @@ Import-Module $module -Force
 function New-ValidRequestJson([int]$NextHeader = 6) {
     $request = [ordered]@{
         operation_id='operation-1'; owner_nonce='owner-1'; pair_nonce='pair-1'
-        control='C:\\staged\\control.xlsx'; candidate='C:\\staged\\candidate.xlsx'; sheet='Реестр РНС'
-        workbook_identity='workbook-sha256'; sheet_identity='sheet-identity'; lease_file='C:\\lease.json'; ack_file='C:\\ack.json'
+        control='C:\staged\control.xlsx'; candidate='C:\staged\candidate.xlsx'; sheet='Реестр РНС'
+        workbook_identity='workbook-sha256'; sheet_identity='sheet-identity'; lease_file='C:\lease.json'; ack_file='C:\ack.json'
         worksheet_last_row=($NextHeader + 4); group_start=4; group_end=($NextHeader - 1); next_header=$NextHeader; insertion_row=$NextHeader
         source_row=($NextHeader - 1); template_row=($NextHeader - 1); ordinal_mapping=@([ordered]@{ row=$NextHeader; ordinal=1 })
         fields=[ordered]@{'6'='38-1-1-2026'; '27'=''}; formulas=[ordered]@{y='=IF(RC[-24]<>"",ROW(),"")';z='=IF(RC[-20]<>"",ROW(),"")'}
@@ -32,6 +32,25 @@ Describe 'Windows Excel request schema v1' {
         }
     }
 
+    It 'accepts escaped quotes and backslashes in the formulas at 6, 10, and 104' {
+        foreach ($header in 6, 10, 104) {
+            $escaped = (New-ValidRequestJson $header) | ConvertFrom-Json
+            $escaped.formulas.y = '=IF(RC[-24]="C:\evidence",ROW(),"")'
+            $escaped.formulas.z = '=IF(RC[-20]="D:\proof",ROW(),"")'
+            $json = $escaped | ConvertTo-Json -Depth 8 -Compress
+            $json | Should -Match '\\\\'
+            $json | Should -Match '\\"'
+            $result = Test-WindowsExcelRequestSchema -RequestJson $json
+            $result.insertion_row | Should -Be $header
+            $result.formulas.y | Should -Be '=IF(RC[-24]="C:\evidence",ROW(),"")'
+            $result.formulas.z | Should -Be '=IF(RC[-20]="D:\proof",ROW(),"")'
+        }
+    }
+
+    It 'rejects malformed JSON escapes before the COM callback' {
+        Assert-Rejected ((New-ValidRequestJson) -replace 'operation-1','operation\q-1') 'json_escape_invalid'
+    }
+
     It 'rejects negative, fractional, string, and out-of-range row values before callbacks' {
         Assert-Rejected ((New-ValidRequestJson) -replace '"insertion_row":6','"insertion_row":-1') 'integral_number_required'
         Assert-Rejected ((New-ValidRequestJson) -replace '"insertion_row":6','"insertion_row":6.5') 'integral_number_required'
@@ -55,7 +74,10 @@ Describe 'Windows Excel request schema v1' {
     It 'rejects group membership, header relation, and missing lease identity fields before callbacks' {
         Assert-Rejected ((New-ValidRequestJson) -replace '"next_header":6','"next_header":7') 'group_boundary_invalid'
         Assert-Rejected ((New-ValidRequestJson) -replace '"source_row":5','"source_row":4') 'group_membership_invalid'
-        Assert-Rejected ((New-ValidRequestJson) -replace '"lease_file":"C:\\\\lease.json",','') 'required_field'
+        $withoutLease = (New-ValidRequestJson) | ConvertFrom-Json
+        [void]$withoutLease.PSObject.Properties.Remove('lease_file')
+        $withoutLease.PSObject.Properties.Name | Should -Not -Contain 'lease_file'
+        Assert-Rejected ($withoutLease | ConvertTo-Json -Depth 8 -Compress) 'required_field'
     }
 }
 

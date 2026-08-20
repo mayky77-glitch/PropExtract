@@ -39,3 +39,9 @@ available capacity below Excel's 1,048,576th row.
 Evidence (2026-08-20): `git diff --check` passed on macOS. `pwsh` is absent on
 this host, therefore executable Pester was not run here; Windows Pester
 execution remains mandatory and is not represented as a pass or skip.
+
+P6 remediation: the scanner now compares against a single PowerShell
+backslash literal and restricts escapes to the JSON grammar. Pester coverage
+adds escaped quote/backslash formula round trips at rows 6/10/104, malformed
+escape rejection before the callback, and a serialized object mutation that
+proves the lease property is absent before the required-field assertion.
