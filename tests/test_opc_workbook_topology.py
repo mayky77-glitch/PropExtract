@@ -100,12 +100,32 @@ def test_rejects_workbook_relationship_failures(tmp_path, root_relationships, ex
 
 
 @pytest.mark.parametrize("sheets", (
-    '<sheet sheetId="1" r:id="rSheet1"/>', '<sheet name=" " sheetId="1" r:id="rSheet1"/>',
-    '<sheet name="A" sheetId="-1" r:id="rSheet1"/>', '<sheet name="A" sheetId="x" r:id="rSheet1"/>',
-    '<sheet name="A" sheetId="' + "9" * 5000 + '" r:id="rSheet1"/>', '<sheet name="A" sheetId="1" r:id="rSheet1" state="gone"/>',
+    '<sheet name="A" sheetId="01" r:id="rSheet1"/>', '<sheet name="A" sheetId="+1" r:id="rSheet1"/>',
 ))
-def test_rejects_required_sheet_boundaries(tmp_path, sheets):
-    assert error_tuple(package(tmp_path / "bad.xlsx", workbook_xml=workbook(sheets)))[0] in {"missing-sheet-attribute", "blank-sheet-attribute", "invalid-sheet-id", "invalid-sheet-state"}
+def test_accepts_noncanonical_positive_sheet_id_lexemes(tmp_path, sheets):
+    assert read_workbook_topology(package(tmp_path / "accepted.xlsx", workbook_xml=workbook(sheets))).worksheets[0].sheet_id == 1
+
+
+def test_detects_duplicate_normalized_sheet_ids(tmp_path):
+    sheets = '<sheet name="A" sheetId="01" r:id="one"/><sheet name="B" sheetId="+1" r:id="two"/>'
+    rels = relationship("one", f"{OFFICE_REL_NS}/worksheet", "worksheets/sheet1.xml") + relationship("two", f"{OFFICE_REL_NS}/worksheet", "worksheets/sheet2.xml")
+    assert error_tuple(package(tmp_path / "duplicate-normalized-id.xlsx", workbook_xml=workbook(sheets), workbook_relationships=rels, worksheet_parts=("xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"))) == ("duplicate-sheet-id", "xl/workbook.xml", "sheetId", "+1")
+
+
+@pytest.mark.parametrize(("sheets", "expected"), [
+    ('<sheet sheetId="1" r:id="rSheet1"/>', ("missing-sheet-attribute", "xl/workbook.xml", "attribute", "name")),
+    ('<sheet name="A" r:id="rSheet1"/>', ("missing-sheet-attribute", "xl/workbook.xml", "attribute", "sheetId")),
+    ('<sheet name="A" sheetId="1"/>', ("missing-sheet-attribute", "xl/workbook.xml", "attribute", f"{{{OFFICE_REL_NS}}}id")),
+    ('<sheet name=" " sheetId="1" r:id="rSheet1"/>', ("blank-sheet-attribute", "xl/workbook.xml", "attribute", "name")),
+    ('<sheet name="A" sheetId="1" r:id=" "/>', ("blank-sheet-attribute", "xl/workbook.xml", "attribute", f"{{{OFFICE_REL_NS}}}id")),
+    ('<sheet name="A" sheetId="-1" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "-1")),
+    ('<sheet name="A" sheetId="0" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "0")),
+    ('<sheet name="A" sheetId="x" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "x")),
+    ('<sheet name="A" sheetId="' + "9" * 5000 + '" r:id="rSheet1"/>', ("invalid-sheet-id", "xl/workbook.xml", "sheetId", "9" * 5000)),
+    ('<sheet name="A" sheetId="1" r:id="rSheet1" state="gone"/>', ("invalid-sheet-state", "xl/workbook.xml", "state", "gone")),
+])
+def test_rejects_required_sheet_boundaries_with_exact_tuples(tmp_path, sheets, expected):
+    assert error_tuple(package(tmp_path / "bad.xlsx", workbook_xml=workbook(sheets))) == expected
 
 
 def test_accepts_macro_enabled_main_workbook_type_and_dangling_is_graph_error(tmp_path):
