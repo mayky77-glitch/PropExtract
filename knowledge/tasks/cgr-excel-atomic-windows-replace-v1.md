@@ -40,3 +40,9 @@ Required: independent P6, then exact-SHA Windows Pester with all 13 passed and z
 
 - `git diff --check` and static ordering/scope/count assertions pass locally.
 - This host has neither `pwsh` nor `powershell`; the required exact-SHA Windows Pester run remains pending CI/Windows and is not claimed as passed.
+
+## P6 cleanup-preservation remediation
+
+- Remediation SHA: `45aab3d161bc9d22ae2dca1e43fc149bbbf34e62`.
+- `Write-AtomicProtocolJson` now captures its write/replace primary, attempts stream, temporary, and backup cleanup independently, and preserves the primary when cleanup also fails. It records the first cleanup plus the ordered cleanup list in the original exception's `Data`. If replace succeeds but cleanup fails, it throws explicit `atomic_json_cleanup_failed:<target>:...` with the same cleanup evidence; successful execution still requires no cleanup residue.
+- The existing replacement test remains one of the 13 semantics and injects: (1) failed replace plus failed temporary/backup cleanup, asserting both cleanup attempts/order and exact original HRESULT; and (2) successful replace with failed backup cleanup, asserting explicit failure and published JSON. It removes injected test residue before its final no-`*.tmp`/no-`*.bak` assertion.
