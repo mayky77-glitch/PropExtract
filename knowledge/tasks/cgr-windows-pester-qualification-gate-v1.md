@@ -39,3 +39,21 @@ Add one isolated GitHub Actions workflow; do not alter production, tests, or the
 4. Until exact Windows green, request-schema `c3819825`, atomic `20eb66a`, and fake-COM `6f689ae` remain suspended and unmerged.
 
 Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
+
+## Implementation record
+
+- Added `.github/workflows/windows-excel-qualification.yml` as the isolated
+  `windows-2022` qualification gate. It is limited to pull requests affecting
+  this gate or its exact three PowerShell suites/modules, plus manual dispatch.
+- The workflow installs and imports only Pester `5.6.1` from PSGallery, proves
+  the imported version, executes the request-schema, atomic-protocol, and
+  fake-COM files through direct `Invoke-Pester -PassThru` calls, and rejects a
+  null, incomplete, skipped, failed, or zero-discovery result. The fake-COM
+  suite additionally requires exactly nine tests.
+- The pre-created, always-uploaded JSON artifact records the exact
+  `GITHUB_SHA`, Pester version, and each suite's total/passed/failed/skipped
+  counts. It may show later suites as `not-run` after an earlier terminal
+  failure; the job remains failed in that case.
+- Static validation is recorded with the implementation commit. This macOS
+  worktree has no PowerShell runtime, so the executable Windows qualification
+  remains pending the P6-reviewed GitHub Actions run described above.
