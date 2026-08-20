@@ -45,97 +45,101 @@ function New-WindowsExcelFakeComProxy {
 
     $State.NextId++
     $proxy = [pscustomobject](@{ Kind = $Kind; Id = $State.NextId; Released = $false; _State = $State } + $Metadata)
+    $state = $State
+    $addCallCommand = Get-Command Add-WindowsExcelFakeComCall -CommandType Function
+    $faultCommand = Get-Command Invoke-WindowsExcelFakeComFault -CommandType Function
+    $newProxyCommand = Get-Command New-WindowsExcelFakeComProxy -CommandType Function
     Add-WindowsExcelFakeComCall -State $State -Event 'proxy.acquire' -Proxy $proxy
     $proxy | Add-Member -MemberType ScriptMethod -Name Release -Value {
-        if (-not $this.Released) {
-            Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.release' -Stage 'release' -Proxy $this
-            try { Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'release' }
-            finally { $this.Released = $true }
+        if (-not $proxy.Released) {
+            & $addCallCommand -State $state -Event 'proxy.release' -Stage 'release' -Proxy $proxy
+            try { & $faultCommand -State $state -Stage 'release' }
+            finally { $proxy.Released = $true }
         }
-    }
+    }.GetNewClosure()
 
     switch ($Kind) {
         'Application' {
             $proxy | Add-Member ScriptProperty Workbooks ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.acquire.property' -Proxy $this -Arguments @{ property = 'Workbooks' }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Workbooks'
-            })
+                & $addCallCommand -State $state -Event 'proxy.acquire.property' -Proxy $proxy -Arguments @{ property = 'Workbooks' }
+                & $newProxyCommand -State $state -Kind 'Workbooks'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod CalculateFullRebuild ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'application.calculate' -Stage 'calc' -Proxy $this
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'calc'
-            })
+                & $addCallCommand -State $state -Event 'application.calculate' -Stage 'calc' -Proxy $proxy
+                & $faultCommand -State $state -Stage 'calc'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod Quit ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'application.quit' -Stage 'cleanup' -Proxy $this
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'cleanup'
-            })
+                & $addCallCommand -State $state -Event 'application.quit' -Stage 'cleanup' -Proxy $proxy
+                & $faultCommand -State $state -Stage 'cleanup'
+            }.GetNewClosure())
         }
         'Workbooks' {
             $proxy | Add-Member ScriptMethod Open ({ param([string]$Path, [int]$UpdateLinks, [bool]$ReadOnly)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'workbooks.open' -Stage 'open' -Proxy $this -Arguments @{ path = $Path; update_links = $UpdateLinks; read_only = $ReadOnly }
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'open'
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Workbook' -Metadata @{ Path = $Path }
-            })
+                & $addCallCommand -State $state -Event 'workbooks.open' -Stage 'open' -Proxy $proxy -Arguments @{ path = $Path; update_links = $UpdateLinks; read_only = $ReadOnly }
+                & $faultCommand -State $state -Stage 'open'
+                & $newProxyCommand -State $state -Kind 'Workbook' -Metadata @{ Path = $Path }
+            }.GetNewClosure())
         }
         'Workbook' {
             $proxy | Add-Member ScriptProperty Worksheets ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.acquire.property' -Proxy $this -Arguments @{ property = 'Worksheets' }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Worksheets'
-            })
+                & $addCallCommand -State $state -Event 'proxy.acquire.property' -Proxy $proxy -Arguments @{ property = 'Worksheets' }
+                & $newProxyCommand -State $state -Kind 'Worksheets'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod Save ({
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'workbook.save' -Stage 'save' -Proxy $this
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'save'
-            })
+                & $addCallCommand -State $state -Event 'workbook.save' -Stage 'save' -Proxy $proxy
+                & $faultCommand -State $state -Stage 'save'
+            }.GetNewClosure())
             $proxy | Add-Member ScriptMethod Close ({ param([bool]$SaveChanges)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'workbook.close' -Stage 'cleanup' -Proxy $this -Arguments @{ save_changes = $SaveChanges }
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'cleanup'
-            })
+                & $addCallCommand -State $state -Event 'workbook.close' -Stage 'cleanup' -Proxy $proxy -Arguments @{ save_changes = $SaveChanges }
+                & $faultCommand -State $state -Stage 'cleanup'
+            }.GetNewClosure())
         }
         'Worksheets' {
             $proxy | Add-Member ScriptMethod Item ({ param([string]$Name)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'worksheets.item' -Proxy $this -Arguments @{ name = $Name }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Sheet' -Metadata @{ Name = $Name }
-            })
+                & $addCallCommand -State $state -Event 'worksheets.item' -Proxy $proxy -Arguments @{ name = $Name }
+                & $newProxyCommand -State $state -Kind 'Sheet' -Metadata @{ Name = $Name }
+            }.GetNewClosure())
         }
         'Sheet' {
             foreach ($property in @('Rows', 'Cells', 'Hyperlinks')) {
                 $propertyName = $property
                 $getter = {
-                    Add-WindowsExcelFakeComCall -State $this._State -Event 'proxy.acquire.property' -Proxy $this -Arguments @{ property = $propertyName }
-                    New-WindowsExcelFakeComProxy -State $this._State -Kind $propertyName
+                    & $addCallCommand -State $state -Event 'proxy.acquire.property' -Proxy $proxy -Arguments @{ property = $propertyName }
+                    & $newProxyCommand -State $state -Kind $propertyName
                 }.GetNewClosure()
                 $proxy | Add-Member ScriptProperty $propertyName $getter
             }
         }
         'Rows' {
             $proxy | Add-Member ScriptMethod Item ({ param([int]$Row)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'rows.item' -Proxy $this -Arguments @{ row = $Row }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Row' -Metadata @{ Row = $Row }
-            })
+                & $addCallCommand -State $state -Event 'rows.item' -Proxy $proxy -Arguments @{ row = $Row }
+                & $newProxyCommand -State $state -Kind 'Row' -Metadata @{ Row = $Row }
+            }.GetNewClosure())
         }
         'Row' {
             $proxy | Add-Member ScriptMethod Insert ({ param([int]$Shift, [int]$CopyOrigin)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'row.insert' -Stage 'insert' -Proxy $this -Arguments @{ row = $this.Row; shift = $Shift; copy_origin = $CopyOrigin }
-                Invoke-WindowsExcelFakeComFault -State $this._State -Stage 'insert'
-            })
+                & $addCallCommand -State $state -Event 'row.insert' -Stage 'insert' -Proxy $proxy -Arguments @{ row = $proxy.Row; shift = $Shift; copy_origin = $CopyOrigin }
+                & $faultCommand -State $state -Stage 'insert'
+            }.GetNewClosure())
         }
         'Cells' {
             $proxy | Add-Member ScriptMethod Item ({ param([int]$Row, [int]$Column)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'cells.item' -Proxy $this -Arguments @{ row = $Row; column = $Column }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Cell' -Metadata @{ Row = $Row; Column = $Column }
-            })
+                & $addCallCommand -State $state -Event 'cells.item' -Proxy $proxy -Arguments @{ row = $Row; column = $Column }
+                & $newProxyCommand -State $state -Kind 'Cell' -Metadata @{ Row = $Row; Column = $Column }
+            }.GetNewClosure())
         }
         'Cell' {
-            $proxy | Add-Member ScriptProperty Value2 ({ $this._Value2 }) ({ param($Value)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'cell.mutate.value2' -Stage 'mutation' -Proxy $this -Arguments @{ row = $this.Row; column = $this.Column; value = $Value }
-                $this._Value2 = $Value
-            })
+            $proxy | Add-Member ScriptProperty Value2 ({ $proxy._Value2 }.GetNewClosure()) ({ param($Value)
+                & $addCallCommand -State $state -Event 'cell.mutate.value2' -Stage 'mutation' -Proxy $proxy -Arguments @{ row = $proxy.Row; column = $proxy.Column; value = $Value }
+                $proxy._Value2 = $Value
+            }.GetNewClosure())
             $proxy | Add-Member -MemberType NoteProperty -Name _Value2 -Value $null
         }
         'Hyperlinks' {
             $proxy | Add-Member ScriptMethod Add ({ param($Anchor, [string]$Address)
-                Add-WindowsExcelFakeComCall -State $this._State -Event 'hyperlinks.add' -Stage 'mutation' -Proxy $this -Arguments @{ anchor_id = $Anchor.Id; row = $Anchor.Row; column = $Anchor.Column; address = $Address }
-                New-WindowsExcelFakeComProxy -State $this._State -Kind 'Hyperlink' -Metadata @{ Address = $Address; AnchorId = $Anchor.Id }
-            })
+                & $addCallCommand -State $state -Event 'hyperlinks.add' -Stage 'mutation' -Proxy $proxy -Arguments @{ anchor_id = $Anchor.Id; row = $Anchor.Row; column = $Anchor.Column; address = $Address }
+                & $newProxyCommand -State $state -Kind 'Hyperlink' -Metadata @{ Address = $Address; AnchorId = $Anchor.Id }
+            }.GetNewClosure())
         }
     }
     return $proxy
@@ -148,15 +152,39 @@ function New-WindowsExcelFakeCom {
     [pscustomobject]@{ Application = (New-WindowsExcelFakeComProxy -State $state -Kind 'Application'); State = $state }
 }
 
+function Find-WindowsExcelFakeComControlledException {
+    param([Parameter(Mandatory)]$Exception)
+    $seen = [System.Collections.Generic.HashSet[System.Exception]]::new()
+    $current = $Exception
+    for ($depth = 0; $depth -lt 4 -and $null -ne $current; $depth++) {
+        if (-not $seen.Add($current)) { break }
+        if ($null -ne $current.Data -and $current.Data.Contains('stage')) { return $current }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Write-WindowsExcelFakeComUnexpectedException {
+    param([Parameter(Mandatory)]$Exception, [string]$ScriptStackTrace = '')
+    try {
+        Write-Warning ("fake_com_unexpected_exception type={0}; message={1}; stack={2}" -f $Exception.GetType().FullName, $Exception.Message, $ScriptStackTrace) -WarningAction Continue
+    } catch {}
+}
+
 function Get-WindowsExcelFakeComErrorEnvelope {
-    param($Exception)
+    param($Exception, [string]$ScriptStackTrace = '')
     if ($null -eq $Exception) { return $null }
+    $controlledException = Find-WindowsExcelFakeComControlledException -Exception $Exception
+    if ($null -eq $controlledException) {
+        Write-WindowsExcelFakeComUnexpectedException -Exception $Exception -ScriptStackTrace $ScriptStackTrace
+        $controlledException = $Exception
+    }
     [pscustomobject]@{
-        message = $Exception.Message
-        stage = [string]$Exception.Data['stage']
-        occurrence = if ($Exception.Data.Contains('occurrence')) { [int]$Exception.Data['occurrence'] } else { 0 }
-        hresult = [int]$Exception.Data['hresult']
-        winerror = [int]$Exception.Data['winerror']
+        message = $controlledException.Message
+        stage = [string]$controlledException.Data['stage']
+        occurrence = if ($controlledException.Data.Contains('occurrence')) { [int]$controlledException.Data['occurrence'] } else { 0 }
+        hresult = [int]$controlledException.Data['hresult']
+        winerror = [int]$controlledException.Data['winerror']
     }
 }
 
@@ -166,7 +194,7 @@ function Invoke-WindowsExcelFakeComScenario {
     $fake = New-WindowsExcelFakeCom -Faults $Faults
     $proxies = [System.Collections.Generic.List[object]]::new()
     $app = $fake.Application; [void]$proxies.Add($app)
-    $error = $null; $cleanupErrors = [System.Collections.Generic.List[object]]::new()
+    $error = $null; $primaryErrorRecord = $null; $cleanupErrors = [System.Collections.Generic.List[object]]::new()
     try {
         $workbooks = $app.Workbooks; [void]$proxies.Add($workbooks)
         $control = $workbooks.Open('control.xlsx', 0, $false); [void]$proxies.Add($control)
@@ -182,13 +210,14 @@ function Invoke-WindowsExcelFakeComScenario {
         $linkAnchor = $cells.Item($InsertionRow, 23); [void]$proxies.Add($linkAnchor)
         $link = $hyperlinks.Add($linkAnchor, "https://example.invalid/$InsertionRow"); [void]$proxies.Add($link)
         $app.CalculateFullRebuild(); $candidate.Save(); $candidate.Close($true); $app.Quit()
-    } catch { $error = $_.Exception }
+    } catch { $error = $_.Exception; $primaryErrorRecord = $_ }
     finally {
         for ($index = $proxies.Count - 1; $index -ge 0; $index--) {
-            try { $proxies[$index].Release() } catch { [void]$cleanupErrors.Add((Get-WindowsExcelFakeComErrorEnvelope $_.Exception)) }
+            try { $proxies[$index].Release() } catch { [void]$cleanupErrors.Add((Get-WindowsExcelFakeComErrorEnvelope $_.Exception $_.ScriptStackTrace)) }
         }
     }
-    $primaryError = Get-WindowsExcelFakeComErrorEnvelope $error
+    $primaryStackTrace = if ($null -eq $primaryErrorRecord) { '' } else { $primaryErrorRecord.ScriptStackTrace }
+    $primaryError = Get-WindowsExcelFakeComErrorEnvelope $error $primaryStackTrace
     $cleanup = @($cleanupErrors)
     $classification = if ($null -ne $primaryError) {
         if ($cleanup.Count -gt 0) { 'primary_and_cleanup_failure' } else { 'primary_failure' }

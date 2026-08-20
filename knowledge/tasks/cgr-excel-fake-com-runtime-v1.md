@@ -1,7 +1,7 @@
 ---
 card_id: cgr-excel-fake-com-runtime-v1
-status: frozen
-version: 1
+status: implemented_pending_windows_pester
+version: 2
 work_id: cgr-excel-fake-com-runtime-v1-20260820
 task_id: fake-com-runtime-v1
 purpose: Repair fake-COM PowerShell 7 runtime behavior while retaining strict Pester 5 assertions.
@@ -23,3 +23,13 @@ acceptance_commands: ["pwsh -NoProfile -File tests/WindowsExcelFakeCom.Tests.ps1
 Exact Windows Pester 5.6.1 runs `32336263772` and `32336271382` at candidate `e687b55237beeb5495b2aedcd3c5e66081d347eb` discover all nine cases yet fail all nine. Successful row scenarios report only 20 instead of the required 55 trace events. Controlled fault envelopes lose their `stage`, `occurrence`, `hresult`, and `winerror`; release-only additionally creates an unintended null-valued-expression primary failure.
 
 Repair only `tests/support/WindowsExcelFakeCom.psm1` runtime behavior. Keep the run-scope helpers and named parameter cases from parent `3fa36b7`; keep exact trace, fault occurrence/envelope, reverse release, classification, and wrapper assertions. No production/workflow changes. Static macOS checks cannot establish PowerShell behavior; acceptance requires a fresh exact-SHA Windows qualification run after review/integration.
+
+## Implementation evidence
+
+- Every generated proxy member now closes over its own immutable `$proxy` and `$state` references. It no longer relies on PowerShell's runtime `$this` binding inside generated ScriptMethod/ScriptProperty bodies.
+- This addresses the exact failure shape: controlled fault calls previously failed before recording their stage envelope, and release cleanup could turn into an untyped primary null-valued-expression. The invariant assertions remain unchanged.
+- No PowerShell executable is available on this macOS host; exact Windows Pester remains required.
+- Run7 at `fdd112fe948171242e14b7e5c93f71eed26e7914` proved generated members execute outside module session state: first `Workbooks` getter and `Release` cannot resolve private `Add-WindowsExcelFakeComCall`.
+- Each proxy now captures private function `CommandInfo` objects for add-call, fault, and recursive proxy creation. Every generated member invokes those captured commands; no generated body performs unbound private-helper name resolution.
+- Local CrossOver pwsh `7.6.5` / Pester `5.6.1` evidence at `348f02b` passes all three 55-event success cases. The six remaining fault cases are `MethodInvocationException` wrappers around intended controlled `InvalidOperationException` values.
+- Envelope resolution now walks at most four `InnerException` values, stops on cycles, and accepts only the first exception carrying `Data['stage']`. Unstructured outer exceptions retain explicit nonblocking telemetry; there is no generic fallback or altered assertion.
