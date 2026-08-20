@@ -48,3 +48,9 @@ Implement fresh from the exact frozen base. Do not merge, copy, or import stale 
 - Own a namespace-valid direct ZIP/XML fixture corpus with two sheets and cells at rows 6, 10, and 104; raw scalar types; simple inline/shared index; normal/shared/array formula metadata and cache; external, internal-package, and location hyperlinks; Unicode sheet/target text.
 - Negative corpus covers wrong root/namespace/encoding, missing or aliased worksheet member, row/cell order and coordinates, type/payload/formula defects, rich inline text, malformed shared index, hyperlink ref/id/type/mode/target/duplicates, and one-shot stateful `PathLike` errors with full exact tuples.
 - Focused composite, full suite, compileall, and diff checks pass. Human commit/push; no merge, amend, rebase, force-push, or unrelated edits.
+
+## Implementation evidence
+
+- The reader performs one public `PathLike` coercion, then delegates topology and relationship construction to the accepted readers using that stable path.
+- Worksheet members are matched from raw ZIP names through canonical OPC part identities; the reader returns only frozen records and never evaluates or coerces cell values.
+- The direct ZIP/XML corpus covers two Unicode-capable sheets, rows 6/10/104, scalar/inline/shared payloads, normal/shared/array formula metadata, and external/internal/location hyperlink anchors.
