@@ -13,6 +13,8 @@ from rns_import_server.opc_worksheet_x14_cf_owner_topology import (
     WorksheetX14CfOwnerTopology,
     read_worksheet_x14_cf_owner_topology,
 )
+from rns_import_server.opc_part_uri import CanonicalPartURI
+from rns_import_server.opc_workbook_topology import WorksheetDescriptor
 from tests.opc_worksheet_x14_cf_owner_fixture_factory import CF_URI, DV_URI, X14, XM, package, worksheet
 
 
@@ -165,6 +167,27 @@ def test_dv_carve_does_not_mask_cf_owned_siblings_in_document_order(tmp_path, po
     )
 
 
+@pytest.mark.parametrize("position", ("before", "after"))
+def test_dv_carve_does_not_accept_cf_owned_tag_inside_legal_data_validation(tmp_path, position):
+    values = "<xm:f>1</xm:f><xm:sqref>A1</xm:sqref>"
+    misplaced = "<x14:conditionalFormatting/>"
+    children = misplaced + values if position == "before" else values + misplaced
+    body = f'<extLst><ext uri="{DV_URI}"><x14:dataValidations><x14:dataValidation>{children}</x14:dataValidation></x14:dataValidations></ext></extLst>'
+    assert error(package(tmp_path / f"dv-nested-{position}.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-parent", PART, "tag", f"{{{X14}}}conditionalFormatting",
+    )
+
+
+@pytest.mark.parametrize("local", ("f", "sqref"))
+@pytest.mark.parametrize("uri", (DV_URI.swapcase(), "urn:unknown", "", "not-a-guid"))
+def test_dv_carve_requires_exact_uri_for_each_xm_value_without_sibling_masking(tmp_path, local, uri):
+    value = f"<xm:{local}>A1</xm:{local}>"
+    body = f'<extLst><ext uri="{uri}"><x14:dataValidations><x14:dataValidation>{value}</x14:dataValidation></x14:dataValidations></ext></extLst>'
+    assert error(package(tmp_path / f"dv-isolated-{local}-{len(uri)}.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-parent", PART, "tag", f"{{{XM}}}{local}",
+    )
+
+
 def test_document_tier_precedence_and_two_sheet_atomic_failure_are_exact(tmp_path):
     later = cf("<x14:cfRule><xm:f/>tail</x14:cfRule>")
     assert error(package(tmp_path / "tier.xlsx", sheet_one=worksheet("<x14:dxf/>" + later))) == (
@@ -181,17 +204,30 @@ def test_document_tier_precedence_and_two_sheet_atomic_failure_are_exact(tmp_pat
 
 
 def test_two_sheet_rows_projection_order_and_all_public_records_are_immutable(tmp_path):
-    first = '<sheetData><row r="6"/><row r="10"/></sheetData>' + cf('<x14:cfRule><xm:f>opaque</xm:f><x14:dxf/></x14:cfRule><xm:sqref>A6:A10</xm:sqref>')
+    first = ('<sheetData><row r="6"/><row r="10"/></sheetData>'
+             f'<extLst><ext uri="{CF_URI}"><x14:conditionalFormattings>'
+             '<x14:conditionalFormatting><x14:cfRule><xm:f>opaque-6</xm:f><x14:dxf/></x14:cfRule><xm:sqref>A6</xm:sqref></x14:conditionalFormatting>'
+             '<x14:conditionalFormatting><x14:cfRule><xm:f>opaque-10</xm:f><x14:dxf/></x14:cfRule><xm:sqref>A10</xm:sqref></x14:conditionalFormatting>'
+             '</x14:conditionalFormattings></ext></extLst>')
     second = '<sheetData><row r="104"/></sheetData>' + cf('<x14:cfRule><xm:f>lower-priority</xm:f><x14:dxf/></x14:cfRule><xm:sqref>B104</xm:sqref>')
     result = read_worksheet_x14_cf_owner_topology(package(tmp_path / "projection.xlsx", sheet_one=worksheet(first), sheet_two=worksheet(second)))
     assert isinstance(result, WorkbookX14CfOwnerTopology)
     assert tuple(field.name for field in fields(X14CfContainerOwner)) == ("owner_path", "document_order")
     assert tuple(field.name for field in fields(WorksheetX14CfOwnerTopology)) == ("worksheet", "containers")
     assert tuple(field.name for field in fields(WorkbookX14CfOwnerTopology)) == ("worksheets",)
+    assert result.worksheets[0].worksheet == WorksheetDescriptor("Первый", 1, "visible", "one", CanonicalPartURI(PART))
+    assert result.worksheets[1].worksheet == WorksheetDescriptor("Второй", 2, "visible", "two", CanonicalPartURI("xl/worksheets/second.xml"))
+    assert result.worksheets[0].containers == (
+        X14CfContainerOwner(PART + "/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[1]", 1),
+        X14CfContainerOwner(PART + "/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[2]", 2),
+    )
+    assert result.worksheets[1].containers == (
+        X14CfContainerOwner("xl/worksheets/second.xml/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[1]", 1),
+    )
     assert asdict(result) == {"worksheets": (
-        {"worksheet": {"name": "Первый", "sheet_id": 1, "state": "visible", "relationship_id": "one", "worksheet_part": {"value": PART}}, "containers": ({"owner_path": PART + "/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[1]", "document_order": 1},)},
+        {"worksheet": {"name": "Первый", "sheet_id": 1, "state": "visible", "relationship_id": "one", "worksheet_part": {"value": PART}}, "containers": ({"owner_path": PART + "/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[1]", "document_order": 1}, {"owner_path": PART + "/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[2]", "document_order": 2})},
         {"worksheet": {"name": "Второй", "sheet_id": 2, "state": "visible", "relationship_id": "two", "worksheet_part": {"value": "xl/worksheets/second.xml"}}, "containers": ({"owner_path": "xl/worksheets/second.xml/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[1]", "document_order": 1},)},
     )}
-    for instance, attribute, value in ((result, "worksheets", ()), (result.worksheets[0], "containers", ()), (result.worksheets[0].containers[0], "document_order", 2)):
+    for instance, attribute, value in ((result, "worksheets", ()), (result.worksheets[0], "containers", ()), (result.worksheets[0].containers[0], "document_order", 2), (result.worksheets[0].worksheet, "name", "changed"), (result.worksheets[0].worksheet.worksheet_part, "value", "changed")):
         with pytest.raises(FrozenInstanceError):
             setattr(instance, attribute, value)

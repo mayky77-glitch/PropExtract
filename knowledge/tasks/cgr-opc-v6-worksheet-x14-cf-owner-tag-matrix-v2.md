@@ -52,4 +52,4 @@ Verify the four frozen hashes, exact two-path scope, base ancestry, human identi
 
 ## Validation evidence
 
-2026-08-21 on the accepted base: direct v2 gate passed `48`; frozen focused set passed `509`; full suite passed `1261` with one pre-existing openpyxl unknown-extension warning. Compilation and whitespace-diff validation passed. Frozen reader, fixture, focused runtime, and A hashes were reverified before commit.
+2026-08-21 recovery on commit `3c932993`: direct v2 gate passed `58`; frozen focused set passed `519`; full suite passed `1271` with one pre-existing openpyxl unknown-extension warning. Compilation and whitespace-diff validation passed. Frozen reader, fixture, focused runtime, and A hashes were reverified before commit. Recovery P6 additionally freezes exact-DV nested CF rejection before/after legal XM values, isolated XM `f`/`sqref` wrong-URI carve rejection, and the complete `6, 10, 104` two-container projection.
