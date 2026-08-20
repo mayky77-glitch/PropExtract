@@ -21,9 +21,6 @@ _RULE: Final = f"{{{_SML}}}dataValidation"
 _FORMULA1: Final = f"{{{_SML}}}formula1"
 _FORMULA2: Final = f"{{{_SML}}}formula2"
 _X14_CONTAINER: Final = f"{{{_X14}}}dataValidations"
-_XML_DECLARATION: Final = re.compile(
-    br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']', re.IGNORECASE
-)
 _XML_WHITESPACE: Final = " \t\r\n"
 _UINT_LEXEME: Final = re.compile(r"(?:\+?[0-9]+|-[0]+)\Z")
 _CELL: Final = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
@@ -35,6 +32,7 @@ _RANGE_OPERATORS: Final = frozenset({"between", "notBetween"})
 _ERROR_STYLES: Final = frozenset({"stop", "warning", "information"})
 _IME_MODES: Final = frozenset({"noControl", "off", "on", "disabled", "hiragana", "fullKatakana", "halfKatakana", "fullAlpha", "halfAlpha", "fullHangul", "halfHangul"})
 _MAX_UINT: Final = 4_294_967_295
+_MAX_UINT_LEXEME_LENGTH: Final = 11
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
 _COMPARISON_TYPES: Final = frozenset({"whole", "decimal", "date", "time", "textLength"})
@@ -143,14 +141,6 @@ def _member(path: str, part: CanonicalPartURI) -> bytes:
 
 
 def _xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
-    candidate = payload[3:] if payload.startswith(b"\xef\xbb\xbf") else payload
-    declaration = _XML_DECLARATION.match(candidate)
-    if declaration is not None:
-        try:
-            declaration.group(1).decode("ascii").lower().replace("_", "-")
-            ET.fromstring(payload)
-        except (LookupError, UnicodeError, ValueError):
-            _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
     try:
         root = ET.fromstring(payload)
     except LookupError:
@@ -178,6 +168,10 @@ def _uint32(value: str | None, part: str, field: str) -> int:
     text = "" if value is None else value
     lexical = text.strip(_XML_WHITESPACE)
     if _UINT_LEXEME.fullmatch(lexical) is None:
+        _fail("invalid-native-dv-uint", part, field, text)
+    # Do not let a syntactically zero, but arbitrarily large, lexical form
+    # reach ``int()``.  The contract bounds the raw lexical representation.
+    if len(lexical) > _MAX_UINT_LEXEME_LENGTH:
         _fail("invalid-native-dv-uint", part, field, text)
     digits = lexical.lstrip("+-").lstrip("0") or "0"
     if len(digits) > 10 or (len(digits) == 10 and digits > "4294967295"):
@@ -223,6 +217,8 @@ def _sqref(value: str | None, part: str) -> tuple[str, ...]:
         if first[0] > last[0] or first[1] > last[1]:
             _fail("invalid-native-dv-sqref", part, "sqref", text)
         rectangle = (first[0], first[1], last[0], last[1])
+        if rectangle in rectangles:
+            _fail("duplicate-native-dv-sqref", part, "sqref", token)
         if any(not (rectangle[2] < prior[0] or prior[2] < rectangle[0] or rectangle[3] < prior[1] or prior[3] < rectangle[1]) for prior in rectangles):
             _fail("overlapping-native-dv-sqref", part, "sqref", token)
         rectangles.append(rectangle)
@@ -279,9 +275,7 @@ def _rule(element: ET.Element, part: CanonicalPartURI, index: int) -> NativeData
         _fail("unknown-native-dv-attribute", part.value, "attribute", unknown[0])
     if "sqref" not in element.attrib:
         _fail("missing-native-dv-attribute", part.value, "attribute", "sqref")
-    if "type" not in element.attrib:
-        _fail("missing-native-dv-attribute", part.value, "attribute", "type")
-    kind = element.attrib["type"]
+    kind = element.attrib.get("type", "none")
     if kind not in _TYPES:
         _fail("invalid-native-dv-type", part.value, "type", kind)
     operator = element.attrib.get("operator")
@@ -318,10 +312,9 @@ def _rule(element: ET.Element, part: CanonicalPartURI, index: int) -> NativeData
     if kind == "none":
         valid = operator is None and formula1 is None and formula2 is None
     elif kind in {"list", "custom"}:
-        valid = operator is None and formula1 is not None and formula2 is None
+        valid = operator is None and formula1 is not None and not formula1.isspace() and formula1 != "" and formula2 is None
     elif kind in _COMPARISON_TYPES:
-        effective_operator = operator or "between"
-        valid = formula1 is not None and ((effective_operator in _RANGE_OPERATORS) == (formula2 is not None))
+        valid = operator is not None and formula1 is not None and ((operator in _RANGE_OPERATORS) == (formula2 is not None))
     else:
         valid = False
     if not valid:
