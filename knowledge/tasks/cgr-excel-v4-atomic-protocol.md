@@ -29,6 +29,12 @@ Through injected callbacks, atomically write BOM-free JSON only after writer/str
 - Added executable Pester coverage in `tests/WindowsExcelAtomicProtocol.Tests.ps1` for durable replacement/BOM absence, successful ordering and the single result artifact, invalid-ACK open exclusion, and independent cleanup with primary/first-cleanup diagnostics.
 - Local host has neither `pwsh` nor `powershell`; Pester could not be executed. The test entry point deliberately fails if Pester is absent, so Windows Pester remains a blocking acceptance check.
 
+## P6 remediation evidence
+
+- Remediation SHA: `3bf3f8a7efb766439f91c7e3c9a6d7540572dc2f`.
+- Before a result write, the wrapper removes a stale error artifact; before an error write, it removes a stale result artifact. If stale removal or atomic publication fails, it throws `excel_atomic_protocol_final_publication_failed:<artifact>:...`, attaches the captured primary/cleanup diagnostics, and never returns a successful result.
+- Pester coverage now pre-seeds both stale-outcome directions and verifies the result/error XOR. Table-driven injected lease/open/execute/cleanup cases verify downstream exclusion, primary and first-cleanup HRESULT/WinError, and later-cleanup execution after the first cleanup failure. Final-publication failure handling is static-reviewed because the local host lacks PowerShell.
+
 ## Residual risk
 
 - The wrapper is not integrated into `windows_excel_insert.ps1` by design: that file is forbidden by this card. A Windows owner must run `pwsh -NoProfile -File tests/WindowsExcelAtomicProtocol.Tests.ps1` before merge/use with COM callbacks.
