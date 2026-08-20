@@ -152,9 +152,20 @@ function New-WindowsExcelFakeCom {
     [pscustomobject]@{ Application = (New-WindowsExcelFakeComProxy -State $state -Kind 'Application'); State = $state }
 }
 
+function Find-WindowsExcelFakeComControlledException {
+    param([Parameter(Mandatory)]$Exception)
+    $seen = [System.Collections.Generic.HashSet[System.Exception]]::new()
+    $current = $Exception
+    for ($depth = 0; $depth -lt 4 -and $null -ne $current; $depth++) {
+        if (-not $seen.Add($current)) { break }
+        if ($null -ne $current.Data -and $current.Data.Contains('stage')) { return $current }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
 function Write-WindowsExcelFakeComUnexpectedException {
     param([Parameter(Mandatory)]$Exception, [string]$ScriptStackTrace = '')
-    if ($Exception.Data.Contains('stage')) { return }
     try {
         Write-Warning ("fake_com_unexpected_exception type={0}; message={1}; stack={2}" -f $Exception.GetType().FullName, $Exception.Message, $ScriptStackTrace) -WarningAction Continue
     } catch {}
@@ -163,13 +174,17 @@ function Write-WindowsExcelFakeComUnexpectedException {
 function Get-WindowsExcelFakeComErrorEnvelope {
     param($Exception, [string]$ScriptStackTrace = '')
     if ($null -eq $Exception) { return $null }
-    Write-WindowsExcelFakeComUnexpectedException -Exception $Exception -ScriptStackTrace $ScriptStackTrace
+    $controlledException = Find-WindowsExcelFakeComControlledException -Exception $Exception
+    if ($null -eq $controlledException) {
+        Write-WindowsExcelFakeComUnexpectedException -Exception $Exception -ScriptStackTrace $ScriptStackTrace
+        $controlledException = $Exception
+    }
     [pscustomobject]@{
-        message = $Exception.Message
-        stage = [string]$Exception.Data['stage']
-        occurrence = if ($Exception.Data.Contains('occurrence')) { [int]$Exception.Data['occurrence'] } else { 0 }
-        hresult = [int]$Exception.Data['hresult']
-        winerror = [int]$Exception.Data['winerror']
+        message = $controlledException.Message
+        stage = [string]$controlledException.Data['stage']
+        occurrence = if ($controlledException.Data.Contains('occurrence')) { [int]$controlledException.Data['occurrence'] } else { 0 }
+        hresult = [int]$controlledException.Data['hresult']
+        winerror = [int]$controlledException.Data['winerror']
     }
 }
 
