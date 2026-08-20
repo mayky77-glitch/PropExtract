@@ -102,10 +102,11 @@ def test_coerces_path_once(tmp_path):
     path=_OneShot(str(package(tmp_path/"one.xlsx"))); assert read_workbook_style_semantics(path).style_part.value=="xl/styles.xml"; assert path.calls==1
 
 def test_typed_scalars_defaults_and_public_records(tmp_path):
-    body = ('<fonts count="2"><font/><font><sz val="11.5"/><color auto="1" tint="-1"/><u/><condense val="0"/><extend/></font></fonts>'
+    body = ('<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00_);[Red](#,##0.00)"/></numFmts>'
+            '<fonts count="2"><font/><font><sz val="11.5"/><color auto="1" tint="-1"/><u/><condense val="0"/><extend/></font></fonts>'
             '<fills count="1"><fill><gradientFill><stop position="1"><color indexed="2"/></stop></gradientFill></fill></fills>'
             '<borders count="1"><border diagonalUp="1" diagonalDown="0" outline="1"><left style="thin"><color rgb="FF000001"/></left><right style="double"/><top/><bottom/><diagonal/><vertical/><horizontal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-            '<cellXfs count="2"><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"><alignment horizontal="left" vertical="top" textRotation="180" wrapText="1" shrinkToFit="0" indent="250" relativeIndent="-15" justifyLastLine="1" readingOrder="2"/><protection locked="1" hidden="0"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs>')
+            '<cellXfs count="2"><xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0"><alignment horizontal="left" vertical="top" textRotation="180" wrapText="1" shrinkToFit="0" indent="250" relativeIndent="-15" justifyLastLine="1" readingOrder="2"/><protection locked="1" hidden="0"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs>')
     result = read_workbook_style_semantics(package(tmp_path / "typed.xlsx", style_xml=styles(body)))
     empty, font = result.style_table.fonts
     assert empty.size is None and empty.underline is None and empty.condense is False and empty.extend is False
@@ -119,10 +120,11 @@ def test_typed_scalars_defaults_and_public_records(tmp_path):
     assert protection and (protection.locked, protection.hidden) == (True, False)
     assert (border.left.style, border.left.color.rgb if border.left.color else None, border.right.style, border.top.style, border.bottom.style, border.diagonal.style, border.diagonal_up, border.diagonal_down, border.outline) == ("thin", "FF000001", "double", None, None, None, True, False, True)
     assert border.vertical and border.horizontal and border.vertical.style is None and border.horizontal.style is None
+    with pytest.raises(FrozenInstanceError): result.style_table.number_formats[0].format_code = "General"
     assert asdict(result) == {
         "style_part": {"value": "xl/styles.xml"},
         "style_table": {
-            "number_formats": (),
+            "number_formats": ({"num_fmt_id": 164, "format_code": "#,##0.00_);[Red](#,##0.00)"},),
             "fonts": (
                 {"name": None, "size": None, "family": None, "charset": None, "scheme": None, "color": None,
                  "bold": False, "italic": False, "underline": None, "strike": False, "outline": False,
@@ -154,7 +156,7 @@ def test_typed_scalars_defaults_and_public_records(tmp_path):
                 "alignment": None, "protection": None,
             },),
             "cell_xfs": (
-                {"num_fmt_id": 0, "font_id": 1, "fill_id": 0, "border_id": 0, "xf_id": 0,
+                {"num_fmt_id": 164, "font_id": 1, "fill_id": 0, "border_id": 0, "xf_id": 0,
                  "apply_number_format": None, "apply_font": None, "apply_fill": None, "apply_border": None,
                  "apply_alignment": None, "apply_protection": None, "quote_prefix": None, "pivot_button": None,
                  "alignment": {"horizontal": "left", "vertical": "top", "text_rotation": 180,
