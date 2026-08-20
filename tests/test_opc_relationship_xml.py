@@ -167,6 +167,20 @@ def test_type_uri_host_reviewer_boundaries(type_uri: str, valid: bool):
         assert _error_tuple(_document(_relationship(Type=type_uri))) == ("invalid-relationship-type", PART, type_uri)
 
 
+@pytest.mark.parametrize(
+    ("attribute", "value", "mode", "code"),
+    [
+        ("Type", "https://example.test:\u0661/лист.xml", None, "invalid-relationship-type"),
+        ("Target", "https://example.test:\uff11/лист.xml", "External", "invalid-relationship-target"),
+    ],
+)
+def test_rejects_unicode_authority_ports(attribute: str, value: str, mode: str | None, code: str):
+    attributes = {attribute: value}
+    if mode is not None:
+        attributes["TargetMode"] = mode
+    assert _error_tuple(_document(_relationship(**attributes))) == (code, PART, value)
+
+
 @pytest.mark.parametrize("name", ["Id", "Type", "Target"])
 def test_required_relationship_attributes_are_enforced(name: str):
     attributes = {"Id": "rId", "Type": "urn:example:type", "Target": "one.xml"}

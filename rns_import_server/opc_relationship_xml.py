@@ -170,7 +170,7 @@ def _is_valid_authority(value: str) -> bool:
             return False
         if not separator:
             port = ""
-    return port.isdigit() or not port
+    return not port or all("0" <= character <= "9" for character in port)
 
 
 def _split_uri_reference(value: str) -> tuple[str | None, str, str | None, str | None] | None:

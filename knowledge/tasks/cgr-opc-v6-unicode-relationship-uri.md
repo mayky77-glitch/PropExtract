@@ -27,8 +27,8 @@ components. Scheme and authority remain ASCII-only; controls, format/surrogate
 code points, raw backslashes, and non-NFC forms fail closed with existing typed
 errors.
 
-Evidence: relationship suite `62 passed`; required composite URI/corpus suite
-`115 passed`; full suite `401 passed` (one existing openpyxl extension warning);
+P6 evidence: relationship suite `64 passed`; required composite URI/corpus suite
+`117 passed`; full suite `403 passed` (one existing openpyxl extension warning);
 `python3 -m compileall -q rns_import_server/opc_relationship_xml.py` and
 `git diff --check` passed. No V5 code reused.
 
