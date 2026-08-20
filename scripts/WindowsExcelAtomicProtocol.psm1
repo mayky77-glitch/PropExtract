@@ -41,6 +41,7 @@ function Write-AtomicProtocolJson {
     if ([string]::IsNullOrWhiteSpace($directory)) { throw 'atomic_json_path_requires_parent' }
     [System.IO.Directory]::CreateDirectory($directory) | Out-Null
     $temporary = Join-Path $directory ('.{0}.{1}.tmp' -f [System.IO.Path]::GetFileName($destination), [Guid]::NewGuid().ToString('N'))
+    $backup = $null
     $stream = $null
     try {
         $json = $Value | ConvertTo-Json -Compress -Depth 16
@@ -52,7 +53,10 @@ function Write-AtomicProtocolJson {
         $stream.Dispose()
         $stream = $null
         if ([System.IO.File]::Exists($destination)) {
-            [System.IO.File]::Replace($temporary, $destination, $null)
+            $backup = Join-Path $directory ('.{0}.{1}.bak' -f [System.IO.Path]::GetFileName($destination), [Guid]::NewGuid().ToString('N'))
+            [System.IO.File]::Replace($temporary, $destination, $backup)
+            [System.IO.File]::Delete($backup)
+            $backup = $null
         }
         else {
             [System.IO.File]::Move($temporary, $destination)
@@ -61,6 +65,9 @@ function Write-AtomicProtocolJson {
     finally {
         if ($null -ne $stream) { $stream.Dispose() }
         if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
+        # A failed replace can leave its backup behind. Do not suppress a
+        # deletion failure: it is explicit durability-cleanup evidence.
+        if ($null -ne $backup -and [System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
     }
 }
 

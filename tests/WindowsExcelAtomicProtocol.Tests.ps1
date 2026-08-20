@@ -1,5 +1,3 @@
-$modulePath = Join-Path $PSScriptRoot '..' 'scripts' 'WindowsExcelAtomicProtocol.psm1'
-
 if ($env:WINDOWS_EXCEL_ATOMIC_PROTOCOL_PESTER -ne '1') {
     if (-not (Get-Command Invoke-Pester -ErrorAction SilentlyContinue)) {
         throw 'Pester is required for WindowsExcelAtomicProtocol.Tests.ps1; this is a blocking validation prerequisite.'
@@ -10,9 +8,11 @@ if ($env:WINDOWS_EXCEL_ATOMIC_PROTOCOL_PESTER -ne '1') {
     exit 0
 }
 
-Import-Module $modulePath -Force
-
 Describe 'Windows Excel atomic protocol' {
+    BeforeAll {
+        $script:modulePath = Join-Path $PSScriptRoot '..' 'scripts' 'WindowsExcelAtomicProtocol.psm1'
+        Import-Module $script:modulePath -Force
+    }
     BeforeEach {
         $script:root = Join-Path ([System.IO.Path]::GetTempPath()) ('excel-atomic-' + [Guid]::NewGuid().ToString('N'))
         [System.IO.Directory]::CreateDirectory($script:root) | Out-Null
@@ -32,10 +32,11 @@ Describe 'Windows Excel atomic protocol' {
         (($bytes[0] -eq 0xEF) -and ($bytes[1] -eq 0xBB) -and ($bytes[2] -eq 0xBF)) | Should -BeFalse
         (Get-Content -Raw -LiteralPath $path | ConvertFrom-Json).value | Should -Be 'новое'
         @(Get-ChildItem -LiteralPath $script:root -Filter '*.tmp').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $script:root -Filter '*.bak').Count | Should -Be 0
     }
 
     It 'flushes the stream to disk before disposal and replacement' {
-        $source = Get-Content -Raw -LiteralPath $modulePath
+        $source = Get-Content -Raw -LiteralPath $script:modulePath
         $flush = $source.IndexOf('$stream.Flush($true)', [System.StringComparison]::Ordinal)
         $dispose = $source.IndexOf('$stream.Dispose()', [System.StringComparison]::Ordinal)
         $replace = $source.IndexOf('[System.IO.File]::Replace', [System.StringComparison]::Ordinal)
@@ -202,7 +203,7 @@ Describe 'Windows Excel atomic protocol' {
     }
 
     It 'makes final publication failures explicit and cannot report success' {
-        $source = Get-Content -Raw -LiteralPath $modulePath
+        $source = Get-Content -Raw -LiteralPath $script:modulePath
         $remove = $source.IndexOf('[System.IO.File]::Delete($StaleOpposite)', [System.StringComparison]::Ordinal)
         $write = $source.IndexOf('Write-AtomicProtocolJson -Path $Destination', [System.StringComparison]::Ordinal)
         $failure = $source.IndexOf('excel_atomic_protocol_final_publication_failed:', [System.StringComparison]::Ordinal)
