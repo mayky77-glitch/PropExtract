@@ -35,6 +35,12 @@ Through injected callbacks, atomically write BOM-free JSON only after writer/str
 - Before a result write, the wrapper removes a stale error artifact; before an error write, it removes a stale result artifact. If stale removal or atomic publication fails, it throws `excel_atomic_protocol_final_publication_failed:<artifact>:...`, attaches the captured primary/cleanup diagnostics, and never returns a successful result.
 - Pester coverage now pre-seeds both stale-outcome directions and verifies the result/error XOR. Table-driven injected lease/open/execute/cleanup cases verify downstream exclusion, primary and first-cleanup HRESULT/WinError, and later-cleanup execution after the first cleanup failure. Final-publication failure handling is static-reviewed because the local host lacks PowerShell.
 
+## False-success remediation evidence
+
+- Remediation SHA: `b314f6ac9fd63580a8f242086c9e17a0eac845db`.
+- Before any operation callback, the wrapper invalidates both prior final artifact paths. A locked or otherwise undeletable path raises `excel_atomic_protocol_final_artifact_invalidation_failed:<artifact>:...` with the original exception retained as `InnerException`; no lease, ACK, open, execute, or cleanup callback is entered.
+- Final publication also removes an unexpected selected destination before its write, so a write/replace failure cannot expose an old selected artifact as this operation's outcome. The executable Windows Pester test uses a `FileShare.None` lock, proves zero callback events/no lease/no new result, and preserves the old artifact only as explicitly stale evidence after the failed gate.
+
 ## Residual risk
 
 - The wrapper is not integrated into `windows_excel_insert.ps1` by design: that file is forbidden by this card. A Windows owner must run `pwsh -NoProfile -File tests/WindowsExcelAtomicProtocol.Tests.ps1` before merge/use with COM callbacks.
