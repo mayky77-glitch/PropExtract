@@ -98,7 +98,7 @@ Describe 'Windows Excel atomic protocol' {
         $lock = $null
         try {
             $lock = New-Object System.IO.FileStream($script:error, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
-            { Invoke-WindowsExcelAtomicProtocol -Request $script:request -Callbacks $callbacks -LeaseFile $script:lease -ResultFile $script:result -ErrorFile $script:error } | Should -Throw 'excel_atomic_protocol_final_artifact_invalidation_failed:error:'
+            { Invoke-WindowsExcelAtomicProtocol -Request $script:request -Callbacks $callbacks -LeaseFile $script:lease -ResultFile $script:result -ErrorFile $script:error } | Should -Throw 'excel_atomic_protocol_final_artifact_invalidation_failed:error:*'
             $script:events.Count | Should -Be 0
             Test-Path -LiteralPath $script:lease | Should -BeFalse
             Test-Path -LiteralPath $script:result | Should -BeFalse
