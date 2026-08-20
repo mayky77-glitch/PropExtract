@@ -1,6 +1,6 @@
 ---
 card_id: cgr-excel-atomic-windows-replace-v1
-status: ready
+status: review
 version: 1
 work_id: cgr-excel-atomic-windows-replace-v1-20260820
 task_id: atomic-windows-replace-v1
@@ -29,3 +29,14 @@ Windows run `32334764251` at exact `0f9c472...` used pwsh/Pester 5.6.1. Atomic s
 - Add assertions that replacement leaves neither `*.tmp` nor backup artifacts and that the old destination is replaced with BOM-free new JSON.
 
 Required: independent P6, then exact-SHA Windows Pester with all 13 passed and zero failed/skipped/not-run. Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
+
+## Implementation evidence
+
+- Feature SHA: `cf7748cfa556728fd2e5ca4c6ea0d22afabcbd84`.
+- Existing-destination writes now create a unique same-directory `.bak` path, call `File.Replace($temporary, $destination, $backup)` only after `Flush($true)` and disposal, then deterministically delete the backup. A backup left by a failed replace is deleted in `finally`; a deletion failure is intentionally not suppressed, so cleanup failure stays explicit. There is no non-atomic fallback when the destination exists.
+- Pester setup now declares/imports the module in `BeforeAll` using `$script:modulePath`, which is present in Pester run scope. The replacement test retains its old-destination/BOM assertions and now asserts no `*.tmp` or `*.bak` residue. The suite still contains nine direct tests plus four table cases (13 total semantics).
+
+## Validation status
+
+- `git diff --check` and static ordering/scope/count assertions pass locally.
+- This host has neither `pwsh` nor `powershell`; the required exact-SHA Windows Pester run remains pending CI/Windows and is not claimed as passed.
