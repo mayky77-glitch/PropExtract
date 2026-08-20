@@ -26,3 +26,10 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_cell_reader
 - Positive cases: UTF-8 bytes with/without BOM and a matching XML declaration produce byte-for-value identical cell/formula/hyperlink projections. Negative exact cases: truncated declared UTF-8; BOM plus truncated XML; declared UTF-16 over UTF-8 bytes; unknown encoding; malformed declaration; wrong root/namespace retains its existing typed semantics.
 - Preserve one-shot PathLike behavior, canonical member rules, dependency precedence, legacy `_unsigned`, and row lexical behavior. No fallback decoding, encoding guessing, partial result, empty success, or structure-reader change.
 - No structure reader/corpus, styles, mutation, CF/DV/X14, README, PDF, or XLSX edits. Run every acceptance command; human identity commit/push only; no merge, rebase, amend, or force-push.
+
+## Implementation evidence
+
+- The XML boundary converts native parser encoding and malformed-input exceptions to stable `OPCWorksheetCellReaderError` tuples without exposing host exception text.
+- UTF-8 XML declarations with and without a UTF-8 BOM preserve the complete cell, formula, and hyperlink projections.
+- Direct ZIP/XML cases freeze truncated declared UTF-8, BOM plus truncated XML, incompatible declared UTF-16, unknown encodings, and malformed declarations with their canonical worksheet subject.
+- Focused composite, full suite, compileall, and diff checks pass; no parser fallback, encoding guessing, partial result, or structure-reader change was added.

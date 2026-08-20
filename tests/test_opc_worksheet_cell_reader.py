@@ -235,6 +235,29 @@ def test_graph_forwarded_missing_and_canonical_alias_members_are_deterministic(t
     assert read_worksheet_cell_semantics(alias).worksheets[0].worksheet.worksheet_part.value == "xl/worksheets/first.xml"
 
 
+def test_utf8_declaration_and_bom_preserve_cell_projection(tmp_path):
+    body = ('<row r="6"><c r="A6"><v>7</v></c></row>'
+            '<row r="10"><c r="B10" t="inlineStr"><is><t>текст</t></is></c></row>'
+            '<row r="104"><c r="C104"><f>SUM(A6)</f><v>7</v></c></row>')
+    baseline = read_worksheet_cell_semantics(package(tmp_path / "baseline.xml.xlsx", sheet_one=worksheet(body))).worksheets[0]
+    declared = b'<?xml version="1.0" encoding="UTF-8"?>' + worksheet(body)
+    for name, payload in (("utf8", declared), ("bom", b"\xef\xbb\xbf" + declared)):
+        result = read_worksheet_cell_semantics(package(tmp_path / f"{name}.xlsx", sheet_one=payload)).worksheets[0]
+        assert result.cells == baseline.cells
+        assert result.hyperlinks == baseline.hyperlinks
+
+
+@pytest.mark.parametrize(("payload", "expected"), [
+    (b'<?xml version="1.0" encoding="UTF-8"?><worksheet>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?><worksheet>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'<?xml version="1.0" encoding="UTF-16"?><worksheet/>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+    (b'<?xml version="1.0" encoding="x-unknown"?><worksheet/>', ("unsupported-xml-encoding", "xl/worksheets/first.xml", "xml", "encoding")),
+    (b'<?xml version="1.0" encoding?><worksheet/>', ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
+])
+def test_xml_boundary_failures_are_typed_with_worksheet_subject(tmp_path, payload, expected):
+    assert error(package(tmp_path / "xml-boundary.xlsx", sheet_one=payload)) == expected
+
+
 @pytest.mark.parametrize(("sheet", "rels", "expected"), [
     (b'<worksheet xmlns="urn:wrong"><sheetData/></worksheet>', "", ("invalid-worksheet-root", "xl/worksheets/first.xml", "root", "{urn:wrong}worksheet")),
     (b'<worksheet', "", ("malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")),
