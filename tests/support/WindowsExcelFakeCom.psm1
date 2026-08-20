@@ -23,12 +23,18 @@ function Add-WindowsExcelFakeComCall {
 function Invoke-WindowsExcelFakeComFault {
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Stage)
 
+    if (-not $State.FaultCounts.ContainsKey($Stage)) { $State.FaultCounts[$Stage] = 0 }
+    $State.FaultCounts[$Stage] = [int]$State.FaultCounts[$Stage] + 1
+    $occurrence = [int]$State.FaultCounts[$Stage]
     if (-not $State.Faults.ContainsKey($Stage)) { return }
     $fault = $State.Faults[$Stage]
     if ($fault -isnot [hashtable]) { $fault = @{} }
+    if ($fault.ContainsKey('occurrence') -and $occurrence -ne [int]$fault.occurrence) { return }
+    if ($fault.ContainsKey('occurrences') -and $occurrence -notin @($fault.occurrences | ForEach-Object { [int]$_ })) { return }
     $message = if ($fault.message) { [string]$fault.message } else { "fake_excel_$Stage`_fault" }
     $exception = [System.InvalidOperationException]::new($message)
     $exception.Data['stage'] = $Stage
+    $exception.Data['occurrence'] = $occurrence
     $exception.Data['hresult'] = if ($fault.ContainsKey('hresult')) { [int]$fault.hresult } else { -2147352567 }
     $exception.Data['winerror'] = if ($fault.ContainsKey('winerror')) { [int]$fault.winerror } else { 5 }
     throw $exception
@@ -138,7 +144,7 @@ function New-WindowsExcelFakeComProxy {
 function New-WindowsExcelFakeCom {
     [CmdletBinding()]
     param([hashtable]$Faults = @{})
-    $state = [pscustomobject]@{ Calls = [System.Collections.Generic.List[object]]::new(); Faults = $Faults; NextId = 0; Sequence = 0 }
+    $state = [pscustomobject]@{ Calls = [System.Collections.Generic.List[object]]::new(); Faults = $Faults; FaultCounts = @{}; NextId = 0; Sequence = 0 }
     [pscustomobject]@{ Application = (New-WindowsExcelFakeComProxy -State $state -Kind 'Application'); State = $state }
 }
 
@@ -148,6 +154,7 @@ function Get-WindowsExcelFakeComErrorEnvelope {
     [pscustomobject]@{
         message = $Exception.Message
         stage = [string]$Exception.Data['stage']
+        occurrence = if ($Exception.Data.Contains('occurrence')) { [int]$Exception.Data['occurrence'] } else { 0 }
         hresult = [int]$Exception.Data['hresult']
         winerror = [int]$Exception.Data['winerror']
     }
@@ -181,7 +188,28 @@ function Invoke-WindowsExcelFakeComScenario {
             try { $proxies[$index].Release() } catch { [void]$cleanupErrors.Add((Get-WindowsExcelFakeComErrorEnvelope $_.Exception)) }
         }
     }
-    [pscustomobject]@{ Trace = @($fake.State.Calls); Error = (Get-WindowsExcelFakeComErrorEnvelope $error); CleanupErrors = @($cleanupErrors); Proxies = @($proxies) }
+    $primaryError = Get-WindowsExcelFakeComErrorEnvelope $error
+    $cleanup = @($cleanupErrors)
+    $classification = if ($null -ne $primaryError) {
+        if ($cleanup.Count -gt 0) { 'primary_and_cleanup_failure' } else { 'primary_failure' }
+    } elseif ($cleanup.Count -gt 0) {
+        'cleanup_failure'
+    } else {
+        'success'
+    }
+    [pscustomobject]@{
+        Trace = @($fake.State.Calls)
+        Error = $primaryError
+        CleanupErrors = $cleanup
+        Proxies = @($proxies)
+        Final = [pscustomobject]@{
+            classification = $classification
+            success = $classification -eq 'success'
+            primary_failure = $primaryError
+            cleanup_failures = $cleanup
+            cleanup_failure_count = $cleanup.Count
+        }
+    }
 }
 
 function Test-WindowsExcelFakeComTrace {
@@ -201,6 +229,7 @@ function Test-WindowsExcelFakeComTrace {
         has_mutations = $writes.Count -eq 3
         has_hyperlink_result = @($acquired | Where-Object kind -eq 'Hyperlink').Count -eq 1
         reverse_release = (@($released.proxy_id) -join ',') -eq ($expectedRelease -join ',')
+        is_success = $Scenario.Final.success
         call_envelope = [pscustomobject]@{ insert = $insert; mutations = $writes; hyperlink = $link }
     }
 }
