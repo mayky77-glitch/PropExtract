@@ -69,13 +69,50 @@ def test_rejects_duplicate_ids_before_returning_partial_result():
         "https://пример.рф/type",
     ],
 )
-def test_type_must_be_absolute_ascii_uri_without_fragment(type_uri: str):
+def test_type_must_be_absolute_uri_without_fragment(type_uri: str):
     assert _error_tuple(_document(_relationship(Type=type_uri))) == ("invalid-relationship-type", PART, type_uri)
 
 
 @pytest.mark.parametrize("type_uri", ["urn:example:kind", "https://example.test/a%20b?version=1", "tag:example.test,2026:type"])
 def test_type_uri_valid_edges(type_uri: str):
     assert parse_relationship_xml(PART, _document(_relationship(Type=type_uri)))[0].type_uri == type_uri
+
+
+def test_accepts_nfc_unicode_only_in_uri_path_query_and_fragment_components():
+    internal = "worksheets/лист.xml"
+    external = "../лист.xml?ключ=значение#фрагмент"
+    type_uri = "https://example.test/лист.xml?ключ=значение"
+    assert parse_relationship_xml(PART, _document(_relationship(Target=internal)))[0].target == internal
+    assert parse_relationship_xml(PART, _document(_relationship(Target=external, TargetMode="External")))[0].target == external
+    assert parse_relationship_xml(PART, _document(_relationship(Type=type_uri)))[0].type_uri == type_uri
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "code"),
+    [
+        ("Target", "worksheets/cafe\u0301.xml", "invalid-relationship-target"),
+        ("Target", "worksheets/лист\u200b.xml", "invalid-relationship-target"),
+        ("Target", "worksheets/лист\u202e.xml", "invalid-relationship-target"),
+        ("Target", "worksheets/лист\\.xml", "invalid-relationship-target"),
+        ("Type", "https://пример.рф/лист.xml", "invalid-relationship-type"),
+        ("Type", "https://пользователь@example.test/лист.xml", "invalid-relationship-type"),
+    ],
+)
+def test_rejects_noncanonical_or_nonascii_authority_unicode(attribute: str, value: str, code: str):
+    assert _error_tuple(_document(_relationship(**{attribute: value}))) == (code, PART, value)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_code"),
+    [
+        ("worksheets/\x01.xml", "malformed-xml"),
+        ("worksheets/\x7f.xml", "invalid-relationship-target"),
+        ("worksheets/\x80.xml", "invalid-relationship-target"),
+        ("worksheets/\ud800.xml", "malformed-xml"),
+    ],
+)
+def test_rejects_controls_and_surrogates(target: str, expected_code: str):
+    assert _error_tuple(_document(_relationship(Target=target)))[0] == expected_code
 
 
 @pytest.mark.parametrize(
@@ -128,6 +165,20 @@ def test_type_uri_host_reviewer_boundaries(type_uri: str, valid: bool):
         assert parse_relationship_xml(PART, _document(_relationship(Type=type_uri)))[0].type_uri == type_uri
     else:
         assert _error_tuple(_document(_relationship(Type=type_uri))) == ("invalid-relationship-type", PART, type_uri)
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "mode", "code"),
+    [
+        ("Type", "https://example.test:\u0661/лист.xml", None, "invalid-relationship-type"),
+        ("Target", "https://example.test:\uff11/лист.xml", "External", "invalid-relationship-target"),
+    ],
+)
+def test_rejects_unicode_authority_ports(attribute: str, value: str, mode: str | None, code: str):
+    attributes = {attribute: value}
+    if mode is not None:
+        attributes["TargetMode"] = mode
+    assert _error_tuple(_document(_relationship(**attributes))) == (code, PART, value)
 
 
 @pytest.mark.parametrize("name", ["Id", "Type", "Target"])
