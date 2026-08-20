@@ -1,7 +1,7 @@
 ---
 card_id: cgr-rule-v5-native-cf
 status: review
-version: 1
+version: 2
 work_id: cgr-ooxml-rule-semantics-v5-20260818
 task_id: native-cf-reader-v1
 purpose: Parse complete native conditional-formatting container and rule semantics.
@@ -63,3 +63,20 @@ Input is `(worksheet_part, worksheet_xml)`; output immutable ordered typed model
   same unrelated OpenPyXL x14 warning; compileall and diff checks passed.
 - Residual risk: foreign extension XML is retained as opaque serialized XML,
   not interpreted; its URI-specific semantics remain owned by the x14 reader.
+
+## P6 exact remediation — 2026-08-20
+
+- `dxfId` is now parsed as native `UInt32`, accepting `2147483648` and
+  `4294967295`, while `-1` fails as invalid lexical input and `4294967296`
+  fails as out of range.
+- `Int32` and `UInt32` parsers now apply XSD whitespace collapse and accept
+  legal leading `+` signs and leading zeros, without changing boundary or
+  error-code behavior. Negative unsigned lexical input remains invalid.
+- The frozen-model suite explicitly covers absent/false/true rule and payload
+  booleans, direct invalid UID/sqref/boolean/missing-field faults, and
+  parameterized preservation mutations for every group, rule, payload, color,
+  and CFVO attribute.
+- Evidence: focused `129 passed`; full `415 passed` (one pre-existing OpenPyXL
+  unsupported-x14 warning); `compileall` and `git diff --check` passed.
+- Residual risk remains scoped to opaque foreign extension semantics; this
+  reader preserves but does not interpret them.

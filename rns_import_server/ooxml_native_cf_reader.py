@@ -98,14 +98,16 @@ def _bool(v: str | None, path: str, key: str) -> bool | None:
     _fail("invalid_boolean", path, key)
 def _i32(v: str | None, path: str, key: str) -> int | None:
     if v is None: return None
-    if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", v): _fail("invalid_integer", path, key)
-    result = int(v)
+    lexical = " ".join(v.split())
+    if not re.fullmatch(r"[+-]?[0-9]+", lexical): _fail("invalid_integer", path, key)
+    result = int(lexical)
     if not INT32_MIN <= result <= INT32_MAX: _fail("integer_out_of_range", path, key)
     return result
 def _u32(v: str | None, path: str, key: str) -> int | None:
     if v is None: return None
-    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", v): _fail("invalid_integer", path, key)
-    result = int(v)
+    lexical = " ".join(v.split())
+    if not re.fullmatch(r"\+?[0-9]+", lexical): _fail("invalid_integer", path, key)
+    result = int(lexical)
     if result > UINT32_MAX: _fail("integer_out_of_range", path, key)
     return result
 def _float(v: str | None, path: str, key: str) -> float | None:
@@ -226,8 +228,7 @@ def _rule(e: ET.Element,path: str) -> NativeCfRule:
     priority=_i32(_required(e.attrib,"priority",path),path,"priority")
     assert priority is not None
     if priority<=0: _fail("integer_out_of_range",path,"priority")
-    dxf=_i32(e.attrib.get("dxfId"),path,"dxfId")
-    if dxf is not None and dxf<0: _fail("integer_out_of_range",path,"dxfId")
+    dxf=_u32(e.attrib.get("dxfId"),path,"dxfId")
     op=_enum(e.attrib.get("operator"),_OPERATORS,path,"operator"); period=_enum(e.attrib.get("timePeriod"),_TIMES,path,"timePeriod")
     rank, std=_u32(e.attrib.get("rank"),path,"rank"),_i32(e.attrib.get("stdDev"),path,"stdDev")
     percent,equal=_bool(e.attrib.get("percent"),path,"percent"),_bool(e.attrib.get("equalAverage"),path,"equalAverage")
