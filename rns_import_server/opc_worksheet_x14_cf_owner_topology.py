@@ -195,6 +195,9 @@ def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->Wor
 
 _GUID=re.compile(r"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$")
 _INT32=2147483647
+_XML_WHITESPACE=" \t\r\n"
+_MAX_PRIORITY_RAW=128
+_MAX_PRIORITY_SIGNIFICANT_DIGITS=10
 
 def _semantic_fail(code:str,part:CanonicalPartURI,field:str,detail:str)->None:
     _fail(code,part.value,field,detail)
@@ -207,10 +210,13 @@ def _rule_envelope(node:ET.Element,owner:X14CfContainerOwner,index:int,document_
     if missing:_semantic_fail("invalid-x14-cf-cardinality",part,"attribute",missing[0])
     if node.attrib["type"]!="expression":_semantic_fail("unsupported-x14-cf-rule-type",part,"type",node.attrib["type"])
     raw=node.attrib["priority"]
-    significant=raw.strip()
-    if len(raw)>64 or len(significant)>16 or not re.fullmatch(r"[+]?[1-9][0-9]*",significant):_semantic_fail("invalid-x14-cf-priority",part,"priority",raw)
+    significant=raw.strip(_XML_WHITESPACE)
+    digits=significant.removeprefix("+")
+    normalized=digits.lstrip("0")
+    if (len(raw)>_MAX_PRIORITY_RAW or not re.fullmatch(r"[+]?[0-9]+",significant)
+            or len(normalized)>_MAX_PRIORITY_SIGNIFICANT_DIGITS):_semantic_fail("invalid-x14-cf-priority",part,"priority",raw)
     priority=int(significant)
-    if priority>_INT32:_semantic_fail("invalid-x14-cf-priority",part,"priority",raw)
+    if priority<1 or priority>_INT32:_semantic_fail("invalid-x14-cf-priority",part,"priority",raw)
     boolean=None
     if "stopIfTrue" in node.attrib:
         token=node.attrib["stopIfTrue"]
@@ -236,12 +242,14 @@ def _rule_envelope(node:ET.Element,owner:X14CfContainerOwner,index:int,document_
 def _container_envelope(node:ET.Element,owner:X14CfContainerOwner,part:CanonicalPartURI,offset:int,priorities:set[int]):
     children=list(node)
     if not children:_semantic_fail("invalid-x14-cf-cardinality",part,"conditionalFormatting","cfRule,sqref")
-    if children[-1].tag!=_SQREF or any(child.tag!=_RULE for child in children[:-1]):_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
     rules=[]
-    for index,rule in enumerate(children[:-1],1):
+    for index,rule in enumerate((child for child in children if child.tag==_RULE),1):
         envelope=_rule_envelope(rule,owner,index,offset+index,part)
         if envelope.priority in priorities:_semantic_fail("duplicate-x14-cf-priority",part,"priority",str(envelope.priority))
         priorities.add(envelope.priority); rules.append(envelope)
+    # This structural check is deliberately after direct cfRule semantics: a
+    # malformed later sibling must not hide an earlier rule fault.
+    if children[-1].tag!=_SQREF or any(child.tag!=_RULE for child in children[:-1]):_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
     if not rules:_semantic_fail("invalid-x14-cf-cardinality",part,"conditionalFormatting","cfRule")
     sqref=children[-1]
     if sqref.attrib or list(sqref) or not sqref.text or not sqref.text.strip() or _nonwhite(sqref.tail):_semantic_fail("invalid-x14-cf-sqref",part,"sqref","content")
