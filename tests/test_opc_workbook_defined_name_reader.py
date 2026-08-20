@@ -1,12 +1,17 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, astuple, fields
 
 import pytest
 
+import rns_import_server.opc_workbook_defined_name_reader as defined_name_reader
 from rns_import_server.opc_workbook_defined_name_reader import (
     OPCWorkbookDefinedNameReaderError,
+    WorkbookDefinedName,
+    WorkbookDefinedNameSemantics,
+    WorkbookFilterDatabase,
     read_workbook_defined_name_semantics,
 )
 from rns_import_server.opc_workbook_topology import OPCWorkbookTopologyError
+from rns_import_server.opc_worksheet_structure_reader import A1Range
 from tests.opc_workbook_defined_name_fixture_factory import package, workbook
 
 
@@ -26,17 +31,41 @@ def test_projects_ordered_opaque_names_and_filter_databases(tmp_path):
         '</definedNames>'
     )
     result = read_workbook_defined_name_semantics(package(tmp_path / "names.xlsx", workbook_xml=workbook(names)))
-    assert [(item.name, item.local_sheet_index, item.hidden, item.expression) for item in result.defined_names] == [
-        ("GlobalName", None, None, "SUM(A1:A2)"),
-        ("_xlnm._FilterDatabase", 0, True, "Первый!$a$3:$aq$605"),
-        ("LocalOpaque", 1, False, "formula() + 1"),
-        ("_xlnm._FilterDatabase", 1, False, "'Лист ''Два'''!A6:AQ104"),
-    ]
-    assert [(item.worksheet.name, item.reference.start, item.reference.end, item.reference.min_row, item.reference.max_row) for item in result.filter_databases] == [
-        ("Первый", "A3", "AQ605", 3, 605), ("Лист 'Два'", "A6", "AQ104", 6, 104)
-    ]
+    assert astuple(result) == (
+        (
+            ("GlobalName", None, None, "SUM(A1:A2)"),
+            ("_xlnm._FilterDatabase", 0, True, "Первый!$a$3:$aq$605"),
+            ("LocalOpaque", 1, False, "formula() + 1"),
+            ("_xlnm._FilterDatabase", 1, False, "'Лист ''Два'''!A6:AQ104"),
+        ),
+        (
+            (("Первый", 1, "visible", "one", ("xl/worksheets/first.xml",)), ("A3", "AQ605", 3, 605, 1, 43)),
+            (("Лист 'Два'", 2, "visible", "two", ("xl/worksheets/second.xml",)), ("A6", "AQ104", 6, 104, 1, 43)),
+        ),
+    )
+    assert tuple(field.name for field in fields(WorkbookDefinedName)) == (
+        "name", "local_sheet_index", "hidden", "expression",
+    )
+    assert tuple(field.name for field in fields(WorkbookFilterDatabase)) == ("worksheet", "reference")
+    assert tuple(field.name for field in fields(WorkbookDefinedNameSemantics)) == (
+        "defined_names", "filter_databases",
+    )
+    assert tuple(field.name for field in fields(A1Range)) == (
+        "start", "end", "min_row", "max_row", "min_column", "max_column",
+    )
+    with pytest.raises(FrozenInstanceError):
+        result.defined_names = ()
+    with pytest.raises(FrozenInstanceError):
+        result.defined_names[0].name = "changed"
+    with pytest.raises(FrozenInstanceError):
+        result.filter_databases[0].worksheet = result.filter_databases[1].worksheet
     with pytest.raises(FrozenInstanceError):
         result.filter_databases[0].reference.end = "A606"
+
+
+def test_default_semantics_has_exact_recursive_empty_values(tmp_path):
+    result = read_workbook_defined_name_semantics(package(tmp_path / "empty.xlsx"))
+    assert astuple(result) == ((), ())
 
 
 @pytest.mark.parametrize(("defined", "expected"), [
@@ -104,17 +133,37 @@ class _Once:
 
 
 class _PathFailure:
+    def __init__(self): self.calls = 0
     def __fspath__(self):
+        self.calls += 1
         raise RuntimeError("broken")
+
+
+class _NonStringPath:
+    def __init__(self): self.calls = 0
+    def __fspath__(self):
+        self.calls += 1
+        return b"book.xlsx"
 
 
 @pytest.mark.parametrize(("value", "expected"), [
     (b"book.xlsx", ("invalid-package-path", "builtins.bytes", "path", "bytes")),
     ("bad\x00.xlsx", ("unreadable-package", "bad\x00.xlsx", "path", "embedded-nul")),
-    (_PathFailure(), ("unreadable-package", f"{__name__}._PathFailure", "path", "RuntimeError")),
 ])
 def test_path_boundary_is_typed(value, expected):
     assert error(value) == expected
+
+
+def test_raising_pathlike_is_typed_after_exactly_one_coercion():
+    value = _PathFailure()
+    assert error(value) == ("unreadable-package", f"{__name__}._PathFailure", "path", "RuntimeError")
+    assert value.calls == 1
+
+
+def test_non_string_pathlike_is_typed_after_exactly_one_coercion():
+    value = _NonStringPath()
+    assert error(value) == ("invalid-package-path", f"{__name__}._NonStringPath", "path", "bytes")
+    assert value.calls == 1
 
 
 def test_coerces_once_and_forwards_topology_errors(tmp_path):
@@ -124,6 +173,21 @@ def test_coerces_once_and_forwards_topology_errors(tmp_path):
     assert error(package(tmp_path / "broken.xlsx", workbook_xml=b"<workbook")) == (
         "malformed-workbook-xml", "xl/workbook.xml", "xml", "xml"
     )
+
+
+def test_topology_exception_identity_and_normalized_path_are_preserved(monkeypatch):
+    sentinel = OPCWorkbookTopologyError("sentinel", "subject", "field", "detail")
+    received = []
+
+    def raise_sentinel(path):
+        received.append(path)
+        raise sentinel
+
+    monkeypatch.setattr(defined_name_reader, "read_workbook_topology", raise_sentinel)
+    with pytest.raises(OPCWorkbookTopologyError) as caught:
+        read_workbook_defined_name_semantics(_Once("normalized.xlsx"))
+    assert received == ["normalized.xlsx"]
+    assert caught.value is sentinel
 
 
 def test_requires_raw_canonical_workbook_member(tmp_path):
@@ -221,18 +285,23 @@ def test_quote_aware_filter_delimiter_rejects_ambiguous_or_multiple_delimiters(t
     )
 
 
-@pytest.mark.parametrize("expression", [
-    "Первый!A1,A2", "Первый:Второй!A1", "[Book]Первый!A1", "Первый!SUM(A1)",
-    "Первый!#REF!", "Первый!A:A", "Первый!1:1", "Первый!XFE1", "Первый!A1048577",
-    "'Первый!A1", "'Первый'x'!A1", "=Первый!A1",
+@pytest.mark.parametrize(("expression", "expected"), [
+    ("Первый!A1,A2", ("invalid-filter-database-reference", "xl/workbook.xml", "expression", "A1,A2")),
+    ("Первый:Второй!A1", ("invalid-filter-database-expression", "xl/workbook.xml", "expression", "Первый:Второй!A1")),
+    ("[Book]Первый!A1", ("invalid-filter-database-expression", "xl/workbook.xml", "expression", "[Book]Первый!A1")),
+    ("Первый!SUM(A1)", ("invalid-filter-database-reference", "xl/workbook.xml", "expression", "SUM(A1)")),
+    ("Первый!#REF!", ("invalid-filter-database-expression", "xl/workbook.xml", "expression", "Первый!#REF!")),
+    ("Первый!A:A", ("invalid-filter-database-reference", "xl/workbook.xml", "expression", "A:A")),
+    ("Первый!1:1", ("invalid-filter-database-reference", "xl/workbook.xml", "expression", "1:1")),
+    ("Первый!XFE1", ("invalid-filter-database-reference", "xl/workbook.xml", "expression", "XFE1")),
+    ("Первый!A1048577", ("invalid-filter-database-reference", "xl/workbook.xml", "expression", "A1048577")),
+    ("'Первый!A1", ("invalid-filter-database-expression", "xl/workbook.xml", "expression", "'Первый!A1")),
+    ("'Первый'x'!A1", ("invalid-filter-database-expression", "xl/workbook.xml", "expression", "'Первый'x'!A1")),
+    ("=Первый!A1", ("invalid-filter-database-expression", "xl/workbook.xml", "expression", "=Первый!A1")),
 ])
-def test_filter_database_full_rejection_matrix(tmp_path, expression):
+def test_filter_database_full_rejection_matrix(tmp_path, expression, expected):
     defined = f'<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0">{expression}</definedName></definedNames>'
-    captured = error(package(tmp_path / "matrix.xlsx", workbook_xml=workbook(defined)))
-    assert captured[:3] in {
-        ("invalid-filter-database-expression", "xl/workbook.xml", "expression"),
-        ("invalid-filter-database-reference", "xl/workbook.xml", "expression"),
-    }
+    assert error(package(tmp_path / "matrix.xlsx", workbook_xml=workbook(defined))) == expected
 
 
 @pytest.mark.parametrize(("payload", "expected"), [
