@@ -20,4 +20,28 @@ acceptance_commands: ["pwsh -NoProfile -File tests/WindowsExcelRequestSchema.Tes
 
 # Request schema validator v1
 
-Validate parsed JSON without PowerShell coercion: every row/count/ordinal must be numeric integral and in Excel bounds; positive unique ordinal mapping; exact group start/end/next-header relation; source/template/insertion membership; worksheet capacity; required lease/ACK/nonce/identity; explicit allowed fields and Y/Z/W/A contract; reject duplicates/unknowns before any COM callback. Pester covers negative/fractional/string/duplicate/out-of-range and valid 6/10/104. Windows Pester is mandatory; no skip placeholder. Human commit/push; no merge/rebase/amend/force.
+Implemented in `scripts/WindowsExcelRequestSchema.psm1`. The sole exported
+entry point is `Test-WindowsExcelRequestSchema -RequestJson <raw JSON>
+[-BeforeCom <scriptblock>]` (with `Assert-WindowsExcelRequestSchema` alias).
+It scans raw JSON before `ConvertFrom-Json`, so duplicate object keys and the
+lexical type of every row/count/ordinal are rejected before the optional
+COM-bound callback can run.
+
+The frozen wire shape has explicit top-level fields for operation/nonces,
+control/candidate/sheet identities, lease and ACK paths, bounds, same-group
+source/template rows, ordinal mapping, writes, `FormulaR1C1` Y/Z values, and
+the W hyperlink. `fields` permits only B:V, X, and AA; A is supplied only by
+the positive unique ordinal mapping, W only by `hyperlink`, and Y/Z only by
+`formulas`. The validator requires `next_header = group_end + 1`,
+`insertion_row = next_header`, same-group source/template membership, and
+available capacity below Excel's 1,048,576th row.
+
+Evidence (2026-08-20): `git diff --check` passed on macOS. `pwsh` is absent on
+this host, therefore executable Pester was not run here; Windows Pester
+execution remains mandatory and is not represented as a pass or skip.
+
+P6 remediation: the scanner now compares against a single PowerShell
+backslash literal and restricts escapes to the JSON grammar. Pester coverage
+adds escaped quote/backslash formula round trips at rows 6/10/104, malformed
+escape rejection before the callback, and a serialized object mutation that
+proves the lease property is absent before the required-field assertion.
