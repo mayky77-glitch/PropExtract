@@ -9,6 +9,10 @@ if ($env:WINDOWS_EXCEL_FAKE_COM_PESTER_DISCOVERY -ne '1') {
     exit 0
 }
 
+Describe 'Windows Excel fake COM fault corpus' {
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot 'support/WindowsExcelFakeCom.psm1') -Force
+
 function New-ExpectedFakeComCall {
     param([int]$Sequence, [string]$Event, [string]$Stage = '', [string]$Kind = '', [int]$ProxyId = 0, [hashtable]$Arguments = @{})
     [pscustomobject]@{ sequence = $Sequence; event = $Event; stage = $Stage; kind = $Kind; proxy_id = $ProxyId; arguments = $Arguments }
@@ -100,10 +104,9 @@ function Assert-ExactFailureEnvelope {
     $Actual.message | Should -Be $Message; $Actual.hresult | Should -Be $HResult; $Actual.winerror | Should -Be $WinError
 }
 
-Describe 'Windows Excel fake COM fault corpus' {
-    BeforeAll { Import-Module (Join-Path $PSScriptRoot 'support/WindowsExcelFakeCom.psm1') -Force }
+    }
 
-    It 'matches the exact ordered fake-COM trace for row <row>' -ForEach @(6, 10, 104) {
+    It 'matches the exact ordered fake-COM trace for row <row>' -ForEach @(@{ row = 6 }, @{ row = 10 }, @{ row = 104 }) {
         param($row)
         $scenario = Invoke-WindowsExcelFakeComScenario -InsertionRow $row
         Assert-ExactFakeComTrace -Actual $scenario.Trace -Expected (Get-ExpectedFakeComTrace -InsertionRow $row)
@@ -114,14 +117,14 @@ Describe 'Windows Excel fake COM fault corpus' {
         (Test-WindowsExcelFakeComTrace -Scenario $scenario -InsertionRow $row).is_success | Should -BeTrue
     }
 
-    It 'keeps open and insert failures as explicit primary failures' -ForEach @('open', 'insert') {
+    It 'keeps open and insert failures as explicit primary failures' -ForEach @(@{ stage = 'open' }, @{ stage = 'insert' }) {
         param($stage)
         $scenario = Invoke-WindowsExcelFakeComScenario -InsertionRow 10 -Faults @{ $stage = @{ message = "forced-$stage"; hresult = -41; winerror = 122 } }
         Assert-ExactFailureEnvelope -Actual $scenario.Error -Stage $stage -Occurrence 1 -Message "forced-$stage" -HResult -41 -WinError 122
         $scenario.CleanupErrors.Count | Should -Be 0; $scenario.Final.classification | Should -Be 'primary_failure'; $scenario.Final.success | Should -BeFalse
     }
 
-    It 'targets the candidate post-insert <stage> occurrence and preserves the primary envelope' -ForEach @('calc', 'save') {
+    It 'targets the candidate post-insert <stage> occurrence and preserves the primary envelope' -ForEach @(@{ stage = 'calc' }, @{ stage = 'save' }) {
         param($stage)
         $scenario = Invoke-WindowsExcelFakeComScenario -InsertionRow 10 -Faults @{ $stage = @{ occurrence = 2; message = "candidate-$stage"; hresult = -42; winerror = 123 } }
         Assert-ExactFailureEnvelope -Actual $scenario.Error -Stage $stage -Occurrence 2 -Message "candidate-$stage" -HResult -42 -WinError 123
