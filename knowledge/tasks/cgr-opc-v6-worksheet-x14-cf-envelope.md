@@ -41,3 +41,10 @@ Owned paths are exactly this card plus `rns_import_server/opc_worksheet_x14_cf_r
 - Added the immutable topology-owned X14 CF envelope reader and synthetic adversarial fixture/test corpus. It uses one XML parse per topology worksheet, exact canonical member selection, exact extension URI and legal ancestry, worksheet-global priority uniqueness, and leaves native-CF X14 hard-stop behavior untouched.
 - Verification: focused integration `255 passed`; full `1162 passed, 1 existing openpyxl synthetic-X14 warning`; `python3 -m compileall -q rns_import_server tests` and `git diff --check` passed.
 - Residual scope risk: this is intentionally an envelope only; sqref geometry, formula evaluation, dxf child semantics, X14 DV semantics, mapping, and mutation safety remain unclaimed.
+
+## P6 remediation evidence
+
+- Remediation SHA: `0cb500b4343ea9ba7bc8249c9ff62e3cbcfc93c5` (linear parent `21e1446699378cbcf452a5b31ac92fbd60f9f1a3`).
+- XM `f`/`sqref` ownership is now limited to a recognized matching-URI CF extension, so sibling X14 data-validation payloads remain unowned. Every matching-URI extension is checked for complete exact chain/content/cardinality and attributes before success; the collision walk is document-order and owner-aware.
+- Priority lexical handling now collapses only XML whitespace and bounds the unsigned magnitude before integer conversion. Inline X14 dxf accepts only direct opaque SML `font`/`fill` children.
+- Reverification: focused integration `262 passed`; full `1169 passed, 1 existing openpyxl synthetic-X14 warning`; compileall and diff check passed.
