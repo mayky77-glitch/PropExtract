@@ -128,14 +128,14 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
             if extra:add(2,"unknown-x14-cf-attribute","attribute",extra[0])
         if tag==_FORMS and forms and node.attrib:add(2,"unknown-x14-cf-attribute","attribute",sorted(node.attrib)[0])
         if tag==_FORM and form and node.attrib:add(2,"unknown-x14-cf-attribute","attribute",sorted(node.attrib)[0])
-        if _nonwhite(node.text) and tag in {_EXTLST,_FORMS,_FORM}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"text")
+        if _nonwhite(node.text) and tag in {_EXTLST,_FORMS,_FORM,_RULE}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"text")
         child_ext=0
         for child in node:
             child_index=ext_index
             if direct_extlst and child.tag==_EXT:child_ext+=1;child_index=child_ext
             walk(child,node,parent_direct_extlst=direct_extlst,parent_cf_ext=cf_ext,parent_dv_ext=dv_ext,parent_forms=forms,parent_form=form,parent_rule=rule,dv_carved=dv_here,extlst_index=extlst_index,ext_index=child_index)
             event+=1
-            if _nonwhite(child.tail) and tag in {_EXTLST,_FORMS,_FORM}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"tail")
+            if _nonwhite(child.tail) and tag in {_EXTLST,_FORMS,_FORM,_RULE}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"tail")
         if cf_ext and sum(child.tag==_FORMS for child in node)!=1:add(1,"invalid-x14-cf-cardinality","ext","conditionalFormattings")
         if tag==_FORMS and forms and not any(child.tag==_FORM for child in node):add(1,"invalid-x14-cf-cardinality","conditionalFormattings","conditionalFormatting")
         if tag==_FORM and form:owners.append((start,extlst_index or 0,ext_index or 0))

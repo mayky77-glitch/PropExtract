@@ -139,6 +139,38 @@ def test_owned_mixed_content_exact_tuples(tmp_path, body, expected):
     assert error(package(tmp_path / "mixed.xlsx", sheet_one=worksheet(body))) == (expected[0], "xl/worksheets/first.xml", expected[1], expected[2])
 
 
+@pytest.mark.parametrize("rule", [
+    '<x14:cfRule>text</x14:cfRule>',
+    '<x14:cfRule><xm:f/>tail</x14:cfRule>',
+    '<x14:cfRule><x14:dxf/>tail</x14:cfRule>',
+    '<x14:cfRule><xm:f/>first-tail<x14:dxf/>later-tail</x14:cfRule>',
+])
+def test_rule_owned_mixed_content_exact_tuples(tmp_path, rule):
+    assert error(package(tmp_path / "rule-mixed.xlsx", sheet_one=worksheet(ext(f'<x14:conditionalFormatting>{rule}</x14:conditionalFormatting>')))) == (
+        "invalid-x14-cf-content", "xl/worksheets/first.xml", "cfRule", "text" if ">text<" in rule else "tail",
+    )
+
+
+def test_rule_owned_whitespace_mixed_content_is_allowed(tmp_path):
+    rule = '<x14:cfRule> \t\n <xm:f/> \r <x14:dxf/> \n </x14:cfRule>'
+    result = read_worksheet_x14_cf_owner_topology(package(
+        tmp_path / "rule-whitespace.xlsx",
+        sheet_one=worksheet(ext(f'<x14:conditionalFormatting>{rule}</x14:conditionalFormatting>')),
+    ))
+    assert len(result.worksheets[0].containers) == 1
+
+
+def test_rule_mixed_content_preserves_tier_and_document_precedence(tmp_path):
+    later_rule_tail = ext('<x14:conditionalFormatting><x14:cfRule><xm:f/>tail</x14:cfRule></x14:conditionalFormatting>')
+    assert error(package(tmp_path / "tier-one-first.xlsx", sheet_one=worksheet('<x14:cfRule/>' + later_rule_tail))) == (
+        "invalid-x14-cf-parent", "xl/worksheets/first.xml", "tag", f"{{{X14}}}cfRule",
+    )
+    earlier_unknown_child = ext('<x14:conditionalFormatting><bad/><x14:cfRule><xm:f/>tail</x14:cfRule></x14:conditionalFormatting>')
+    assert error(package(tmp_path / "unknown-child-first.xlsx", sheet_one=worksheet(earlier_unknown_child))) == (
+        "unknown-x14-cf-child", "xl/worksheets/first.xml", "tag", f"{{http://schemas.openxmlformats.org/spreadsheetml/2006/main}}bad",
+    )
+
+
 def test_dfs_entry_and_owner_exit_precedence(tmp_path):
     # The first fault is selected by real DFS event timing, within a tier.
     root_rule_then_duplicate = '<x14:cfRule/>' + ext('<x14:conditionalFormatting/>') + ext('<x14:conditionalFormatting/>')
