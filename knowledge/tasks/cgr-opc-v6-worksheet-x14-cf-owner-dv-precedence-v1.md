@@ -1,6 +1,6 @@
 ---
 type: task
-status: planned
+status: completed
 work_id: cgr-opc-v6-worksheet-x14-cf-owner-dv-precedence-v1
 tags: [task/implementation, feature/x14-cf-owner-topology, status/planned]
 last_verified: 2026-08-20
@@ -34,5 +34,11 @@ Acceptance commands:
 `python3 -m compileall -q rns_import_server/opc_worksheet_x14_cf_owner_topology.py tests/test_opc_worksheet_x14_cf_owner_topology.py`
 
 `git diff --check`
+
+## Completion evidence
+
+Implemented 2026-08-21. The traversal now distinguishes the direct legal `x14:dataValidations` container and its direct `x14:dataValidation` member from arbitrary nested descendants. Only direct `xm:f` and `xm:sqref` value positions are carved; every other CF-owned unique tag remains validated at its entry event. Focused regressions cover adjacent CF/DV extensions, direct and nested illegal CF-owned tags, URI/parent precedence for nonexact DV URIs, before/after document order, and second-sheet atomic failure.
+
+Validation completed before commit: focused topology suite (59 passed), specified related suite (442 passed), full suite (1194 passed; one existing OpenPyXL unknown-extension warning), compileall, and `git diff --check`.
 
 Independent P6 review must reproduce the exact DV-sibling precedence and confirm all old APIs/errors/frozen blobs. This Gate makes no X14 envelope, formula, sqref, dxf, insertion, publication, UI, CrossOver, or native Excel claim.

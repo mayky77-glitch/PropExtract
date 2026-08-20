@@ -119,6 +119,61 @@ def test_complete_dv_carves_only_xm_formula_and_sqref_descendants(tmp_path):
     )
 
 
+def test_adjacent_valid_cf_and_direct_dv_extensions_project_only_cf_owners(tmp_path):
+    dv = f'<ext uri="{DV_URI}"><x14:dataValidations><x14:dataValidation><xm:f>1</xm:f><xm:sqref>A1</xm:sqref></x14:dataValidation></x14:dataValidations></ext>'
+    body = f'<extLst>{ext("<x14:conditionalFormatting/>")[8:-9]}{dv}</extLst>'
+    result = read_worksheet_x14_cf_owner_topology(package(tmp_path / "adjacent.xlsx", sheet_one=worksheet(body)))
+    assert [owner.owner_path for owner in result.worksheets[0].containers] == [
+        "xl/worksheets/first.xml/worksheet/extLst[1]/ext[1]/conditionalFormattings[1]/conditionalFormatting[1]",
+    ]
+
+
+@pytest.mark.parametrize(("owned", "expected_tag"), [
+    ('<x14:conditionalFormattings/>', f"{{{X14}}}conditionalFormattings"),
+    ('<x14:conditionalFormatting/>', f"{{{X14}}}conditionalFormatting"),
+    ('<x14:cfRule/>', f"{{{X14}}}cfRule"),
+    ('<x14:dxf/>', f"{{{X14}}}dxf"),
+    ('<outer><xm:f>bad</xm:f></outer>', "{http://schemas.microsoft.com/office/excel/2006/main}f"),
+    ('<outer><xm:sqref>A1</xm:sqref></outer>', "{http://schemas.microsoft.com/office/excel/2006/main}sqref"),
+])
+def test_cf_owned_tags_in_dv_extension_outside_legal_value_positions_fail_at_their_tag(tmp_path, owned, expected_tag):
+    body = f'<extLst><ext uri="{DV_URI}"><x14:dataValidations><x14:dataValidation>{owned}</x14:dataValidation></x14:dataValidations></ext></extLst>'
+    assert error(package(tmp_path / "bad-dv-owned.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-parent", "xl/worksheets/first.xml", "tag", expected_tag,
+    )
+
+
+@pytest.mark.parametrize("uri", [DV_URI.lower(), "unknown", "", f" {DV_URI}"])
+def test_nonexact_dv_uri_retains_existing_uri_parent_precedence(tmp_path, uri):
+    body = f'<extLst><ext uri="{uri}"><x14:dataValidations><x14:conditionalFormattings/></x14:dataValidations></ext></extLst>'
+    assert error(package(tmp_path / "nonexact-dv-uri.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-parent", "xl/worksheets/first.xml", "tag", f"{{{X14}}}conditionalFormattings",
+    )
+
+
+@pytest.mark.parametrize("uri", [DV_URI.lower(), "unknown", "", f" {DV_URI}"])
+def test_nonexact_dv_uri_preserves_unsupported_uri_precedence_for_direct_cf(tmp_path, uri):
+    body = f'<extLst><ext uri="{uri}"><x14:dataValidations/><x14:conditionalFormattings/></ext></extLst>'
+    assert error(package(tmp_path / "nonexact-dv-uri-cf.xlsx", sheet_one=worksheet(body))) == (
+        "unsupported-x14-cf-extension-uri", "xl/worksheets/first.xml", "uri", uri,
+    )
+
+
+def test_cf_owned_siblings_before_and_after_legal_dv_values_preserve_document_precedence(tmp_path):
+    body = f'<extLst><ext uri="{DV_URI}"><x14:conditionalFormatting/><x14:dataValidations><x14:dataValidation><xm:f>1</xm:f><xm:sqref>A1</xm:sqref></x14:dataValidation></x14:dataValidations><x14:cfRule/></ext></extLst>'
+    assert error(package(tmp_path / "dv-order.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-parent", "xl/worksheets/first.xml", "tag", f"{{{X14}}}conditionalFormatting",
+    )
+
+
+def test_invalid_second_worksheet_is_atomic_and_reports_its_own_part(tmp_path):
+    valid = worksheet(ext('<x14:conditionalFormatting/>'))
+    invalid = worksheet(f'<extLst><ext uri="{DV_URI}"><x14:dataValidations><x14:dataValidation><outer><xm:f>bad</xm:f></outer></x14:dataValidation></x14:dataValidations></ext></extLst>')
+    assert error(package(tmp_path / "atomic.xlsx", sheet_one=valid, sheet_two=invalid)) == (
+        "invalid-x14-cf-parent", "xl/worksheets/second.xml", "tag", "{http://schemas.microsoft.com/office/excel/2006/main}f",
+    )
+
+
 @pytest.mark.parametrize(("body", "expected"), [
     (f'<extLst><ext uri="{CF_URI}"><conditionalFormatting/></ext></extLst>', ("x14-cf-namespace-collision", "tag", f"{{http://schemas.openxmlformats.org/spreadsheetml/2006/main}}conditionalFormatting")),
     (f'<extLst><ext uri="{CF_URI}"><x14:conditionalFormattings><conditionalFormatting/></x14:conditionalFormattings></ext></extLst>', ("x14-cf-namespace-collision", "tag", f"{{http://schemas.openxmlformats.org/spreadsheetml/2006/main}}conditionalFormatting")),
