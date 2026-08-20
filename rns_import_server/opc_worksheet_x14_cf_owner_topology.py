@@ -243,15 +243,21 @@ def _container_envelope(node:ET.Element,owner:X14CfContainerOwner,part:Canonical
     children=list(node)
     if not children:_semantic_fail("invalid-x14-cf-cardinality",part,"conditionalFormatting","cfRule,sqref")
     rules=[]
-    for index,rule in enumerate((child for child in children if child.tag==_RULE),1):
-        envelope=_rule_envelope(rule,owner,index,offset+index,part)
-        if envelope.priority in priorities:_semantic_fail("duplicate-x14-cf-priority",part,"priority",str(envelope.priority))
-        priorities.add(envelope.priority); rules.append(envelope)
-    # This structural check is deliberately after direct cfRule semantics: a
-    # malformed later sibling must not hide an earlier rule fault.
-    if children[-1].tag!=_SQREF or any(child.tag!=_RULE for child in children[:-1]):_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
+    sqref=None
+    for child in children:
+        if child.tag==_RULE:
+            if sqref is not None:_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
+            index=len(rules)+1
+            envelope=_rule_envelope(child,owner,index,offset+index,part)
+            if envelope.priority in priorities:_semantic_fail("duplicate-x14-cf-priority",part,"priority",str(envelope.priority))
+            priorities.add(envelope.priority); rules.append(envelope)
+        elif child.tag==_SQREF:
+            if sqref is not None:_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
+            sqref=child
+        else:
+            _semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
     if not rules:_semantic_fail("invalid-x14-cf-cardinality",part,"conditionalFormatting","cfRule")
-    sqref=children[-1]
+    if sqref is None:_semantic_fail("invalid-x14-cf-order",part,"conditionalFormatting","cfRule,sqref")
     if sqref.attrib or list(sqref) or not sqref.text or not sqref.text.strip() or _nonwhite(sqref.tail):_semantic_fail("invalid-x14-cf-sqref",part,"sqref","content")
     return X14CfContainerEnvelope(owner,sqref.text,tuple(rules)),offset+len(rules)
 
