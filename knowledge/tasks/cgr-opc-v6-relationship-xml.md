@@ -24,9 +24,11 @@ Implemented strict parser API: `Relationship` immutable record,
 `OPCRelationshipXMLError` with `as_tuple() -> (code, part, detail)`, and
 `parse_relationship_xml(part, payload)`. Parser preserves XML child order,
 uses XML 1.0 Fifth Edition Unicode NCName rules, defaults omitted `TargetMode`
-to `Internal`, and fails closed on malformed/schema/URI violations.
+to `Internal`, validates RFC 3986 URI syntax and mode-aware targets, blocks
+DOCTYPE declarations before parsing, and fails closed on malformed/schema/URI
+violations including owned element tails.
 
-Evidence: focused suite `31 passed`; full suite `317 passed` (one existing
+P6 evidence: focused suite `45 passed`; full suite `331 passed` (one existing
 openpyxl extension warning); `python3 -m compileall -q
 rns_import_server/opc_relationship_xml.py` and `git diff --check` passed. No
 V5 code reused.

@@ -34,10 +34,10 @@ def _error_tuple(payload: bytes | str) -> tuple[str, str, str]:
 
 
 def test_parses_immutable_records_in_document_order_with_internal_default():
-    xml = _document(_relationship(Id="rId2", Target="two.xml") + _relationship(Id="rId1", Target="one.xml", TargetMode="External"))
+    xml = _document(_relationship(Id="rId2", Target="two.xml") + _relationship(Id="rId1", Target="https://example.test/one.xml#sheet", TargetMode="External"))
     assert parse_relationship_xml(PART, xml) == (
         Relationship("rId2", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet", "two.xml", "Internal"),
-        Relationship("rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet", "one.xml", "External"),
+        Relationship("rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet", "https://example.test/one.xml#sheet", "External"),
     )
 
 
@@ -78,9 +78,42 @@ def test_type_uri_valid_edges(type_uri: str):
     assert parse_relationship_xml(PART, _document(_relationship(Type=type_uri)))[0].type_uri == type_uri
 
 
+@pytest.mark.parametrize(
+    "type_uri",
+    [
+        "http://[not-ipv6]/type",
+        "http://[2001:db8::1/type",
+        "http://example.test:port/type",
+        "http://user@@example.test/type",
+        "http://example.test]/type",
+        "http://exa[mple.test/type",
+    ],
+)
+def test_type_uri_rejects_invalid_rfc3986_authority_grammar(type_uri: str):
+    assert _error_tuple(_document(_relationship(Type=type_uri))) == ("invalid-relationship-type", PART, type_uri)
+
+
 @pytest.mark.parametrize("mode", ["internal", "external", "", "Remote"])
 def test_target_mode_is_exact(mode: str):
     assert _error_tuple(_document(_relationship(TargetMode=mode))) == ("invalid-target-mode", PART, mode)
+
+
+@pytest.mark.parametrize("target", ["", "bad space", "../%zz", "http://[bad"])
+def test_target_must_be_nonblank_valid_uri_reference(target: str):
+    assert _error_tuple(_document(_relationship(Target=target))) == ("invalid-relationship-target", PART, target)
+
+
+def test_target_mode_uri_semantics_are_exact_and_mode_aware():
+    assert _error_tuple(_document(_relationship(Target="https://example.test/workbook.xml"))) == (
+        "internal-target-not-relative", PART, "https://example.test/workbook.xml"
+    )
+    assert _error_tuple(_document(_relationship(Target="/workbook.xml", TargetMode="Internal"))) == (
+        "internal-target-not-relative", PART, "/workbook.xml"
+    )
+    assert _error_tuple(_document(_relationship(Target="workbook.xml", TargetMode="External"))) == (
+        "external-target-not-absolute", PART, "workbook.xml"
+    )
+    assert parse_relationship_xml(PART, _document(_relationship(Target="urn:example:workbook#sheet", TargetMode="External")))[0].target_mode == "External"
 
 
 @pytest.mark.parametrize("name", ["Id", "Type", "Target"])
@@ -116,3 +149,18 @@ def test_rejects_non_whitespace_element_content_and_nested_children():
 
 def test_malformed_xml_has_stable_error_tuple():
     assert _error_tuple(b"<Relationships") == ("malformed-xml", PART, "document")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '<!DOCTYPE Relationships><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+        '<!DOCTYPE Relationships [<!ENTITY owned "x">]><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">&owned;</Relationships>',
+    ],
+)
+def test_rejects_plain_and_entity_doctypes_before_parsing(payload: str):
+    assert _error_tuple(payload) == ("forbidden-doctype", PART, "doctype")
+
+
+def test_rejects_non_whitespace_child_tail():
+    assert _error_tuple(_document(_relationship() + "tail")) == ("invalid-relationships-content", PART, "tail")
