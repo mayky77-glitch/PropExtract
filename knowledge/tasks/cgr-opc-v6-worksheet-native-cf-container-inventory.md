@@ -50,3 +50,9 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_native_cf_r
 - Re-run and preserve every accepted presence PathLike/topology/member/ZIP/XML/x14 regression, including sentinel dependency identity, combined percent/case aliases, decompression errors, declarations/BOM/UTF-7, empty XML, and unrelated extension coexistence.
 - Every negative asserts one exact four-field tuple; every positive asserts complete recursive records and immutability. No alternate codes, observational assertions, skips, or fallback.
 - Explicitly exclude rule type/priority/dxfId/stopIfTrue/formulas/cardinality; colorScale/dataBar/iconSet/cfvo/color; dxf table resolution; native extension interpretation; x14 parsing/composition; coordinate mutation/mapping; insertion safety; DV/styles/COM/UI/CrossOver/native Excel/source PDF/XLSX/README. Rule-core is the next separate Gate after this one is accepted.
+
+## Execution evidence
+
+- Implemented from clean base `29c55d1d21716b429bc6769d2acce587b9aa321e`; no native-CF reference-line ancestry, cherry-pick, or source copy.
+- Added immutable ordered native-container inventory and strict A1 `sqref` geometry in the existing single-pass package boundary. Projection deliberately retains only owner path, geometry, pivot, UID, and direct native `cfRule` count.
+- Local acceptance on 2026-08-20: focused command passed `315`; full `python3 -m pytest -q` passed `1067` with one existing OpenPyXL unknown-extension warning; compileall and `git diff --check` passed.

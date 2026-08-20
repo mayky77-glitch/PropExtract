@@ -9,9 +9,14 @@ import rns_import_server.opc_worksheet_native_cf_reader as reader
 from rns_import_server.opc_part_uri import CanonicalPartURI
 from rns_import_server.opc_workbook_topology import WorkbookTopology, WorksheetDescriptor
 from rns_import_server.opc_worksheet_native_cf_reader import (
+    NativeCfA1Range,
+    NativeCfContainerInventory,
     OPCWorksheetNativeCfReaderError,
+    WorkbookNativeCfContainerInventory,
     WorkbookNativeCfPresence,
+    WorksheetNativeCfContainerInventory,
     WorksheetNativeCfPresence,
+    read_worksheet_native_cf_container_inventory,
     read_worksheet_native_cf_presence,
 )
 from tests.opc_worksheet_native_cf_fixture_factory import package, worksheet
@@ -23,6 +28,12 @@ PART = CanonicalPartURI("xl/worksheets/first.xml")
 def error(path):
     with pytest.raises(OPCWorksheetNativeCfReaderError) as captured:
         read_worksheet_native_cf_presence(path)
+    return captured.value.as_tuple()
+
+
+def inventory_error(path):
+    with pytest.raises(OPCWorksheetNativeCfReaderError) as captured:
+        read_worksheet_native_cf_container_inventory(path)
     return captured.value.as_tuple()
 
 
@@ -246,3 +257,147 @@ def test_owned_mixed_content_is_typed(tmp_path, body, field, detail):
     assert error(package(tmp_path / "mixed.xlsx", sheet_one=worksheet(body))) == (
         "invalid-native-cf-content", "xl/worksheets/first.xml", field, detail,
     )
+
+
+def test_inventory_projects_ordered_containers_ranges_and_immutable_records(tmp_path):
+    first_xml = worksheet(
+        '<conditionalFormatting sqref="$A$6 B10:C10" pivot="false" '
+        'xr:uid="{01234567-89ab-cdef-0123-456789abcdef}">'
+        '<cfRule type="expression" priority="999"><formula>opaque</formula></cfRule>'
+        '</conditionalFormatting>'
+        '<conditionalFormatting sqref="XFD104" pivot="1"><cfRule/><cfRule/></conditionalFormatting>'
+    )
+    second_xml = worksheet('<conditionalFormatting sqref="A1:XFD1048576"/>')
+    result = read_worksheet_native_cf_container_inventory(
+        package(tmp_path / "projection.xlsx", sheet_one=first_xml, sheet_two=second_xml)
+    )
+    first = WorksheetDescriptor("Первый", 1, "visible", "one", PART)
+    second = WorksheetDescriptor("Второй", 2, "visible", "two", CanonicalPartURI("xl/worksheets/второй.xml"))
+    assert result == WorkbookNativeCfContainerInventory((
+        WorksheetNativeCfContainerInventory(first, (
+            NativeCfContainerInventory(
+                "xl/worksheets/first.xml/worksheet/conditionalFormatting[1]",
+                (
+                    NativeCfA1Range("A6", "A6", 6, 1, 6, 1),
+                    NativeCfA1Range("B10", "C10", 10, 2, 10, 3),
+                ),
+                False,
+                "{01234567-89ab-cdef-0123-456789abcdef}",
+                1,
+            ),
+            NativeCfContainerInventory(
+                "xl/worksheets/first.xml/worksheet/conditionalFormatting[2]",
+                (NativeCfA1Range("XFD104", "XFD104", 104, 16384, 104, 16384),),
+                True,
+                None,
+                2,
+            ),
+        )),
+        WorksheetNativeCfContainerInventory(second, (
+            NativeCfContainerInventory(
+                "xl/worksheets/второй.xml/worksheet/conditionalFormatting[1]",
+                (NativeCfA1Range("A1", "XFD1048576", 1, 1, 1048576, 16384),),
+                None,
+                None,
+                0,
+            ),
+        )),
+    ))
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].containers[0].rule_count = 0
+    with pytest.raises(FrozenInstanceError):
+        result.worksheets[0].containers[0].sqref[0].start_coordinate = "B6"
+
+
+def test_inventory_absent_containers_are_empty_tuples(tmp_path):
+    result = read_worksheet_native_cf_container_inventory(package(tmp_path / "absent.xlsx"))
+    assert all(record.containers == () for record in result.worksheets)
+
+
+@pytest.mark.parametrize(("sqref", "expected"), [
+    ("A1", (NativeCfA1Range("A1", "A1", 1, 1, 1, 1),)),
+    (" \tA1\r\n", (NativeCfA1Range("A1", "A1", 1, 1, 1, 1),)),
+    ("$a$1 $XFD$1048576", (
+        NativeCfA1Range("A1", "A1", 1, 1, 1, 1),
+        NativeCfA1Range("XFD1048576", "XFD1048576", 1048576, 16384, 1048576, 16384),
+    )),
+])
+def test_inventory_normalizes_strict_a1_endpoints(tmp_path, sqref, expected):
+    result = read_worksheet_native_cf_container_inventory(
+        package(tmp_path / "a1.xlsx", sheet_one=worksheet(f'<conditionalFormatting sqref="{sqref}"/>'))
+    )
+    assert result.worksheets[0].containers[0].sqref == expected
+
+
+@pytest.mark.parametrize(("sqref", "expected"), [
+    ("", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "")),
+    ("   ", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "   ")),
+    ("A:A", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A:A")),
+    ("6:6", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "6:6")),
+    ("Sheet1!A1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "Sheet1!A1")),
+    ("[Book]Sheet1!A1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "[Book]Sheet1!A1")),
+    ("A0", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A0")),
+    ("XFE1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "XFE1")),
+    ("A1048577", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1048577")),
+    ("A1:B0", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1:B0")),
+    ("B2:A1", ("invalid-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2:A1")),
+    ("A1:A1 A1", ("duplicate-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1")),
+    ("$A$1 A1", ("duplicate-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "A1")),
+    ("A1:B2 B2:C3", ("overlapping-native-cf-sqref", "xl/worksheets/first.xml", "sqref", "B2:C3")),
+])
+def test_inventory_rejects_non_a1_duplicate_and_overlapping_sqrefs(tmp_path, sqref, expected):
+    xml = f'<conditionalFormatting sqref="{sqref}"/>'
+    assert inventory_error(package(tmp_path / "sqref.xlsx", sheet_one=worksheet(xml))) == expected
+
+
+@pytest.mark.parametrize(("attributes", "expected"), [
+    ("", ("missing-native-cf-attribute", "xl/worksheets/first.xml", "attribute", "sqref")),
+    (' sqref="A1" pivot="yes"', ("invalid-native-cf-boolean", "xl/worksheets/first.xml", "pivot", "yes")),
+    (' sqref="A1" xr:uid="not-a-guid"', ("invalid-native-cf-uid", "xl/worksheets/first.xml", "uid", "not-a-guid")),
+    (' sqref="A1" priority="1"', ("unknown-native-cf-attribute", "xl/worksheets/first.xml", "attribute", "priority")),
+    (' sqref="A1" x:sqref="B2" xmlns:x="urn:foreign"', ("unknown-native-cf-attribute", "xl/worksheets/first.xml", "attribute", "{urn:foreign}sqref")),
+])
+def test_inventory_container_attribute_boundary(tmp_path, attributes, expected):
+    assert inventory_error(package(
+        tmp_path / "attributes.xlsx", sheet_one=worksheet(f"<conditionalFormatting{attributes}/>")
+    )) == expected
+
+
+def test_inventory_rejects_duplicate_container_attribute_before_xml_parser(tmp_path):
+    payload = worksheet('<conditionalFormatting sqref="A1" sqref="B2"/>')
+    assert inventory_error(package(tmp_path / "duplicate.xlsx", sheet_one=payload)) == (
+        "duplicate-native-cf-attribute", "xl/worksheets/first.xml", "attribute", "sqref",
+    )
+
+
+@pytest.mark.parametrize(("body", "expected"), [
+    ("<conditionalFormatting sqref=\"A1\"><extLst/></conditionalFormatting>", (
+        "unsupported_native_cf_extension", "xl/worksheets/first.xml", "tag",
+        "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}extLst",
+    )),
+    ("<conditionalFormatting sqref=\"A1\"><formula/></conditionalFormatting>", (
+        "invalid-native-cf-container-child", "xl/worksheets/first.xml", "tag",
+        "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}formula",
+    )),
+])
+def test_inventory_rejects_unowned_direct_container_children(tmp_path, body, expected):
+    assert inventory_error(package(tmp_path / "children.xlsx", sheet_one=worksheet(body))) == expected
+
+
+def test_inventory_preserves_x14_precedence_and_presence_pathlike_boundary(tmp_path):
+    x14 = worksheet('<conditionalFormatting sqref="A1"><x14:cfRule/></conditionalFormatting>')
+    assert inventory_error(package(tmp_path / "x14.xlsx", sheet_one=x14)) == (
+        "unsupported_x14_content", "xl/worksheets/first.xml", "tag",
+        "{http://schemas.microsoft.com/office/spreadsheetml/2009/9/main}cfRule",
+    )
+    class Once:
+        def __init__(self, value):
+            self.value, self.calls = value, 0
+        def __fspath__(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise TypeError("called twice")
+            return self.value
+    path = Once(str(package(tmp_path / "once.xlsx")))
+    assert read_worksheet_native_cf_container_inventory(path).worksheets[0].containers == ()
+    assert path.calls == 1
