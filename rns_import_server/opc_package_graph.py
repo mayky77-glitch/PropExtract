@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import lzma
 import os
 from pathlib import Path
+import re
 from typing import Final
 from urllib.parse import unquote_to_bytes
 from xml.etree import ElementTree as ET
+import zlib
 from zipfile import BadZipFile, LargeZipFile, ZipFile, ZipInfo
 
 from .opc_part_uri import CanonicalPartURI, OPCPartURIError, canonicalize_part_uri, resolve_relative_part_uri
@@ -16,6 +19,21 @@ from .opc_relationship_xml import OPCRelationshipXMLError, parse_relationship_xm
 CONTENT_TYPES_NAME: Final = "[Content_Types].xml"
 CONTENT_TYPES_NAMESPACE: Final = "http://schemas.openxmlformats.org/package/2006/content-types"
 _CONTENT_TYPES_TAG: Final = f"{{{CONTENT_TYPES_NAMESPACE}}}Types"
+_XML_DECLARATION_ENCODING: Final = re.compile(
+    br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_SUPPORTED_XML_ENCODINGS: Final = frozenset({b"utf-8", b"utf8", b"utf-16", b"utf-16le", b"utf-16be"})
+_ZIP_MEMBER_ERRORS: Final = (
+    BadZipFile,
+    EOFError,
+    NotImplementedError,
+    OSError,
+    RuntimeError,
+    ValueError,
+    zlib.error,
+    lzma.LZMAError,
+)
 
 
 @dataclass(frozen=True)
@@ -62,12 +80,26 @@ def _fail(code: str, subject: str, field: str, detail: str) -> None:
     raise OPCPackageGraphError(code, subject, field, detail)
 
 
-def _path_subject(package_path: os.PathLike[str] | str) -> str:
+def _safe_path_subject(package_path: object) -> str:
+    try:
+        return repr(package_path)
+    except Exception:
+        return type(package_path).__name__
+
+
+def _coerce_package_path(package_path: os.PathLike[str] | str) -> str:
+    subject = _safe_path_subject(package_path)
     try:
         value = os.fspath(package_path)
     except TypeError:
-        return str(package_path)
-    return value if isinstance(value, str) else repr(value)
+        _fail("invalid-package-path", subject, "path", type(package_path).__name__)
+    except (ValueError, OSError) as error:
+        _fail("unreadable-package", subject, "path", type(error).__name__)
+    if not isinstance(value, str):
+        _fail("invalid-package-path", subject, "path", type(value).__name__)
+    if "\x00" in value:
+        _fail("unreadable-package", value, "path", "embedded-nul")
+    return value
 
 
 def _raw_relationship_source(name: str) -> str | None:
@@ -75,10 +107,17 @@ def _raw_relationship_source(name: str) -> str | None:
         return None
     if name.startswith("_rels/") and name.endswith(".rels"):
         filename = name.removeprefix("_rels/").removesuffix(".rels")
+        if "/" in filename:
+            return filename if any(segment in {".", ".."} for segment in filename.split("/")) else ""
         return filename or ""
     if "/_rels/" in name and name.endswith(".rels"):
         directory, filename = name.split("/_rels/", 1)
-        return f"{directory}/{filename.removesuffix('.rels')}"
+        filename = filename.removesuffix(".rels")
+        if "/" in filename and any(segment in {".", ".."} for segment in filename.split("/")):
+            return f"{directory}/{filename}"
+        if not directory or not filename or "/" in filename or "/_rels/" in directory:
+            return ""
+        return f"{directory}/{filename}"
     return ""
 
 
@@ -96,7 +135,15 @@ def _canonicalize_member(info: ZipInfo) -> CanonicalPartURI:
     raise AssertionError("unreachable")
 
 
+def _reject_unsupported_xml_encoding(payload: bytes, subject: str, field: str) -> None:
+    candidate = payload[3:] if payload.startswith(b"\xef\xbb\xbf") else payload
+    match = _XML_DECLARATION_ENCODING.match(candidate)
+    if match is not None and match.group(1).lower() not in _SUPPORTED_XML_ENCODINGS:
+        _fail("unsupported-xml-encoding", subject, field, "encoding")
+
+
 def _validate_content_types(payload: bytes, package_subject: str) -> None:
+    _reject_unsupported_xml_encoding(payload, package_subject, "content-types")
     try:
         root = ET.fromstring(payload)
     except LookupError:
@@ -140,9 +187,19 @@ def _relationship_error(error: OPCRelationshipXMLError, part: CanonicalPartURI, 
 def _read_member(package: ZipFile, info: ZipInfo) -> bytes:
     try:
         return package.read(info)
-    except (BadZipFile, NotImplementedError, OSError, RuntimeError, ValueError) as error:
+    except _ZIP_MEMBER_ERRORS as error:
         _fail("bad-zip-member", info.filename, "member", type(error).__name__)
     raise AssertionError("unreachable")
+
+
+def _validate_zip_members(package: ZipFile, infos: tuple[ZipInfo, ...]) -> None:
+    for info in infos:
+        try:
+            with package.open(info) as member:
+                while member.read(1024 * 1024):
+                    pass
+        except _ZIP_MEMBER_ERRORS as error:
+            _fail("bad-zip-member", info.filename, "member", type(error).__name__)
 
 
 def _is_content_types_target(name: CanonicalPartURI) -> bool:
@@ -156,11 +213,10 @@ def _is_content_types_target(name: CanonicalPartURI) -> bool:
 
 def build_opc_package_graph(package_path: os.PathLike[str] | str) -> OPCPackageGraph:
     """Return a fully validated graph, or one stable typed failure."""
-    subject = _path_subject(package_path)
+    path = _coerce_package_path(package_path)
+    subject = path
     try:
-        package = ZipFile(package_path)
-    except TypeError:
-        _fail("invalid-package-path", subject, "path", type(package_path).__name__)
+        package = ZipFile(path)
     except (BadZipFile, LargeZipFile):
         _fail("invalid-zip-package", subject, "path", "not-a-zip")
     except ValueError as error:
@@ -192,12 +248,7 @@ def build_opc_package_graph(package_path: os.PathLike[str] | str) -> OPCPackageG
 
         if control_info is None:
             _fail("missing-content-types", subject, "content-types", CONTENT_TYPES_NAME)
-        try:
-            bad_member = package.testzip()
-        except (BadZipFile, NotImplementedError, OSError, RuntimeError, ValueError) as error:
-            _fail("bad-zip-member", subject, "member", type(error).__name__)
-        if bad_member is not None:
-            _fail("bad-zip-member", bad_member, "member", "crc")
+        _validate_zip_members(package, infos)
         _validate_content_types(_read_member(package, control_info), subject)
 
         relationship_parts: list[tuple[ZipInfo, CanonicalPartURI, CanonicalPartURI | None]] = []
@@ -215,7 +266,9 @@ def build_opc_package_graph(package_path: os.PathLike[str] | str) -> OPCPackageG
             if source is not None and source.value not in part_names:
                 _fail("invalid-relationship-source", relationship_part.value, "source", source.value)
             try:
-                parsed = parse_relationship_xml(relationship_part.value, _read_member(package, info))
+                payload = _read_member(package, info)
+                _reject_unsupported_xml_encoding(payload, relationship_part.value, "xml")
+                parsed = parse_relationship_xml(relationship_part.value, payload)
             except OPCRelationshipXMLError as error:
                 _relationship_error(error, relationship_part, source)
             except LookupError:

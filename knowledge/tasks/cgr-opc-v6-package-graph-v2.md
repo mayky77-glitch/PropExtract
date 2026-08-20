@@ -50,5 +50,6 @@ Implement fresh from accepted integration `332ad60`; do not merge, cherry-pick, 
 ## Implementation evidence
 
 - Fresh v2 graph implementation and focused regression suite added in the reserved paths only.
-- `python3 -m pytest -q tests/test_opc_package_graph.py tests/test_opc_part_uri.py tests/test_opc_relationship_xml.py tests/test_opc_package_v6_corpus.py` → 132 passed.
-- `python3 -m pytest -q` → 418 passed, 1 existing openpyxl warning; `git diff --check` passed.
+- P6 remediation rejects non-exact `.rels` locations, maps corrupt compressed members with member context, classifies unsupported declared XML encodings, and coerces `PathLike` exactly once before ZIP access.
+- `python3 -m pytest -q tests/test_opc_package_graph.py tests/test_opc_part_uri.py tests/test_opc_relationship_xml.py tests/test_opc_package_v6_corpus.py` → 146 passed.
+- `python3 -m pytest -q` → 432 passed, 1 existing openpyxl warning; `git diff --check` passed.

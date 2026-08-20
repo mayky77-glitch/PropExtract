@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import os
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile
 
 import pytest
 
@@ -85,6 +86,24 @@ def test_rejects_sources_targets_locations_and_collision_ledger(tmp_path: Path, 
     assert error(write_package(tmp_path, package_members)) == expected
 
 
+@pytest.mark.parametrize(
+    "relationship_name",
+    (
+        "_rels/sub/doc.xml.rels",
+        "xl/_rels/sub/doc.xml.rels",
+        "xl/_rels/a/_rels/doc.xml.rels",
+    ),
+)
+def test_rejects_relationship_parts_outside_exact_rels_shape(tmp_path: Path, relationship_name: str) -> None:
+    package_members = members() + ((relationship_name, rels()),)
+    assert error(write_package(tmp_path, package_members)) == (
+        "misplaced-relationship-part",
+        relationship_name,
+        "name",
+        relationship_name,
+    )
+
+
 def test_forbids_canonical_control_and_relationship_targets(tmp_path: Path) -> None:
     assert error(write_package(tmp_path, members(root_target="_rels/.rels")))[0] == "forbidden-internal-target"
     assert error(write_package(tmp_path, members(root_target="%5BContent_Types%5D.%78ml")))[0] == "forbidden-internal-target"
@@ -118,6 +137,93 @@ def test_maps_non_zip_corrupt_encrypted_unsupported_relationship_encoding_and_nu
     bad_rels = list(members()); bad_rels[3] = ("xl/_rels/workbook.xml.rels", b'<?xml version="1.0" encoding="unknown-encoding"?><Relationships/>')
     assert error(write_package(tmp_path, tuple(bad_rels)))[0] == "unsupported-xml-encoding"
     assert error(Path(str(tmp_path / "nul") + "\x00.xlsx"))[0] == "unreadable-package"
+
+
+@pytest.mark.parametrize("encoding", ("utf-7", "shift_jis", "gbk"))
+def test_rejects_known_but_unsupported_xml_encodings_with_typed_context(tmp_path: Path, encoding: str) -> None:
+    content_types = f'<?xml version="1.0" encoding="{encoding}"?><Types xmlns="{CONTENT_TYPES_NAMESPACE}"/>'.encode()
+    content_path = write_package(tmp_path, (("[Content_Types].xml", content_types),), f"content-{encoding}.xlsx")
+    assert error(content_path) == ("unsupported-xml-encoding", str(content_path), "content-types", "encoding")
+
+    bad_rels = list(members())
+    bad_rels[3] = (
+        "xl/_rels/workbook.xml.rels",
+        f'<?xml version="1.0" encoding="{encoding}"?><Relationships xmlns="{REL_NS}"/>'.encode(),
+    )
+    rels_path = write_package(tmp_path, tuple(bad_rels), f"rels-{encoding}.xlsx")
+    assert error(rels_path) == (
+        "unsupported-xml-encoding",
+        "xl/_rels/workbook.xml.rels",
+        "xml",
+        "encoding",
+    )
+
+
+def _corrupt_compressed_member(path: Path, member_name: str) -> None:
+    with ZipFile(path) as archive:
+        info = archive.getinfo(member_name)
+        with path.open("rb") as package:
+            package.seek(info.header_offset + 26)
+            name_length = int.from_bytes(package.read(2), "little")
+            extra_length = int.from_bytes(package.read(2), "little")
+        payload_offset = info.header_offset + 30 + name_length + extra_length
+        mutation_offset = payload_offset + max(0, info.compress_size // 2)
+    data = bytearray(path.read_bytes())
+    data[mutation_offset] ^= 0xFF
+    path.write_bytes(data)
+
+
+@pytest.mark.parametrize("compression", (ZIP_DEFLATED, ZIP_LZMA))
+def test_maps_corrupt_compressed_member_with_member_context(tmp_path: Path, compression: int) -> None:
+    path = write_package(
+        tmp_path,
+        (("[Content_Types].xml", CONTENT_TYPES), ("payload.bin", os.urandom(8192))),
+        f"corrupt-{compression}.xlsx",
+        compression,
+    )
+    _corrupt_compressed_member(path, "payload.bin")
+    failure = error(path)
+    assert failure[:3] == ("bad-zip-member", "payload.bin", "member")
+
+
+class RaisingPath:
+    def __init__(self, exception: Exception) -> None:
+        self.exception = exception
+        self.calls = 0
+
+    def __fspath__(self) -> str:
+        self.calls += 1
+        raise self.exception
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    (
+        (None, "invalid-package-path"),
+        (1, "invalid-package-path"),
+        (b"package.xlsx", "invalid-package-path"),
+    ),
+)
+def test_rejects_non_string_paths_before_zip_open(value, code: str) -> None:
+    with pytest.raises(OPCPackageGraphError) as caught:
+        build_opc_package_graph(value)
+    assert caught.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("exception", "code"),
+    (
+        (TypeError("bad path"), "invalid-package-path"),
+        (ValueError("bad path"), "unreadable-package"),
+        (OSError("bad path"), "unreadable-package"),
+    ),
+)
+def test_coerces_pathlike_once_and_maps_fspath_failures(exception: Exception, code: str) -> None:
+    path = RaisingPath(exception)
+    with pytest.raises(OPCPackageGraphError) as caught:
+        build_opc_package_graph(path)
+    assert caught.value.code == code
+    assert path.calls == 1
 
 
 def test_replays_corpus_by_expected_mutations_without_fixture_name_branches(tmp_path: Path) -> None:
