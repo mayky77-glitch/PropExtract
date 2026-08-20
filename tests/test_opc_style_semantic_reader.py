@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import FrozenInstanceError
+from dataclasses import fields
 import pytest
 from rns_import_server.opc_style_semantic_reader import OPCStyleSemanticReaderError, read_workbook_style_semantics
 from tests.opc_style_fixture_factory import STYLES_CT, STYLES_REL, package, relationship, styles
@@ -20,7 +21,7 @@ def test_reads_immutable_ordered_styles_and_explicit_boundary_usage(tmp_path):
     assert result.style_part.value=="xl/styles.xml"
     assert [x.num_fmt_id for x in result.style_table.number_formats]==[164]
     assert result.style_table.fonts[0].color and result.style_table.fonts[0].color.rgb=="FF010203"
-    assert result.style_table.fills[1].stops[0][0]=="0"
+    assert result.style_table.fills[1].stops[0][0]==0.0
     assert [(x.coordinate,x.style_index) for x in result.worksheets[0].cells]==[("A6",0),("C104",1)]
     assert [(x.coordinate,x.style_index) for x in result.worksheets[1].cells]==[("A6",1),("B10",0),("C104",1)]
     assert result.style_table.cell_xfs[1].apply_number_format is True
@@ -51,6 +52,8 @@ def test_dangling_relationship_preserves_dependency_failure(tmp_path):
 def test_wrong_relationship_type_and_canonical_aliases_are_not_accepted(tmp_path):
     wrong = relationship("style", "https://example.test/not-styles", "styles.xml")
     assert error(package(tmp_path / "wrong-type.xlsx", styles_relationship=wrong)) == ("wrong-styles-relationship-type", "xl/workbook.xml", "Type", "https://example.test/not-styles")
+    unrelated = relationship("other", "https://example.test/not-styles", "mystyles.xml")
+    assert error(package(tmp_path / "unrelated-type.xlsx", styles_relationship=unrelated, extra_members=(("xl/mystyles.xml", b"<x/>"),))) == ("missing-styles-relationship", "xl/workbook.xml", "Type", STYLES_REL)
     exact_override = f'<Override PartName="/xl/styles.xml" ContentType="{STYLES_CT}"/>'
     assert error(package(tmp_path / "member-alias.xlsx", style_name="xl/%73tyles.xml", style_override=exact_override)) == ("noncanonical-styles-member", "xl/styles.xml", "member", "xl/%73tyles.xml")
     override = f'<Override PartName="/xl/%73tyles.xml" ContentType="{STYLES_CT}"/>'
@@ -94,3 +97,48 @@ class _OneShot:
     def __fspath__(self): self.calls+=1; return self.path if self.calls==1 else (_ for _ in ()).throw(TypeError())
 def test_coerces_path_once(tmp_path):
     path=_OneShot(str(package(tmp_path/"one.xlsx"))); assert read_workbook_style_semantics(path).style_part.value=="xl/styles.xml"; assert path.calls==1
+
+def test_typed_scalars_defaults_and_public_records(tmp_path):
+    body = ('<fonts count="2"><font/><font><sz val="11.5"/><color auto="1" tint="-1"/><u/><condense val="0"/><extend/></font></fonts>'
+            '<fills count="1"><fill><gradientFill><stop position="1"><color indexed="2"/></stop></gradientFill></fill></fills>'
+            '<borders count="1"><border diagonalUp="1" diagonalDown="0" outline="1"><left style="thin"><color rgb="FF000001"/></left><right style="double"/><top/><bottom/><diagonal/><vertical/><horizontal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+            '<cellXfs count="2"><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"><alignment horizontal="left" vertical="top" textRotation="180" wrapText="1" shrinkToFit="0" indent="250" relativeIndent="-15" justifyLastLine="1" readingOrder="2"/><protection locked="1" hidden="0"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/></cellXfs>')
+    result = read_workbook_style_semantics(package(tmp_path / "typed.xlsx", style_xml=styles(body)))
+    empty, font = result.style_table.fonts
+    assert empty.size is None and empty.underline is None and empty.condense is False and empty.extend is False
+    assert font.size == 11.5 and font.color and font.color.auto is True and font.color.tint == -1.0
+    assert font.underline == "single" and font.condense is False and font.extend is True
+    assert result.style_table.fills[0].stops[0][0] == 1.0
+    alignment = result.style_table.cell_xfs[0].alignment
+    protection = result.style_table.cell_xfs[0].protection
+    border = result.style_table.borders[0]
+    assert alignment and (alignment.horizontal, alignment.vertical, alignment.text_rotation, alignment.wrap_text, alignment.shrink_to_fit, alignment.indent, alignment.relative_indent, alignment.justify_last_line, alignment.reading_order) == ("left", "top", 180, True, False, 250, -15, True, 2)
+    assert protection and (protection.locked, protection.hidden) == (True, False)
+    assert (border.left.style, border.left.color.rgb if border.left.color else None, border.right.style, border.top.style, border.bottom.style, border.diagonal.style, border.diagonal_up, border.diagonal_down, border.outline) == ("thin", "FF000001", "double", None, None, None, True, False, True)
+    assert border.vertical and border.horizontal and border.vertical.style is None and border.horizontal.style is None
+    for record in (result, result.style_table, font, result.style_table.fills[0], border, result.style_table.cell_xfs[0], alignment, protection, result.worksheets[0].cells[0]):
+        assert all(hasattr(record, field.name) for field in fields(record))
+
+@pytest.mark.parametrize(("fragment", "expected"), [
+    ('<fonts count="1"><font><sz val="0"/></font></fonts>', ("invalid-styles-content", "xl/styles.xml", "sz", "0")),
+    ('<fonts count="1"><font><sz val="nan"/></font></fonts>', ("invalid-styles-content", "xl/styles.xml", "sz", "nan")),
+    ('<fonts count="1"><font><condense val="maybe"/></font></fonts>', ("invalid-styles-content", "xl/styles.xml", "condense", "maybe")),
+    ('<fills count="1"><fill><patternFill><fgColor tint="1.1"/></patternFill></fill></fills>', ("invalid-styles-content", "xl/styles.xml", "tint", "1.1")),
+    ('<fills count="1"><fill><gradientFill><stop position="nan"><color rgb="FF000000"/></stop></gradientFill></fill></fills>', ("invalid-styles-content", "xl/styles.xml", "position", "nan")),
+    ('<fills count="1"><fill><gradientFill><stop position="-0.1"><color rgb="FF000000"/></stop></gradientFill></fill></fills>', ("invalid-styles-content", "xl/styles.xml", "position", "-0.1")),
+])
+def test_scalar_semantic_failures(tmp_path, fragment, expected):
+    assert error(package(tmp_path / "scalar.xlsx", style_xml=styles(fragment))) == expected
+
+@pytest.mark.parametrize("rotation", ["-1", "181", "254"])
+def test_text_rotation_rejects_outside_ooxml_domain(tmp_path, rotation):
+    base = '<fonts count="1"><font/></fonts><fills count="1"><fill><patternFill/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+    xml = styles(base + f'<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"><alignment textRotation="{rotation}"/></xf></cellXfs>')
+    assert error(package(tmp_path / f"rotation-{rotation}.xlsx", style_xml=xml)) == ("invalid-styles-content", "xl/styles.xml", "textRotation", rotation)
+
+def test_accepted_worksheet_member_alias_and_large_projection(tmp_path):
+    rows = ''.join(f'<row r="{row}"><c r="A{row}" s="0"><v>{row}</v></c></row>' for row in range(1, 501))
+    first = b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' + rows.encode() + b'</sheetData></worksheet>'
+    result = read_workbook_style_semantics(package(tmp_path / "alias.xlsx", sheet_one=first, sheet_one_name="xl/worksheets/%66irst.xml"))
+    assert len(result.worksheets[0].cells) == 500
+    assert result.worksheets[0].cells[-1].coordinate == "A500"

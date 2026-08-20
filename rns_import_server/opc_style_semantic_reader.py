@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import re
 from typing import Final
@@ -40,17 +41,17 @@ _VERTICAL: Final = frozenset({"top", "center", "bottom", "justify", "distributed
 
 @dataclass(frozen=True)
 class StyleColor:
-    rgb: str | None; indexed: int | None; theme: int | None; tint: str | None; auto: bool | None
+    rgb: str | None; indexed: int | None; theme: int | None; tint: float | None; auto: bool | None
 
 @dataclass(frozen=True)
 class FontStyle:
-    name: str | None; size: str | None; family: int | None; charset: int | None; scheme: str | None; color: StyleColor | None
-    bold: bool; italic: bool; underline: str | None; strike: bool; outline: bool; shadow: bool; condense: str | None; extend: str | None; vert_align: str | None
+    name: str | None; size: float | None; family: int | None; charset: int | None; scheme: str | None; color: StyleColor | None
+    bold: bool; italic: bool; underline: str | None; strike: bool; outline: bool; shadow: bool; condense: bool; extend: bool; vert_align: str | None
 
 @dataclass(frozen=True)
 class FillStyle:
     kind: str; pattern_type: str | None; foreground: StyleColor | None; background: StyleColor | None
-    gradient_type: str | None; degree: str | None; left: str | None; right: str | None; top: str | None; bottom: str | None; stops: tuple[tuple[str, StyleColor], ...]
+    gradient_type: str | None; degree: str | None; left: str | None; right: str | None; top: str | None; bottom: str | None; stops: tuple[tuple[float, StyleColor], ...]
 
 @dataclass(frozen=True)
 class BorderSide:
@@ -128,13 +129,19 @@ def _int(value: str, subject: str, field: str) -> int:
     if not -2_147_483_648 <= number <= 2_147_483_647: _fail("invalid-styles-content", subject, field, value)
     return number
 
+def _finite_float(value: str, subject: str, field: str) -> float:
+    try: number = float(value)
+    except ValueError: _fail("invalid-styles-content", subject, field, value)
+    if not math.isfinite(number): _fail("invalid-styles-content", subject, field, value)
+    return number
+
 def _nonwhite(value: str | None) -> bool: return bool(value and not value.isspace())
 def _mixed(element: ET.Element, part: str, field: str) -> None:
     if _nonwhite(element.text): _fail("invalid-styles-content", part, field, "text")
     for child in element:
         if _nonwhite(child.tail): _fail("invalid-styles-content", part, field, "tail")
 
-def _read_member(path: str, part: CanonicalPartURI) -> bytes:
+def _read_member(path: str, part: CanonicalPartURI, *, raw_exact: bool) -> bytes:
     try:
         with ZipFile(path) as zf:
             matches = []
@@ -142,7 +149,7 @@ def _read_member(path: str, part: CanonicalPartURI) -> bytes:
                 try: canonical = canonicalize_part_uri(info.filename)
                 except OPCPartURIError: _fail("unreadable-styles-part", part.value, "member", "invalid-member-name")
                 if canonical == part:
-                    if info.filename != part.value:
+                    if raw_exact and info.filename != part.value:
                         _fail("noncanonical-styles-member", part.value, "member", info.filename)
                     matches.append(info)
             if not matches: _fail("missing-styles-member", part.value, "member", part.value)
@@ -174,13 +181,12 @@ def _color(element: ET.Element, part: str) -> StyleColor:
     indexed = _uint(element.attrib["indexed"], part, "indexed") if "indexed" in element.attrib else None
     theme = _uint(element.attrib["theme"], part, "theme") if "theme" in element.attrib else None
     auto = _bool(element.attrib["auto"], part, "auto") if "auto" in element.attrib else None
-    if "tint" in element.attrib:
-        try: float(element.attrib["tint"])
-        except ValueError: _fail("invalid-styles-content", part, "tint", element.attrib["tint"])
+    tint = _finite_float(element.attrib["tint"], part, "tint") if "tint" in element.attrib else None
+    if tint is not None and not -1 <= tint <= 1: _fail("invalid-styles-content", part, "tint", element.attrib["tint"])
     if "rgb" in element.attrib and _ARGB.fullmatch(element.attrib["rgb"]) is None:
         _fail("invalid-styles-content", part, "rgb", element.attrib["rgb"])
     if len(element) or _nonwhite(element.text): _fail("invalid-styles-content", part, "color", "nested")
-    return StyleColor(element.attrib.get("rgb"), indexed, theme, element.attrib.get("tint"), auto)
+    return StyleColor(element.attrib.get("rgb"), indexed, theme, tint, auto)
 
 def _single_color(parent: ET.Element, tag: str, part: str) -> StyleColor | None:
     items = [child for child in parent if child.tag == f"{{{_SML}}}{tag}"]
@@ -207,10 +213,13 @@ def _font(element: ET.Element, part: str) -> FontStyle:
         return True if raw is None and name in values else (_bool(raw, part, name) if raw is not None else False)
     for name in ("family", "charset"):
         if val(name) is not None: _uint(val(name), part, name)
-    if val("u") is not None and val("u") not in _UNDERLINE: _fail("invalid-styles-content", part, "u", val("u"))
+    underline = "single" if "u" in values and val("u") is None else val("u")
+    if underline is not None and underline not in _UNDERLINE: _fail("invalid-styles-content", part, "u", underline)
     if val("vertAlign") is not None and val("vertAlign") not in _VERT_ALIGN: _fail("invalid-styles-content", part, "vertAlign", val("vertAlign"))
     if val("scheme") is not None and val("scheme") not in _SCHEME: _fail("invalid-styles-content", part, "scheme", val("scheme"))
-    return FontStyle(val("name"), val("sz"), _uint(val("family"), part, "family") if val("family") is not None else None, _uint(val("charset"), part, "charset") if val("charset") is not None else None, val("scheme"), _color(values["color"], part) if "color" in values else None, flag("b"), flag("i"), val("u"), flag("strike"), flag("outline"), flag("shadow"), val("condense"), val("extend"), val("vertAlign"))
+    size = _finite_float(val("sz"), part, "sz") if val("sz") is not None else None
+    if size is not None and not 1 <= size <= 409.5: _fail("invalid-styles-content", part, "sz", val("sz"))
+    return FontStyle(val("name"), size, _uint(val("family"), part, "family") if val("family") is not None else None, _uint(val("charset"), part, "charset") if val("charset") is not None else None, val("scheme"), _color(values["color"], part) if "color" in values else None, flag("b"), flag("i"), underline, flag("strike"), flag("outline"), flag("shadow"), flag("condense"), flag("extend"), val("vertAlign"))
 
 def _fill(element: ET.Element, part: str) -> FillStyle:
     if element.attrib: _fail("unknown-styles-attribute", part, "attribute", sorted(element.attrib)[0])
@@ -232,9 +241,9 @@ def _fill(element: ET.Element, part: str) -> FillStyle:
         for stop in child:
             if stop.tag != f"{{{_SML}}}stop" or set(stop.attrib) != {"position"} or len(stop) != 1: _fail("invalid-styles-content", part, "gradientFill", "stop")
             _mixed(stop, part, "stop")
-            try: float(stop.attrib["position"])
-            except ValueError: _fail("invalid-styles-content", part, "position", stop.attrib["position"])
-            stops.append((stop.attrib["position"], _color(stop[0], part)))
+            position = _finite_float(stop.attrib["position"], part, "position")
+            if not 0 <= position <= 1: _fail("invalid-styles-content", part, "position", stop.attrib["position"])
+            stops.append((position, _color(stop[0], part)))
         return FillStyle("gradient", None, None, None, child.attrib.get("type"), child.attrib.get("degree"), child.attrib.get("left"), child.attrib.get("right"), child.attrib.get("top"), child.attrib.get("bottom"), tuple(stops))
     _fail("invalid-styles-content", part, "fill", str(child.tag))
 
@@ -264,7 +273,7 @@ def _alignment(element: ET.Element, part: str) -> CellAlignment:
     if a.get("horizontal") not in {None, *_HORIZONTAL}: _fail("invalid-styles-content", part, "horizontal", a["horizontal"])
     if a.get("vertical") not in {None, *_VERTICAL}: _fail("invalid-styles-content", part, "vertical", a["vertical"])
     rotation = _int(a["textRotation"], part, "textRotation") if "textRotation" in a else None
-    if rotation is not None and rotation not in {*range(-90, 181), 255}: _fail("invalid-styles-content", part, "textRotation", a["textRotation"])
+    if rotation is not None and rotation not in {*range(181), 255}: _fail("invalid-styles-content", part, "textRotation", a["textRotation"])
     indent = _uint(a["indent"], part, "indent") if "indent" in a else None
     if indent is not None and indent > 250: _fail("invalid-styles-content", part, "indent", a["indent"])
     relative = _int(a["relativeIndent"], part, "relativeIndent") if "relativeIndent" in a else None
@@ -335,7 +344,8 @@ def _styles_relationship(topology: WorkbookTopology, path: str) -> CanonicalPart
     except OPCPackageGraphError as error: _fail(error.code, error.subject, error.field, error.detail)
     rels = [item for item in graph.relationships if item.source == topology.workbook_part and item.type_uri == _STYLES_REL]
     if not rels:
-        wrong = [item for item in graph.relationships if item.source == topology.workbook_part and item.target.endswith("styles.xml")]
+        candidate = canonicalize_part_uri("xl/styles.xml")
+        wrong = [item for item in graph.relationships if item.source == topology.workbook_part and item.resolved_target == candidate]
         if wrong: _fail("wrong-styles-relationship-type", topology.workbook_part.value, "Type", wrong[0].type_uri)
         _fail("missing-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
     if len(rels) != 1: _fail("ambiguous-styles-relationship", topology.workbook_part.value, "Type", _STYLES_REL)
@@ -378,9 +388,20 @@ def _usage(cells: WorkbookCellSemantics, table: StyleTable) -> tuple[WorksheetSt
 
 def _explicit_usage(path: str, cells: WorkbookCellSemantics, table: StyleTable) -> tuple[WorksheetStyleUsage, ...]:
     # Package graph already validates unique canonical members; collect only c@s in dependency worksheet order.
+    requested = {sheet.worksheet.worksheet_part for sheet in cells.worksheets}
+    try:
+        with ZipFile(path) as archive:
+            members = {}
+            for info in archive.infolist():
+                try: canonical = canonicalize_part_uri(info.filename)
+                except OPCPartURIError: _fail("unreadable-styles-part", "workbook", "member", "invalid-member-name")
+                if canonical in requested: members[canonical] = archive.read(info)
+    except OPCStyleSemanticReaderError: raise
+    except (BadZipFile, LargeZipFile, KeyError, OSError, RuntimeError, ValueError) as error: _fail("unreadable-styles-part", "workbook", "member", type(error).__name__)
+    if set(members) != requested: _fail("missing-worksheet-member", "workbook", "member", "projection")
     result=[]
     for sheet in cells.worksheets:
-        payload = _read_member(path, sheet.worksheet.worksheet_part)
+        payload = members[sheet.worksheet.worksheet_part]
         root = _xml_worksheet(payload, sheet.worksheet.worksheet_part)
         records=[]; direct_cells=[]
         sheet_data = [child for child in root if child.tag == f"{{{_SML}}}sheetData"]
@@ -390,17 +411,19 @@ def _explicit_usage(path: str, cells: WorkbookCellSemantics, table: StyleTable) 
             for cell in row:
                 if cell.tag != f"{{{_SML}}}c": _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "row", "child")
                 direct_cells.append(cell)
+        direct_ids = {id(cell) for cell in direct_cells}
         for cell in root.iter(f"{{{_SML}}}c"):
-            if cell not in direct_cells: _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "cell", "nested")
+            if id(cell) not in direct_ids: _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "cell", "nested")
         if tuple(cell.attrib.get("r", "") for cell in direct_cells) != tuple(item.coordinate for item in sheet.cells):
             _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "cell", "projection-mismatch")
+        projection = {item.coordinate: item for item in sheet.cells}
         for cell in direct_cells:
             if "s" in cell.attrib:
                 index = _uint(cell.attrib["s"], sheet.worksheet.worksheet_part.value, "s")
                 if index >= len(table.cell_xfs): _fail("invalid-cell-style-reference", sheet.worksheet.worksheet_part.value, "s", cell.attrib["s"])
                 coord = cell.attrib.get("r", "")
                 # Cell syntax/order/A1 contract was accepted by the cell reader called first; map its immutable cell projection.
-                found = next((item for item in sheet.cells if item.coordinate == coord), None)
+                found = projection.get(coord)
                 if found is None: _fail("invalid-styles-content", sheet.worksheet.worksheet_part.value, "s", "unmapped-cell")
                 records.append(CellStyleUse(found.coordinate, found.row, found.column, index))
         result.append(WorksheetStyleUsage(sheet.worksheet.name, sheet.worksheet.worksheet_part, tuple(records)))
@@ -418,5 +441,5 @@ def read_workbook_style_semantics(package_path: os.PathLike[str] | str) -> Workb
     cells = read_worksheet_cell_semantics(path)
     part = _styles_relationship(topology, path)
     _content_type(path, part)
-    table = _table(_xml(_read_member(path, part), part), part)
+    table = _table(_xml(_read_member(path, part, raw_exact=True), part), part)
     return WorkbookStyleSemantics(part, table, _explicit_usage(path, cells, table))
