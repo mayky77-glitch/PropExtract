@@ -1,6 +1,6 @@
 ---
 type: task
-status: planned
+status: completed
 work_id: cgr-opc-v6-worksheet-x14-cf-owner-tag-matrix-v2
 tags: [task/test, feature/x14-cf-owner-topology, status/planned]
 last_verified: 2026-08-21
@@ -21,6 +21,8 @@ Owned paths are only this card and new `tests/test_opc_worksheet_x14_cf_owner_to
 - accepted A test `38195a0e15b86d235d5bffc55e8292e58b6c953f`.
 
 Any new runtime discrepancy stops this Gate without changing production or weakening an expected tuple. No fallback, skip, xfail, alternate code, observational-only assertion, empty success, partial projection, or semantic expansion is allowed.
+
+For an X14 `conditionalFormattings` node directly inside an SML `ext` with an unknown non-CF/non-DV URI, the accepted first-fault tuple is the extension-boundary precedence `(unsupported-x14-cf-extension-uri, worksheet-part, uri, uri-value)`; every other wrong-parent case asserts the target tag tuple. Direct plural depth means SML `ext` → X14 `conditionalFormattings` → target, with no inserted `conditionalFormatting` or plural wrapper.
 
 ## Complete exact matrix
 
@@ -47,3 +49,7 @@ Add complete immutable exact projection for two worksheets with synthetic row-li
 `git diff --check`
 
 Verify the four frozen hashes, exact two-path scope, base ancestry, human identity, clean worktree, and exact remote tip. Independent P6 must adversarially inspect direct tree construction and anti-shallow coverage. This Gate makes no envelope/rule/formula/sqref/dxf interpretation, insertion/publication, UI, CrossOver, or native Excel claim.
+
+## Validation evidence
+
+2026-08-21 recovery on commit `3c932993`: direct v2 gate passed `58`; frozen focused set passed `519`; full suite passed `1271` with one pre-existing openpyxl unknown-extension warning. Compilation and whitespace-diff validation passed. Frozen reader, fixture, focused runtime, and A hashes were reverified before commit. Recovery P6 additionally freezes exact-DV nested CF rejection before/after legal XM values, isolated XM `f`/`sqref` wrong-URI carve rejection, and the complete `6, 10, 104` two-container projection.
