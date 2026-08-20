@@ -29,3 +29,11 @@ No production imports. Direct ZIP/XML fixtures enumerate valid and one-field-inv
 - Passed `python3 -m pytest -q tests/test_opc_package_v6_corpus.py`: `27 passed in 0.03s`.
 - Passed `python3 -m pytest -q`: `313 passed, 1 warning in 8.41s`; existing OpenPyXL warning: unknown extension is not supported and will be removed.
 - Passed `git diff --check`.
+
+## P4 oracle remediation evidence
+
+- Findings are derived only by reopening ZIP/XML bytes: no case-name branches and no default-filled required attributes. The oracle validates exact member manifests, exact content-types entries, relationship-source membership, and every resolved internal target.
+- Added meta-tests proving an omitted referenced part, omitted `Target` attribute, and renamed/missing relationship source each produce the exact failure tuple.
+- ZIP creation fixes timestamp, platform, attributes, compression and member order; two independent writes have identical SHA-256.
+- Committed `content-types.xml` and `valid-workbook.rels.xml` are the bytes used by the valid direct package input and are parsed again by the test.
+- P4 rerun: `python3 -m pytest -q tests/test_opc_package_v6_corpus.py` → `29 passed in 0.04s`; `python3 -m pytest -q` → `315 passed, 1 warning in 8.13s`; `git diff --check` passed.
