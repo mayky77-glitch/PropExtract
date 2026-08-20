@@ -149,12 +149,18 @@ function New-WindowsExcelFakeCom {
     [pscustomobject]@{ Application = (New-WindowsExcelFakeComProxy -State $state -Kind 'Application'); State = $state }
 }
 
+function Write-WindowsExcelFakeComUnexpectedException {
+    param([Parameter(Mandatory)]$Exception, [string]$ScriptStackTrace = '')
+    if ($Exception.Data.Contains('stage')) { return }
+    try {
+        Write-Warning ("fake_com_unexpected_exception type={0}; message={1}; stack={2}" -f $Exception.GetType().FullName, $Exception.Message, $ScriptStackTrace) -WarningAction Continue
+    } catch {}
+}
+
 function Get-WindowsExcelFakeComErrorEnvelope {
     param($Exception, [string]$ScriptStackTrace = '')
     if ($null -eq $Exception) { return $null }
-    if (-not $Exception.Data.Contains('stage')) {
-        Write-Warning ("fake_com_unexpected_exception type={0}; message={1}; stack={2}" -f $Exception.GetType().FullName, $Exception.Message, $ScriptStackTrace)
-    }
+    Write-WindowsExcelFakeComUnexpectedException -Exception $Exception -ScriptStackTrace $ScriptStackTrace
     [pscustomobject]@{
         message = $Exception.Message
         stage = [string]$Exception.Data['stage']
