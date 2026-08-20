@@ -20,7 +20,11 @@ _ALLOWED_ATTRIBUTES: Final = _REQUIRED_ATTRIBUTES | {"TargetMode"}
 _TARGET_MODES: Final = frozenset({"Internal", "External"})
 _URI_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _PERCENT_ESCAPE: Final = re.compile(r"%[0-9A-Fa-f]{2}")
-_IPV_FUTURE: Final = re.compile(r"v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+")
+_IPV_FUTURE: Final = re.compile(r"v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+", re.IGNORECASE)
+_IPV4_ADDRESS: Final = re.compile(
+    r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+    r"(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}"
+)
 _UNRESERVED: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _SUB_DELIMS: Final = frozenset("!$&'()*+,;=")
 
@@ -130,10 +134,12 @@ def _is_valid_authority(value: str) -> bool:
         remainder = host_port[closing + 1 :]
         if not host or (remainder and not remainder.startswith(":")):
             return False
-        if host.startswith("v"):
+        if host.lower().startswith("v"):
             if _IPV_FUTURE.fullmatch(host) is None:
                 return False
         else:
+            if "%" in host:
+                return False
             try:
                 ipaddress.IPv6Address(host)
             except ValueError:
@@ -145,15 +151,10 @@ def _is_valid_authority(value: str) -> bool:
         if host_port.count(":") > 1:
             return False
         host, separator, port = host_port.partition(":")
-        if host and all(character.isascii() and (character.isdigit() or character == ".") for character in host):
-            try:
-                ipaddress.IPv4Address(host)
-            except ValueError:
-                return False
-        elif not _has_valid_percent_escapes(host) or any(
+        if _IPV4_ADDRESS.fullmatch(host) is None and (not _has_valid_percent_escapes(host) or any(
             character not in _UNRESERVED and character not in _SUB_DELIMS and character != "%"
             for character in host
-        ):
+        )):
             return False
         if not separator:
             port = ""
@@ -197,11 +198,6 @@ def _is_absolute_uri_without_fragment(value: str) -> bool:
     return parsed is not None and parsed[0] is not None and parsed[3] is None
 
 
-def _is_absolute_uri(value: str) -> bool:
-    parsed = _split_uri_reference(value)
-    return parsed is not None and parsed[0] is not None
-
-
 def _is_relative_uri_reference(value: str) -> bool:
     parsed = _split_uri_reference(value)
     return parsed is not None and parsed[0] is None and not parsed[1].startswith("/")
@@ -224,9 +220,23 @@ def _has_non_whitespace_text(element: ET.Element) -> bool:
 
 
 def _contains_doctype(payload: bytes | str) -> bool:
-    if isinstance(payload, str):
-        return "<!DOCTYPE" in payload
-    return b"<!DOCTYPE" in payload.replace(b"\x00", b"")
+    source = payload if isinstance(payload, str) else payload.replace(b"\x00", b"").decode("latin1")
+    position = 0
+    while position < len(source):
+        if source.startswith("<!--", position):
+            end = source.find("-->", position + 4)
+            position = len(source) if end < 0 else end + 3
+        elif source.startswith("<?", position):
+            end = source.find("?>", position + 2)
+            position = len(source) if end < 0 else end + 2
+        elif source.startswith("<![CDATA[", position):
+            end = source.find("]]>", position + 9)
+            position = len(source) if end < 0 else end + 3
+        elif source.startswith("<!DOCTYPE", position):
+            return True
+        else:
+            position += 1
+    return False
 
 
 def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationship, ...]:
@@ -279,8 +289,6 @@ def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationshi
             _fail("invalid-relationship-target", part, target)
         if target_mode == "Internal" and not _is_relative_uri_reference(target):
             _fail("internal-target-not-relative", part, target)
-        if target_mode == "External" and not _is_absolute_uri(target):
-            _fail("external-target-not-absolute", part, target)
         seen_ids.add(relationship_id)
         records.append(Relationship(relationship_id, type_uri, target, target_mode))
     return tuple(records)

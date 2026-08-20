@@ -110,10 +110,24 @@ def test_target_mode_uri_semantics_are_exact_and_mode_aware():
     assert _error_tuple(_document(_relationship(Target="/workbook.xml", TargetMode="Internal"))) == (
         "internal-target-not-relative", PART, "/workbook.xml"
     )
-    assert _error_tuple(_document(_relationship(Target="workbook.xml", TargetMode="External"))) == (
-        "external-target-not-absolute", PART, "workbook.xml"
-    )
-    assert parse_relationship_xml(PART, _document(_relationship(Target="urn:example:workbook#sheet", TargetMode="External")))[0].target_mode == "External"
+    for target in ("../x", "/x", "//host/x", "urn:example:workbook#sheet"):
+        assert parse_relationship_xml(PART, _document(_relationship(Target=target, TargetMode="External")))[0].target == target
+
+
+@pytest.mark.parametrize(
+    ("type_uri", "valid"),
+    [
+        ("http://999.999.999.999/type", True),
+        ("http://[V1.a]/type", True),
+        ("http://[fe80::1%25eth0]/type", False),
+        ("http://[v1.]/type", False),
+    ],
+)
+def test_type_uri_host_reviewer_boundaries(type_uri: str, valid: bool):
+    if valid:
+        assert parse_relationship_xml(PART, _document(_relationship(Type=type_uri)))[0].type_uri == type_uri
+    else:
+        assert _error_tuple(_document(_relationship(Type=type_uri))) == ("invalid-relationship-type", PART, type_uri)
 
 
 @pytest.mark.parametrize("name", ["Id", "Type", "Target"])
@@ -164,3 +178,14 @@ def test_rejects_plain_and_entity_doctypes_before_parsing(payload: str):
 
 def test_rejects_non_whitespace_child_tail():
     assert _error_tuple(_document(_relationship() + "tail")) == ("invalid-relationships-content", PART, "tail")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '<!-- <!DOCTYPE Relationships> --><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+        '<?note <!DOCTYPE Relationships>?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+    ],
+)
+def test_comment_and_processing_instruction_doctype_text_is_not_a_doctype(payload: str):
+    assert parse_relationship_xml(PART, payload) == ()
