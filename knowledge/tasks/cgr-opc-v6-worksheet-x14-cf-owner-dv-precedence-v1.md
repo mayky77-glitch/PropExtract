@@ -9,7 +9,7 @@ updated: 2026-08-20
 
 # X14 CF owner topology — DV extension precedence remediation
 
-Exact accepted runtime base is `e40bdefab96a453d316b073c24d4ef723214faf6`. Rejected envelope/X1/corpus branches and the suspended tag-matrix branch are evidence only and must not enter ancestry. Exclusive scope is exactly this card, `rns_import_server/opc_worksheet_x14_cf_owner_topology.py`, and `tests/test_opc_worksheet_x14_cf_owner_topology.py`. Fixture and all other tests/cards are frozen. No history rewrite; human-attributed non-force commit/push only.
+Exact accepted runtime base is `e40bdefab96a453d316b073c24d4ef723214faf6`. Rejected envelope/X1/corpus branches and the suspended tag-matrix branch are evidence only and must not enter ancestry. The accepted dependency's historical feature ancestry includes X1 commits; this exclusion prohibits no additional merge, cherry-pick, or reuse of rejected branch tips beyond that exact accepted dependency. Exclusive scope is exactly this card, `rns_import_server/opc_worksheet_x14_cf_owner_topology.py`, and `tests/test_opc_worksheet_x14_cf_owner_topology.py`. Fixture and all other tests/cards are frozen. No history rewrite; human-attributed non-force commit/push only.
 
 ## Single runtime contract
 
@@ -39,6 +39,8 @@ Acceptance commands:
 
 Implemented 2026-08-21. The traversal now distinguishes the direct legal `x14:dataValidations` container and its direct `x14:dataValidation` member from arbitrary nested descendants. Only direct `xm:f` and `xm:sqref` value positions are carved; every other CF-owned unique tag remains validated at its entry event. Focused regressions cover adjacent CF/DV extensions, direct and nested illegal CF-owned tags, URI/parent precedence for nonexact DV URIs, before/after document order, and second-sheet atomic failure.
 
-Validation completed before commit: focused topology suite (59 passed), specified related suite (442 passed), full suite (1194 passed; one existing OpenPyXL unknown-extension warning), compileall, and `git diff --check`.
+Validation completed before commit: focused topology suite (61 passed), specified related suite (444 passed), full suite (1196 passed; one existing OpenPyXL unknown-extension warning), compileall, and `git diff --check`.
+
+P6 remediation: direct plural `x14:conditionalFormattings` siblings before and after legal direct `x14:dataValidations` now reach their existing parent validator under the exact DV URI, rather than being preempted by unsupported-URI registration. Both cases assert `invalid-x14-cf-parent` at the plural Clark tag.
 
 Independent P6 review must reproduce the exact DV-sibling precedence and confirm all old APIs/errors/frozen blobs. This Gate makes no X14 envelope, formula, sqref, dxf, insertion, publication, UI, CrossOver, or native Excel claim.

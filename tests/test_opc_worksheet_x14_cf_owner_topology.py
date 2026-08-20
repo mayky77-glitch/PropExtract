@@ -166,6 +166,16 @@ def test_cf_owned_siblings_before_and_after_legal_dv_values_preserve_document_pr
     )
 
 
+@pytest.mark.parametrize("body", [
+    f'<extLst><ext uri="{DV_URI}"><x14:conditionalFormattings/><x14:dataValidations/></ext></extLst>',
+    f'<extLst><ext uri="{DV_URI}"><x14:dataValidations/><x14:conditionalFormattings/></ext></extLst>',
+])
+def test_direct_plural_cf_sibling_of_legal_dv_reports_its_parent_in_both_orders(tmp_path, body):
+    assert error(package(tmp_path / "dv-plural-sibling.xlsx", sheet_one=worksheet(body))) == (
+        "invalid-x14-cf-parent", "xl/worksheets/first.xml", "tag", f"{{{X14}}}conditionalFormattings",
+    )
+
+
 def test_invalid_second_worksheet_is_atomic_and_reports_its_own_part(tmp_path):
     valid = worksheet(ext('<x14:conditionalFormatting/>'))
     invalid = worksheet(f'<extLst><ext uri="{DV_URI}"><x14:dataValidations><x14:dataValidation><outer><xm:f>bad</xm:f></outer></x14:dataValidation></x14:dataValidations></ext></extLst>')

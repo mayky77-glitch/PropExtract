@@ -121,7 +121,7 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
         elif parent_form and tag not in {_RULE,_SQREF}:add(2,"unknown-x14-cf-child","tag",str(tag))
         elif parent_rule and tag not in {_F,_DXF}:add(2,"unknown-x14-cf-child","tag",str(tag))
         if direct_extlst and node.attrib:add(2,"unknown-x14-cf-attribute","attribute",sorted(node.attrib)[0])
-        if direct_ext and any(child.tag==_FORMS for child in node) and not cf_ext:
+        if direct_ext and any(child.tag==_FORMS for child in node) and not (cf_ext or dv_ext):
             add(1,"unsupported-x14-cf-extension-uri","uri",node.attrib.get("uri", ""))
         if cf_ext:
             cf_count+=1
