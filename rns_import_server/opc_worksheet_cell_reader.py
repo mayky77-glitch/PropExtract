@@ -32,6 +32,7 @@ _A1: Final = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
 _INDEX: Final = re.compile(r"[0-9]+\Z")
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
+_MAX_UNSIGNED: Final = 4_294_967_295
 _CELL_TYPES: Final = frozenset({"", "b", "d", "e", "inlineStr", "s", "str"})
 
 
@@ -125,13 +126,38 @@ def _a1(value: str, subject: str, field: str, *, range_allowed: bool = False) ->
         column = 0
         for char in match.group(1).upper():
             column = column * 26 + ord(char) - ord("A") + 1
-        row = int(match.group(2))
+        row_text = match.group(2)
+        if len(row_text) > 7:
+            _fail("invalid-a1-reference", subject, field, value)
+        row = int(row_text)
         if column > _MAX_COLUMN or row > _MAX_ROW:
             _fail("invalid-a1-reference", subject, field, value)
         parsed.append((row, column))
     if len(parsed) == 2 and parsed[0] > parsed[1]:
         _fail("invalid-a1-reference", subject, field, value)
     return parsed[0]
+
+
+def _unsigned(value: str | None, subject: str, field: str, code: str) -> int:
+    lexical = value or ""
+    if _INDEX.fullmatch(lexical) is None or len(lexical) > 10:
+        _fail(code, subject, field, lexical)
+    numeric = int(lexical)
+    if numeric > _MAX_UNSIGNED:
+        _fail(code, subject, field, lexical)
+    return numeric
+
+
+def _non_whitespace(value: str | None) -> bool:
+    return bool(value and not value.isspace())
+
+
+def _no_mixed(element: ET.Element, part: CanonicalPartURI, field: str) -> None:
+    if _non_whitespace(element.text):
+        _fail("invalid-worksheet-content", part.value, field, "text")
+    for child in element:
+        if _non_whitespace(child.tail):
+            _fail("invalid-worksheet-content", part.value, field, "tail")
 
 
 def _parse_xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
@@ -149,6 +175,10 @@ def _parse_xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
         _fail("malformed-worksheet-xml", part.value, "xml", "xml")
     if root.tag != _WORKSHEET:
         _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
+    _no_mixed(root, part, "worksheet")
+    owned = [child.tag for child in root if child.tag in {_SHEET_DATA, _HYPERLINKS}]
+    if owned != sorted(owned, key=lambda tag: 0 if tag == _SHEET_DATA else 1):
+        _fail("invalid-worksheet-child-order", part.value, "tag", str(owned))
     return root
 
 
@@ -174,7 +204,8 @@ def _read_part(path: str, part: CanonicalPartURI) -> bytes:
 
 
 def _only_text(element: ET.Element, part: CanonicalPartURI, field: str) -> str:
-    if element.attrib or len(element) or (element.text is None):
+    space = "{http://www.w3.org/XML/1998/namespace}space"
+    if set(element.attrib) - {space} or element.attrib.get(space, "preserve") != "preserve" or len(element) or (element.text is None):
         _fail("invalid-inline-string", part.value, field, "structure")
     return element.text
 
@@ -188,18 +219,20 @@ def _formula(element: ET.Element, part: CanonicalPartURI) -> CellFormula:
     shared = element.attrib.get("si")
     reference = element.attrib.get("ref")
     if kind == "shared":
-        if shared is None or _INDEX.fullmatch(shared) is None:
-            _fail("invalid-shared-formula-index", part.value, "si", shared or "")
+        if shared is None:
+            _fail("invalid-shared-formula-index", part.value, "si", "")
     elif shared is not None:
         _fail("invalid-formula-attribute", part.value, "si", shared)
     if reference is not None:
         _a1(reference, part.value, "ref", range_allowed=True)
-    return CellFormula(element.text or "", kind, int(shared) if shared is not None else None, reference)
+    return CellFormula(element.text or "", kind, _unsigned(shared, part.value, "si", "invalid-shared-formula-index") if shared is not None else None, reference)
 
 
 def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previous: tuple[int, int] | None) -> tuple[WorksheetCell, tuple[int, int]]:
-    if set(element.attrib) - {"r", "t"}:
-        _fail("unknown-cell-attribute", part.value, "attribute", sorted(set(element.attrib) - {"r", "t"})[0])
+    if set(element.attrib) - {"r", "t", "s"}:
+        _fail("unknown-cell-attribute", part.value, "attribute", sorted(set(element.attrib) - {"r", "t", "s"})[0])
+    if "s" in element.attrib:
+        _unsigned(element.attrib["s"], part.value, "s", "invalid-cell-style")
     coordinate = element.attrib.get("r")
     if coordinate is None:
         _fail("missing-cell-coordinate", part.value, "r", "")
@@ -214,9 +247,15 @@ def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previo
         _fail("unsupported-cell-type", part.value, "t", cell_type)
     formula_element: ET.Element | None = None; value_element: ET.Element | None = None; inline_element: ET.Element | None = None
     allowed = {_FORMULA, _VALUE, _INLINE_STRING}
+    order = {_FORMULA: 0, _VALUE: 1, _INLINE_STRING: 1}; prior_order = -1
     for child in element:
         if child.tag not in allowed:
             _fail("invalid-cell-child", part.value, "tag", str(child.tag))
+        if order[child.tag] < prior_order:
+            _fail("invalid-cell-child-order", part.value, "tag", str(child.tag))
+        prior_order = order[child.tag]
+        if _non_whitespace(child.tail):
+            _fail("invalid-cell-content", part.value, "tail", coordinate)
         if child.tag == _FORMULA:
             if formula_element is not None: _fail("duplicate-cell-payload", part.value, "f", "")
             formula_element = child
@@ -227,24 +266,28 @@ def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previo
             if inline_element is not None: _fail("duplicate-cell-payload", part.value, "is", "")
             inline_element = child
     if element.text and not element.text.isspace(): _fail("invalid-cell-content", part.value, "text", coordinate)
+    if formula_element is not None and cell_type in {"inlineStr", "s"}:
+        _fail("invalid-formula-payload", part.value, "t", cell_type)
     if cell_type == "inlineStr":
         if inline_element is None or value_element is not None:
             _fail("invalid-cell-payload", part.value, "t", cell_type)
-    elif value_element is None or inline_element is not None:
+    elif inline_element is not None or (value_element is None and formula_element is None):
         _fail("invalid-cell-payload", part.value, "t", cell_type)
-    if value_element is not None and (value_element.attrib or len(value_element)):
+    if value_element is not None and (value_element.attrib or len(value_element) or _non_whitespace(value_element.tail)):
         _fail("invalid-cell-value", part.value, "v", "structure")
     value = value_element.text if value_element is not None else None
     inline_text = None
     if inline_element is not None:
         if inline_element.attrib or len(inline_element) != 1 or inline_element[0].tag != _TEXT:
             _fail("invalid-inline-string", part.value, "is", "structure")
+        if _non_whitespace(inline_element.text) or _non_whitespace(inline_element[0].tail):
+            _fail("invalid-inline-string", part.value, "is", "mixed-content")
         inline_text = _only_text(inline_element[0], part, "is")
     shared_index = None
     if cell_type == "s":
         if value is None or _INDEX.fullmatch(value) is None:
             _fail("invalid-shared-string-index", part.value, "v", value or "")
-        shared_index = int(value)
+        shared_index = _unsigned(value, part.value, "v", "invalid-shared-string-index")
     formula = _formula(formula_element, part) if formula_element is not None else None
     return WorksheetCell(coordinate, row, column, cell_type, value, inline_text, shared_index, formula), current
 
@@ -253,15 +296,25 @@ def _cells(root: ET.Element, part: CanonicalPartURI) -> tuple[WorksheetCell, ...
     structures = tuple(child for child in root if child.tag == _SHEET_DATA)
     if len(structures) != 1:
         _fail("missing-sheet-data" if not structures else "duplicate-sheet-data", part.value, "sheetData", "")
+    _no_mixed(structures[0], part, "sheetData")
     records: list[WorksheetCell] = []; previous_row = 0; seen: set[str] = set()
     for row_element in structures[0]:
         if row_element.tag != _ROW:
             _fail("invalid-sheet-data-child", part.value, "tag", str(row_element.tag))
-        if set(row_element.attrib) - {"r"}: _fail("unknown-row-attribute", part.value, "attribute", sorted(set(row_element.attrib) - {"r"})[0])
+        if set(row_element.attrib) - {"r", "spans"}: _fail("unknown-row-attribute", part.value, "attribute", sorted(set(row_element.attrib) - {"r", "spans"})[0])
+        if "spans" in row_element.attrib:
+            spans = row_element.attrib["spans"].split(":")
+            if len(spans) != 2 or any(_INDEX.fullmatch(item) is None or len(item) > 5 for item in spans):
+                _fail("invalid-row-spans", part.value, "spans", row_element.attrib["spans"])
+            start, end = (int(item) for item in spans)
+            if not 1 <= start <= end <= _MAX_COLUMN:
+                _fail("invalid-row-spans", part.value, "spans", row_element.attrib["spans"])
         lexical = row_element.attrib.get("r", "")
-        if _INDEX.fullmatch(lexical) is None or int(lexical) == 0 or int(lexical) > _MAX_ROW:
+        if _INDEX.fullmatch(lexical) is None or len(lexical) > 7:
             _fail("invalid-row", part.value, "r", lexical)
         row = int(lexical)
+        if row == 0 or row > _MAX_ROW:
+            _fail("invalid-row", part.value, "r", lexical)
         if row <= previous_row: _fail("out-of-order-row", part.value, "r", lexical)
         previous_row = row; prior: tuple[int, int] | None = None
         for cell_element in row_element:
@@ -276,9 +329,11 @@ def _hyperlinks(root: ET.Element, part: CanonicalPartURI, relationships: tuple[P
     containers = tuple(child for child in root if child.tag == _HYPERLINKS)
     if len(containers) > 1: _fail("duplicate-hyperlinks", part.value, "hyperlinks", "")
     if not containers: return ()
+    _no_mixed(containers[0], part, "hyperlinks")
     records: list[WorksheetHyperlink] = []; refs: set[str] = set(); ids: set[str] = set()
     for element in containers[0]:
         if element.tag != _HYPERLINK: _fail("invalid-hyperlinks-child", part.value, "tag", str(element.tag))
+        if len(element) or _non_whitespace(element.text): _fail("invalid-hyperlink-content", part.value, "content", "nested")
         if set(element.attrib) - {"ref", _REL_ID, "location", "display", "tooltip"}:
             _fail("unknown-hyperlink-attribute", part.value, "attribute", sorted(set(element.attrib) - {"ref", _REL_ID, "location", "display", "tooltip"})[0])
         ref = element.attrib.get("ref", ""); _a1(ref, part.value, "ref", range_allowed=True)

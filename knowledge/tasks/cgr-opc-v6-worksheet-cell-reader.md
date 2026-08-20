@@ -54,3 +54,5 @@ Implement fresh from the exact frozen base. Do not merge, copy, or import stale 
 - The reader performs one public `PathLike` coercion, then delegates topology and relationship construction to the accepted readers using that stable path.
 - Worksheet members are matched from raw ZIP names through canonical OPC part identities; the reader returns only frozen records and never evaluates or coerces cell values.
 - The direct ZIP/XML corpus covers two Unicode-capable sheets, rows 6/10/104, scalar/inline/shared payloads, normal/shared/array formula metadata, and external/internal/location hyperlink anchors.
+- P6 remediation bounds every untrusted integer lexeme before conversion, validates owned XML mixed content and child order, and rejects formula use with inline/shared-string payloads while allowing cached and uncached normal formulas.
+- Standard row `spans`, cell style `s`, and `xml:space="preserve"` on a simple inline `t` are validated then intentionally not interpreted; rich strings, styles, and values remain out of scope.

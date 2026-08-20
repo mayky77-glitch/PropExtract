@@ -67,3 +67,31 @@ def test_coerces_pathlike_once(tmp_path):
     path = _StatefulPath(str(package(tmp_path / "one.xlsx")))
     assert len(read_worksheet_cell_semantics(path).worksheets) == 2
     assert path.calls == 1
+
+
+@pytest.mark.parametrize(("sheet", "expected"), [
+    (worksheet('<row r="' + "9" * 5000 + '"><c r="A1"><v>1</v></c></row>'), ("invalid-row", "xl/worksheets/first.xml", "r", "9" * 5000)),
+    (worksheet('<row r="6"><c r="A6" t="s"><v>' + "9" * 5000 + '</v></c></row>'), ("invalid-shared-string-index", "xl/worksheets/first.xml", "v", "9" * 5000)),
+    (worksheet('<row r="6"><c r="A6"><f t="shared" si="' + "9" * 5000 + '">A1</f></c></row>'), ("invalid-shared-formula-index", "xl/worksheets/first.xml", "si", "9" * 5000)),
+    (worksheet('<row r="6"><c r="A6"><v>1</v><f>A1</f></c></row>'), ("invalid-cell-child-order", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}f")),
+])
+def test_bounds_and_cell_xml_order_are_typed(tmp_path, sheet, expected):
+    assert error(package(tmp_path / "bounds.xlsx", sheet_one=sheet)) == expected
+
+
+def test_accepts_excel_metadata_preserved_text_and_uncached_formula(tmp_path):
+    sheet = worksheet('<row r="6" spans="1:3"><c r="A6" s="0" t="inlineStr"><is><t xml:space="preserve"> x </t></is></c>'
+                      '<c r="B6"><f>NOW()</f></c><c r="C6" t="b"><v>1</v></c><c r="D6" t="d"><v>2026-01-01</v></c>'
+                      '<c r="E6" t="e"><v>#N/A</v></c><c r="F6" t="str"><v>result</v></c></row>')
+    cells = read_worksheet_cell_semantics(package(tmp_path / "metadata.xlsx", sheet_one=sheet)).worksheets[0].cells
+    assert [cell.cell_type for cell in cells] == ["inlineStr", "", "b", "d", "e", "str"]
+    assert cells[0].inline_text == " x " and cells[1].formula and cells[1].value is None
+
+
+def test_rejects_mixed_nested_hyperlink_and_formula_payload_matrix(tmp_path):
+    nested = worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" location="a"><x/></hyperlink></hyperlinks>')
+    assert error(package(tmp_path / "nested.xlsx", sheet_one=nested)) == ("invalid-hyperlink-content", "xl/worksheets/first.xml", "content", "nested")
+    inline_formula = worksheet('<row r="6"><c r="A6" t="inlineStr"><f>A1</f><is><t>x</t></is></c></row>')
+    assert error(package(tmp_path / "inline-formula.xlsx", sheet_one=inline_formula)) == ("invalid-formula-payload", "xl/worksheets/first.xml", "t", "inlineStr")
+    shared_formula = worksheet('<row r="6"><c r="A6" t="s"><f>A1</f><v>1</v></c></row>')
+    assert error(package(tmp_path / "shared-formula.xlsx", sheet_one=shared_formula)) == ("invalid-formula-payload", "xl/worksheets/first.xml", "t", "s")
