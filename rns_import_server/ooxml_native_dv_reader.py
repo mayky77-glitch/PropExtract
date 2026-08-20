@@ -286,14 +286,16 @@ def read_native_data_validations(worksheet_part: str, worksheet_xml: str | bytes
         root = ET.fromstring(worksheet_xml)
     except (ET.ParseError, UnicodeError) as exc:
         _fail("invalid_xml", root_path, str(exc))
+    except LookupError:
+        _fail("invalid_xml", root_path, "unsupported encoding")
     if not _main(root, "worksheet"):
         _fail("invalid_worksheet_root", root_path)
+    for element in root.iter():
+        if element.tag == f"{{{X14_NS}}}dataValidations":
+            _fail("unsupported_x14_content", root_path, str(element.tag))
     containers = [child for child in root if _main(child, "dataValidations")]
     if len(containers) > 1:
         _fail("multiple_data_validations", root_path)
-    for child in root:
-        if child.tag == f"{{{X14_NS}}}dataValidations":
-            _fail("unsupported_x14_content", root_path, str(child.tag))
     if not containers:
         return NativeDvReadResult(worksheet_part, None)
     return NativeDvReadResult(worksheet_part, _container(containers[0], _path(worksheet_part, "dataValidations[1]")))

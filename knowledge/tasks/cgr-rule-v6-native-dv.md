@@ -53,3 +53,7 @@ acceptance_commands: ["python3 -m pytest -q tests/test_ooxml_native_dv_reader.py
 - Tests cover at least two worksheet parts and `sqref` rows 6, 10, and 104; zero-rule container; absent/false/true for every boolean; every enum and field; legal XML whitespace/integer boundaries; formulas and comparison cardinality.
 - Negative tests assert exact tuples for malformed XML/root/namespace, duplicate/multiple containers, count mismatch, invalid booleans/integers/enums/GUID/sqref, unknown native content, mixed content, formula order/cardinality, and unsupported x14 content.
 - Run every acceptance command. Human-authored commit and push only; no merge, rebase, amend, force-push, README edits, or source workbook/PDF changes.
+
+## Remediation evidence
+
+- P6 remediation: reject x14 `dataValidations` at every worksheet descendant depth before returning a result; map unknown XML byte encodings to stable `invalid_xml` at the worksheet boundary. Unrelated extension content remains outside this native-reader scope.

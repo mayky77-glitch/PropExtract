@@ -127,6 +127,29 @@ def test_owned_content_and_x14_fail_closed(content: str, code: str):
     assert error.value.code == code
 
 
+def test_nested_x14_data_validations_fail_at_worksheet_boundary_but_unrelated_extensions_are_ignored():
+    nested = f'<extLst><ext uri="{{test}}"><x14:dataValidations xmlns:x14="{X14_NS}"/></ext></extLst>'
+    with pytest.raises(NativeDvParseError) as error:
+        _read(nested)
+    assert (error.value.code, error.value.owner_path, error.value.detail) == (
+        "unsupported_x14_content",
+        "xl/worksheets/sheet1.xml#worksheet/",
+        f"{{{X14_NS}}}dataValidations",
+    )
+    assert _read('<extLst><ext uri="{unrelated}"/></extLst>').container is None
+
+
+def test_unknown_xml_bytes_encoding_is_typed_boundary_fault():
+    xml = b"<?xml version='1.0' encoding='BOGUS'?><worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'/>"
+    with pytest.raises(NativeDvParseError) as error:
+        read_native_data_validations("xl/worksheets/sheet1.xml", xml)
+    assert (error.value.code, error.value.owner_path, error.value.detail) == (
+        "invalid_xml",
+        "xl/worksheets/sheet1.xml#worksheet/",
+        "unsupported encoding",
+    )
+
+
 @pytest.mark.parametrize("xml", ("<worksheet>", '<notWorksheet xmlns="%s"/>' % MAIN_NS))
 def test_xml_and_root_faults(xml: str):
     with pytest.raises(NativeDvParseError) as error:
