@@ -57,3 +57,18 @@ Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
 - Static validation is recorded with the implementation commit. This macOS
   worktree has no PowerShell runtime, so the executable Windows qualification
   remains pending the P6-reviewed GitHub Actions run described above.
+
+## P6 remediation record
+
+- P6 rejected the initial implementation because a pull-request run can have a
+  merge `GITHUB_SHA` rather than its candidate head SHA, and because the
+  summary had been initialized after checkout.
+- The workflow now derives `CANDIDATE_SHA` from
+  `github.event.pull_request.head.sha` for pull requests and `github.sha` for
+  manual dispatch. It passes that value as the pinned checkout ref, asserts
+  `git rev-parse HEAD` matches it, and records/logs candidate SHA, event
+  `GITHUB_SHA`, and checked-out SHA separately.
+- A valid summary is created before checkout. A failed checkout is recorded as
+  failed when the runner can continue, while the always-upload step retains
+  `if-no-files-found: error`; consequently an artifact failure cannot make the
+  qualification succeed.

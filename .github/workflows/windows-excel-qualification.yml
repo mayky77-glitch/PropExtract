@@ -19,15 +19,18 @@ jobs:
   pester-qualification:
     runs-on: windows-2022
     timeout-minutes: 15
+    env:
+      CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
       - name: Initialize qualification summary
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $summary = [ordered]@{
-            github_sha = $env:GITHUB_SHA
+            candidate_sha = $env:CANDIDATE_SHA
+            event_github_sha = $env:GITHUB_SHA
+            checkout_sha = $null
+            checkout_status = 'not-run'
             pester_version = $null
             suites = @(
               [ordered]@{ name = 'request-schema'; path = 'tests/WindowsExcelRequestSchema.Tests.ps1'; total = $null; passed = $null; failed = $null; skipped = $null; result = $null; status = 'not-run' },
@@ -36,6 +39,33 @@ jobs:
             )
           }
           $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json') -Encoding utf8
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+
+      - name: Verify candidate checkout
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $actualSha = (git rev-parse HEAD).Trim()
+          $summary.checkout_sha = $actualSha
+          $summary.checkout_status = if ($actualSha -eq $env:CANDIDATE_SHA) { 'verified' } else { 'failed' }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          Write-Host "candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA checkout_sha=$actualSha"
+          if ($actualSha -ne $env:CANDIDATE_SHA) { throw 'checkout SHA does not match the requested candidate SHA' }
+
+      - name: Record checkout failure
+        if: failure()
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $summary.checkout_status = 'failed'
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
 
       - name: Install and verify Pester 5.6.1
         shell: powershell
@@ -49,7 +79,7 @@ jobs:
           $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
           $summary.pester_version = $pester.Version.ToString()
           $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
-          Write-Host "pester_version=$($pester.Version) github_sha=$env:GITHUB_SHA"
+          Write-Host "pester_version=$($pester.Version) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA"
 
       - name: Qualify request-schema suite
         shell: powershell
@@ -67,7 +97,7 @@ jobs:
             $suite.status = if ($result.Result -eq 'Passed' -and $result.FailedCount -eq 0 -and $result.TotalCount -gt 0 -and $result.PassedCount -eq $result.TotalCount -and $result.SkippedCount -eq 0 -and $result.NotRunCount -eq 0) { 'passed' } else { 'failed' }
           }
           $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
-          Write-Host "suite=$($suite.name) github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
+          Write-Host "suite=$($suite.name) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
           if ($suite.status -ne 'passed') { throw 'request-schema Pester qualification did not complete cleanly' }
 
       - name: Qualify atomic-protocol suite
@@ -88,7 +118,7 @@ jobs:
             $suite.status = if ($result.Result -eq 'Passed' -and $result.FailedCount -eq 0 -and $result.TotalCount -gt 0 -and $result.PassedCount -eq $result.TotalCount -and $result.SkippedCount -eq 0 -and $result.NotRunCount -eq 0) { 'passed' } else { 'failed' }
           }
           $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
-          Write-Host "suite=$($suite.name) github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
+          Write-Host "suite=$($suite.name) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
           if ($suite.status -ne 'passed') { throw 'atomic-protocol Pester qualification did not complete cleanly' }
 
       - name: Qualify fake-COM suite
@@ -109,7 +139,7 @@ jobs:
             $suite.status = if ($result.Result -eq 'Passed' -and $result.FailedCount -eq 0 -and $result.TotalCount -eq 9 -and $result.PassedCount -eq $result.TotalCount -and $result.SkippedCount -eq 0 -and $result.NotRunCount -eq 0) { 'passed' } else { 'failed' }
           }
           $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
-          Write-Host "suite=$($suite.name) github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
+          Write-Host "suite=$($suite.name) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
           if ($suite.status -ne 'passed') { throw 'fake-COM Pester qualification did not complete cleanly' }
 
       - name: Upload qualification summary
