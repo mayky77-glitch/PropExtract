@@ -32,3 +32,4 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_cell_reader
 - Native row `ht`, `s`, `customHeight`, `customFormat`, `hidden`, `outlineLevel`, and `collapsed` are accepted only after bounded strict validation and remain absent from immutable cell-reader output.
 - The cell/formula/hyperlink projection is equal with or without valid native row properties at rows 6, 10, and 104.
 - Negative coverage freezes malformed, range, long-lexical, namespace-confused, and duplicate-attribute failures before cell projection.
+- Row-only numeric parsing applies XML whitespace-collapse, accepts leading `+` and signed zero for UInt values, preserves raw invalid lexical detail, and keeps legacy cell/formula `_unsigned` rules unchanged.

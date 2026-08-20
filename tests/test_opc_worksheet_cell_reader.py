@@ -92,8 +92,8 @@ def test_validates_and_ignores_native_row_properties_without_changing_projection
     body = ('<row r="6"><c r="A6"><v>1</v></c></row>'
             '<row r="10"><c r="B10"><f>SUM(A6)</f><v>2</v></c></row>'
             '<row r="104"><c r="C104"><v>3</v></c></row>')
-    decorated = ('<row r="6" spans="1:1" ht="12.5" s="0" customHeight="1" customFormat="false" hidden="0" outlineLevel="7" collapsed="true"><c r="A6"><v>1</v></c></row>'
-                 '<row r="10" ht="1E2" s="4294967295" customHeight="false" customFormat="1" hidden="true" outlineLevel="0" collapsed="0"><c r="B10"><f>SUM(A6)</f><v>2</v></c></row>'
+    decorated = ('<row r="6" spans="1:1" ht=" 12.5 " s=" +0003 " customHeight="1" customFormat="false" hidden="0" outlineLevel=" +7 " collapsed="true"><c r="A6"><v>1</v></c></row>'
+                 '<row r="10" ht="1E2" s="-0" customHeight="false" customFormat="1" hidden="true" outlineLevel="0" collapsed="0"><c r="B10"><f>SUM(A6)</f><v>2</v></c></row>'
                  '<row r="104" ht=".25" s="3" customHeight="0" customFormat="true" hidden="false" outlineLevel="3" collapsed="1"><c r="C104"><v>3</v></c></row>')
     links = '<hyperlinks><hyperlink ref="A6" location="Другой!A1"/></hyperlinks>'
     baseline = read_worksheet_cell_semantics(package(tmp_path / "baseline.xlsx", sheet_one=worksheet(body, links))).worksheets[0]
@@ -132,6 +132,19 @@ def test_bounds_each_row_property_lexical_before_conversion(tmp_path, attribute,
     lexical = "9" * 5000
     sheet = worksheet(f'<row r="{row}" {attribute}="{lexical}"><c r="A{row}"><v>1</v></c></row>')
     assert error(package(tmp_path / f"long-{attribute}.xlsx", sheet_one=sheet)) == (*expected, lexical)
+
+
+@pytest.mark.parametrize(("attribute", "value", "row", "expected"), [
+    ("ht", "\u00a012.5\u00a0", 6, ("invalid-row-property", "xl/worksheets/first.xml", "ht", "\u00a012.5\u00a0")),
+    ("ht", " -1 ", 10, ("invalid-row-property", "xl/worksheets/first.xml", "ht", " -1 ")),
+    ("s", " -1 ", 104, ("invalid-row-property", "xl/worksheets/first.xml", "s", " -1 ")),
+    ("s", "\u00a0+0003\u00a0", 6, ("invalid-row-property", "xl/worksheets/first.xml", "s", "\u00a0+0003\u00a0")),
+    ("outlineLevel", " +8 ", 10, ("invalid-row-property", "xl/worksheets/first.xml", "outlineLevel", " +8 ")),
+    ("outlineLevel", " -1 ", 104, ("invalid-row-property", "xl/worksheets/first.xml", "outlineLevel", " -1 ")),
+])
+def test_row_numeric_properties_collapse_only_xml_whitespace(tmp_path, attribute, value, row, expected):
+    sheet = worksheet(f'<row r="{row}" {attribute}="{value}"><c r="A{row}"><v>1</v></c></row>')
+    assert error(package(tmp_path / f"row-{attribute}.xlsx", sheet_one=sheet)) == expected
 
 
 def test_rejects_namespace_confused_and_duplicate_row_attributes(tmp_path):

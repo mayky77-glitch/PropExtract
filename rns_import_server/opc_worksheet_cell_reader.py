@@ -32,10 +32,13 @@ _XML_ENCODING: Final = re.compile(br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[
 _A1: Final = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
 _INDEX: Final = re.compile(r"[0-9]+\Z")
 _ROW_HEIGHT: Final = re.compile(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?\Z")
+_ROW_UNSIGNED: Final = re.compile(r"(?:\+?[0-9]+|-[0]+)\Z")
+_XML_WHITESPACE: Final = re.compile(r"[\t\r\n ]+")
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
 _MAX_UNSIGNED: Final = 4_294_967_295
 _MAX_ROW_HEIGHT_LEXICAL: Final = 128
+_MAX_ROW_INTEGER_LEXICAL: Final = 64
 _ROW_BOOLEANS: Final = frozenset({"0", "1", "false", "true"})
 _CELL_TYPES: Final = frozenset({"", "b", "d", "e", "inlineStr", "s", "str"})
 
@@ -152,12 +155,29 @@ def _unsigned(value: str | None, subject: str, field: str, code: str) -> int:
     return numeric
 
 
+def _row_lexical(value: str, limit: int, subject: str, field: str) -> str:
+    if len(value) > limit:
+        _fail("invalid-row-property", subject, field, value)
+    return _XML_WHITESPACE.sub(" ", value).strip(" \t\r\n")
+
+
 def _row_height(value: str, subject: str) -> None:
-    if len(value) > _MAX_ROW_HEIGHT_LEXICAL or _ROW_HEIGHT.fullmatch(value) is None:
+    lexical = _row_lexical(value, _MAX_ROW_HEIGHT_LEXICAL, subject, "ht")
+    if _ROW_HEIGHT.fullmatch(lexical) is None:
         _fail("invalid-row-property", subject, "ht", value)
-    numeric = float(value)
+    numeric = float(lexical)
     if not math.isfinite(numeric) or numeric < 0:
         _fail("invalid-row-property", subject, "ht", value)
+
+
+def _row_unsigned(value: str, subject: str, field: str) -> int:
+    lexical = _row_lexical(value, _MAX_ROW_INTEGER_LEXICAL, subject, field)
+    if _ROW_UNSIGNED.fullmatch(lexical) is None:
+        _fail("invalid-row-property", subject, field, value)
+    numeric = int(lexical)
+    if numeric > _MAX_UNSIGNED:
+        _fail("invalid-row-property", subject, field, value)
+    return numeric
 
 
 def _row_boolean(value: str, subject: str, field: str) -> None:
@@ -180,12 +200,12 @@ def _validate_row_attributes(element: ET.Element, part: CanonicalPartURI) -> Non
     if "ht" in element.attrib:
         _row_height(element.attrib["ht"], part.value)
     if "s" in element.attrib:
-        _unsigned(element.attrib["s"], part.value, "s", "invalid-row-property")
+        _row_unsigned(element.attrib["s"], part.value, "s")
     for field in ("customHeight", "customFormat", "hidden"):
         if field in element.attrib:
             _row_boolean(element.attrib[field], part.value, field)
     if "outlineLevel" in element.attrib:
-        outline = _unsigned(element.attrib["outlineLevel"], part.value, "outlineLevel", "invalid-row-property")
+        outline = _row_unsigned(element.attrib["outlineLevel"], part.value, "outlineLevel")
         if outline > 7:
             _fail("invalid-row-property", part.value, "outlineLevel", element.attrib["outlineLevel"])
     if "collapsed" in element.attrib:
