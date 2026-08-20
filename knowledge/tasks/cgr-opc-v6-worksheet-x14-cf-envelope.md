@@ -1,12 +1,12 @@
 ---
 type: task
-status: planned
+status: review
 work_id: cgr-opc-worksheet-x14-cf-envelope-v1
 tags:
   - task/implementation
   - domain/propextract
   - feature/opc-worksheet-x14-cf-envelope
-  - status/planned
+  - status/review
 last_verified: 2026-08-20
 updated: 2026-08-20
 ---
@@ -34,3 +34,10 @@ Error precedence is first document-order fault only: path/topology/member/XML we
 Corpus has two sheets with rows 6/10/104 synthetic raw sqref/formula, unsorted unique priorities, boolean tri-state, and full immutable projections. Matrix covers path/topology/member/XML, parent/URI/namespace, formula/sqref/dxf/rule attribute/cardinality/order, and sibling-DV coexistence.
 
 Owned paths are exactly this card plus `rns_import_server/opc_worksheet_x14_cf_reader.py`, `tests/opc_worksheet_x14_cf_fixture_factory.py`, and `tests/test_opc_worksheet_x14_cf_reader.py`; fixture tests contain no source-derived values. Acceptance commands are exactly: `python3 -m pytest -q tests/test_opc_worksheet_x14_cf_reader.py tests/test_opc_worksheet_structure_reader.py tests/test_opc_worksheet_cell_reader.py tests/test_opc_workbook_topology.py`, `python3 -m pytest -q`, `python3 -m compileall -q rns_import_server tests`, and `git diff --check`. Require topology/cell/structure coverage, full records/asdict/identity/ancestry/FrozenInstanceError, and full matrix coverage. No semantic safety claim beyond ownership/envelope: sqref geometry/mapping, formula interpretation, dxf/font/fill/color semantics, X14 DV parsing, native CF changes, mutation/insertion safety, UI/CrossOver/native Excel are excluded. Preserve no-silent-fallback invariant.
+
+## Implementation evidence
+
+- Feature implementation SHA: `bdee1291257b431342b05c85c9781e14e6ecaeee` (parent/base `8c1f9cae52e1172830501d5e5c7086807c86ff82`; accepted dependency `d6d007528ceed65ed6c6597015c187ea536ee544`).
+- Added the immutable topology-owned X14 CF envelope reader and synthetic adversarial fixture/test corpus. It uses one XML parse per topology worksheet, exact canonical member selection, exact extension URI and legal ancestry, worksheet-global priority uniqueness, and leaves native-CF X14 hard-stop behavior untouched.
+- Verification: focused integration `255 passed`; full `1162 passed, 1 existing openpyxl synthetic-X14 warning`; `python3 -m compileall -q rns_import_server tests` and `git diff --check` passed.
+- Residual scope risk: this is intentionally an envelope only; sqref geometry, formula evaluation, dxf child semantics, X14 DV semantics, mapping, and mutation safety remain unclaimed.
