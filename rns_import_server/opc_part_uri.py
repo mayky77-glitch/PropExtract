@@ -189,10 +189,9 @@ def resolve_relative_part_uri(
     """Resolve internal target relative to source part, never above package root."""
     canonical_source = None if source is None else canonicalize_part_uri(source)
     relative = parse_relative_part_uri(target)
-    if relative.value.split("/")[-1] in {".", ".."}:
-        _fail("invalid-part-uri", relative.value, relative.value)
+    segments = relative.value.split("/")
     stack = [] if canonical_source is None else canonical_source.value.split("/")[:-1]
-    for segment in relative.value.split("/"):
+    for segment in segments:
         if segment in {"", "."}:
             continue
         if segment == "..":
@@ -201,6 +200,8 @@ def resolve_relative_part_uri(
             stack.pop()
             continue
         stack.append(segment)
+    if segments[-1] in {".", ".."}:
+        _fail("invalid-part-uri", relative.value, relative.value)
     if not stack:
         _fail("invalid-part-uri", relative.value, relative.value)
     return canonicalize_part_uri("/".join(stack))
