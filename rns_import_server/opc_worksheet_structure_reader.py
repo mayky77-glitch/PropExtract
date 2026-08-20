@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import re
 from typing import Final
@@ -22,11 +23,15 @@ _MERGE_CELLS: Final = f"{{{_SML}}}mergeCells"
 _MERGE_CELL: Final = f"{{{_SML}}}mergeCell"
 _A1: Final = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
 _UINT: Final = re.compile(r"[0-9]+\Z")
-_DECIMAL: Final = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
+_ROW_HEIGHT: Final = re.compile(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?\Z")
+_ROW_UNSIGNED: Final = re.compile(r"(?:\+?[0-9]+|-[0]+)\Z")
+_XML_WHITESPACE: Final = re.compile(r"[\t\r\n ]+")
 _BOOL: Final = {"0": False, "1": True, "false": False, "true": True}
 _MAX_ROW: Final = 1_048_576
 _MAX_COLUMN: Final = 16_384
 _MAX_UINT: Final = 4_294_967_295
+_MAX_ROW_HEIGHT_LEXICAL: Final = 128
+_MAX_ROW_INTEGER_LEXICAL: Final = 64
 _XML_ENCODING: Final = re.compile(br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']', re.I)
 
 
@@ -113,6 +118,27 @@ def _bool(value: str, part: str, field: str) -> bool:
     return _BOOL[value]
 
 
+def _row_lexical(value: str, limit: int, part: str, field: str) -> str:
+    if len(value) > limit: _fail("invalid-row-property", part, field, value)
+    return _XML_WHITESPACE.sub(" ", value).strip(" \t\r\n")
+
+
+def _row_height(value: str, part: str) -> float:
+    lexical = _row_lexical(value, _MAX_ROW_HEIGHT_LEXICAL, part, "ht")
+    if _ROW_HEIGHT.fullmatch(lexical) is None: _fail("invalid-row-property", part, "ht", value)
+    number = float(lexical)
+    if not math.isfinite(number) or number < 0: _fail("invalid-row-property", part, "ht", value)
+    return number
+
+
+def _row_uint(value: str, part: str, field: str) -> int:
+    lexical = _row_lexical(value, _MAX_ROW_INTEGER_LEXICAL, part, field)
+    if _ROW_UNSIGNED.fullmatch(lexical) is None: _fail("invalid-row-property", part, field, value)
+    number = int(lexical)
+    if number > _MAX_UINT: _fail("invalid-row-property", part, field, value)
+    return number
+
+
 def _range(value: str | None, part: str, field: str) -> A1Range:
     text = value or ""
     pieces = text.split(":")
@@ -138,7 +164,7 @@ def _xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
         except (LookupError, ValueError): _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
     try: root = ET.fromstring(payload)
     except LookupError: _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
-    except (ET.ParseError, UnicodeError, ValueError): _fail("malformed-worksheet-xml", part.value, "xml", "xml")
+    except (ET.ParseError, UnicodeError, ValueError, TypeError): _fail("malformed-worksheet-xml", part.value, "xml", "xml")
     if root.tag != _WORKSHEET: _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
     _mixed(root, part.value, "worksheet")
     return root
@@ -168,19 +194,21 @@ def _row(element: ET.Element, part: str, previous: int) -> WorksheetRowPropertie
     if unknown: _fail("unknown-row-attribute", part, "attribute", unknown[0])
     row = _uint(element.attrib.get("r"), part, "r", "invalid-row")
     if row == 0 or row > _MAX_ROW or row <= previous: _fail("out-of-order-row" if row <= previous else "invalid-row", part, "r", element.attrib.get("r", ""))
-    height = None
-    if "ht" in element.attrib:
-        text = element.attrib["ht"]
-        if _DECIMAL.fullmatch(text) is None: _fail("invalid-row-property", part, "ht", text)
-        height = float(text)
-    style = _uint(element.attrib["s"], part, "s", "invalid-row-property") if "s" in element.attrib else None
-    outline = _uint(element.attrib["outlineLevel"], part, "outlineLevel", "invalid-row-property") if "outlineLevel" in element.attrib else None
+    height = _row_height(element.attrib["ht"], part) if "ht" in element.attrib else None
+    style = _row_uint(element.attrib["s"], part, "s") if "s" in element.attrib else None
+    outline = _row_uint(element.attrib["outlineLevel"], part, "outlineLevel") if "outlineLevel" in element.attrib else None
     if outline is not None and outline > 7: _fail("invalid-row-property", part, "outlineLevel", element.attrib["outlineLevel"])
     return WorksheetRowProperties(row, height, style, _bool(element.attrib["customHeight"], part, "customHeight") if "customHeight" in element.attrib else None, _bool(element.attrib["customFormat"], part, "customFormat") if "customFormat" in element.attrib else None, _bool(element.attrib["hidden"], part, "hidden") if "hidden" in element.attrib else None, outline, _bool(element.attrib["collapsed"], part, "collapsed") if "collapsed" in element.attrib else None)
 
 
 def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) -> tuple[A1Range | None, tuple[WorksheetRowProperties, ...], tuple[A1Range, ...], WorksheetAutoFilter | None]:
+    bare_root_attributes = sorted(attribute for attribute in root.attrib if not attribute.startswith("{"))
+    if bare_root_attributes: _fail("unknown-worksheet-attribute", part.value, "attribute", bare_root_attributes[0])
     owned = {_DIMENSION: "dimension", _SHEET_DATA: "sheetData", _AUTO_FILTER: "autoFilter", _MERGE_CELLS: "mergeCells"}
+    owned_names = frozenset(owned.values()) | frozenset({"row", "mergeCell"})
+    for child in root:
+        if child.tag not in owned and isinstance(child.tag, str) and child.tag.rsplit("}", 1)[-1] in owned_names:
+            _fail("invalid-owned-namespace", part.value, "tag", str(child.tag))
     elements = [child for child in root if child.tag in owned]
     order = [_DIMENSION, _SHEET_DATA, _AUTO_FILTER, _MERGE_CELLS]
     positions = [order.index(element.tag) for element in elements]
@@ -199,6 +227,8 @@ def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) 
     _mixed(sheet_data, part.value, "sheetData")
     rows: list[WorksheetRowProperties] = []; previous = 0
     for item in sheet_data:
+        if item.tag != _ROW and isinstance(item.tag, str) and item.tag.rsplit("}", 1)[-1] == "row":
+            _fail("invalid-owned-namespace", part.value, "tag", str(item.tag))
         if item.tag != _ROW: _fail("invalid-sheet-data-child", part.value, "tag", str(item.tag))
         _mixed(item, part.value, "row")
         rows.append(_row(item, part.value, previous)); previous = rows[-1].row
@@ -209,16 +239,22 @@ def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) 
     if merge_container is not None:
         if set(merge_container.attrib) - {"count"}: _fail("unknown-merge-cells-attribute", part.value, "attribute", sorted(set(merge_container.attrib) - {"count"})[0])
         _mixed(merge_container, part.value, "mergeCells")
-        seen: set[tuple[str, str]] = set()
+        if "count" not in merge_container.attrib: _fail("missing-merge-count", part.value, "count", "")
+        seen: set[tuple[str, str]] = set(); prior: tuple[int, int, int, int] | None = None
         for item in merge_container:
+            if item.tag != _MERGE_CELL and isinstance(item.tag, str) and item.tag.rsplit("}", 1)[-1] == "mergeCell":
+                _fail("invalid-owned-namespace", part.value, "tag", str(item.tag))
             if item.tag != _MERGE_CELL: _fail("invalid-merge-cells-child", part.value, "tag", str(item.tag))
             if set(item.attrib) - {"ref"}: _fail("unknown-merge-cell-attribute", part.value, "attribute", sorted(set(item.attrib) - {"ref"})[0])
             if len(item) or _nonwhite(item.text): _fail("invalid-worksheet-content", part.value, "mergeCell", "nested")
             record = _range(item.attrib.get("ref"), part.value, "ref")
             key = (record.start, record.end)
             if key in seen: _fail("duplicate-merge-range", part.value, "ref", f"{record.start}:{record.end}" if record.start != record.end else record.start)
+            position = (record.min_row, record.min_column, record.max_row, record.max_column)
+            if prior is not None and position <= prior: _fail("out-of-order-merge-range", part.value, "ref", f"{record.start}:{record.end}" if record.start != record.end else record.start)
+            prior = position
             seen.add(key); merges.append(record)
-        if "count" in merge_container.attrib and _uint(merge_container.attrib["count"], part.value, "count", "invalid-merge-count") != len(merges): _fail("merge-count-mismatch", part.value, "count", merge_container.attrib["count"])
+        if _uint(merge_container.attrib["count"], part.value, "count", "invalid-merge-count") != len(merges): _fail("merge-count-mismatch", part.value, "count", merge_container.attrib["count"])
     filter_element = next((e for e in elements if e.tag == _AUTO_FILTER), None)
     auto = None
     if filter_element is not None:

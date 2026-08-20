@@ -51,6 +51,34 @@ def test_rejects_owned_unknown_duplicate_mixed_and_nested_content(tmp_path):
     assert error(package(tmp_path / "nested.xlsx", sheet_one=nested)) == ("invalid-auto-filter-content", "xl/worksheets/first.xml", "autoFilter", "nested")
 
 
+@pytest.mark.parametrize(("height", "style", "outline", "expected"), [
+    ("+12.5", "+0003", "-0", (12.5, 3, 0)),
+    (".5", "0000000000000000000000000000000000000000000000000000000000000000", " 0 ", (0.5, 0, 0)),
+    ("12.", "0", "0", (12.0, 0, 0)),
+    ("1e2", "0", "0", (100.0, 0, 0)),
+])
+def test_row_properties_match_accepted_compatibility_lexicals(tmp_path, height, style, outline, expected):
+    rows = f'<row r="6" ht="{height}" s="{style}" outlineLevel="{outline}" customHeight="0" customFormat="false" hidden="0" collapsed="false"><c r="A6"><v>1</v></c></row>'
+    item = read_worksheet_structure_semantics(package(tmp_path / "row.xlsx", sheet_one=worksheet(rows=rows))).worksheets[0].rows[0]
+    assert (item.height, item.style_index, item.outline_level, item.custom_height, item.hidden) == (*expected, False, False)
+
+
+def test_merge_count_order_and_normalized_alias_are_strict(tmp_path):
+    missing = worksheet(merges='<mergeCells><mergeCell ref="A6:B6"/></mergeCells>')
+    assert error(package(tmp_path / "missing-count.xlsx", sheet_one=missing)) == ("missing-merge-count", "xl/worksheets/first.xml", "count", "")
+    reversed_order = worksheet(merges='<mergeCells count="2"><mergeCell ref="A10:B10"/><mergeCell ref="A6:B6"/></mergeCells>')
+    assert error(package(tmp_path / "merge-order.xlsx", sheet_one=reversed_order)) == ("out-of-order-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6")
+    alias = worksheet(merges='<mergeCells count="2"><mergeCell ref="$a$6:$B$6"/><mergeCell ref="A6:B6"/></mergeCells>')
+    assert error(package(tmp_path / "merge-alias.xlsx", sheet_one=alias)) == ("duplicate-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6")
+
+
+def test_rejects_bare_root_attributes_and_owned_namespace_collisions(tmp_path):
+    root_attribute = b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" bogus="x"><sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData></worksheet>'
+    assert error(package(tmp_path / "root-attr.xlsx", sheet_one=root_attribute)) == ("unknown-worksheet-attribute", "xl/worksheets/first.xml", "attribute", "bogus")
+    collision = b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="urn:collision"><x:dimension ref="A6"/><sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData></worksheet>'
+    assert error(package(tmp_path / "collision.xlsx", sheet_one=collision)) == ("invalid-owned-namespace", "xl/worksheets/first.xml", "tag", "{urn:collision}dimension")
+
+
 def test_reports_preflight_evidence_without_claiming_safety(tmp_path):
     sheet = worksheet(merges='<mergeCells count="1"><mergeCell ref="A6:C104"/></mergeCells>')
     record = read_worksheet_structure_semantics(package(tmp_path / "preflight.xlsx", sheet_one=sheet)).worksheets[0]
