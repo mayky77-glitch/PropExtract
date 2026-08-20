@@ -25,3 +25,8 @@ Windows run `32334308647` at exact `86fd903...` used PowerShell 7/Pester 5.6.1, 
 Move module import and helper function definitions into the suite's `BeforeAll` run scope (or an equivalently explicit Pester 5 run-scope construct). Preserve all seven test bodies, assertions, Cyrillic/escaping cases, rows 6/10/104, callback no-op checks, and production module unchanged. No wrapper/fallback that bypasses Pester discovery.
 
 Required: local static/diff checks, independent P6, then exact-SHA Windows Pester evidence. Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
+
+## Implementation evidence
+
+- 2026-08-20: moved `Import-Module`, `New-ValidRequestJson`, and `Assert-Rejected` into the suite `BeforeAll` block so Pester 5 run-scope tests inherit them. The seven `It` bodies remain unchanged.
+- Local validation: `git diff --check` passed; static count confirmed seven test cases before and after the edit. `pwsh` and `powershell` are unavailable locally, so the required Pester 5.6.1 acceptance command needs exact-SHA Windows evidence.
