@@ -473,7 +473,7 @@ def _owned_child_or_tail_payload(owner, variant):
     if owner == "autoFilter":
         return worksheet(auto_filter='<autoFilter ref="A6"><x/></autoFilter>' if variant == "child" else '<autoFilter ref="A6"/>bad')
     if owner == "mergeCells":
-        return worksheet(merges='<mergeCells count="1"><bogus/></mergeCells>' if variant == "child" else '<mergeCells count="1"><mergeCell ref="A6"/>bad</mergeCells>')
+        return worksheet(merges='<mergeCells count="1"><bogus/></mergeCells>' if variant == "child" else '<mergeCells count="1"><mergeCell ref="A6"/></mergeCells>bad')
     return worksheet(merges='<mergeCells count="1"><mergeCell ref="A6"><x/></mergeCell></mergeCells>' if variant == "child" else '<mergeCells count="1"><mergeCell ref="A6"/>bad</mergeCells>')
 
 
@@ -489,7 +489,7 @@ def _owned_child_or_tail_payload(owner, variant):
     ("autoFilter", "child", ("invalid-auto-filter-content", "xl/worksheets/first.xml", "autoFilter", "nested")),
     ("autoFilter", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "tail")),
     ("mergeCells", "child", ("invalid-merge-cells-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bogus")),
-    ("mergeCells", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCells", "tail")),
+    ("mergeCells", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "tail")),
     ("mergeCell", "child", ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCell", "nested")),
     ("mergeCell", "tail", ("invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCells", "tail")),
 ])
@@ -498,6 +498,20 @@ def test_owned_structure_child_and_tail_matrix_is_exact(tmp_path, owner, variant
         tmp_path / f"owned-{owner}-{variant}.xlsx",
         sheet_one=_owned_child_or_tail_payload(owner, variant),
     )) == expected
+
+
+def test_merge_cells_and_merge_cell_tail_payloads_are_distinct_and_execute(tmp_path):
+    merge_cells_tail = _owned_child_or_tail_payload("mergeCells", "tail")
+    merge_cell_tail = _owned_child_or_tail_payload("mergeCell", "tail")
+    assert merge_cells_tail != merge_cell_tail
+    assert b'<mergeCell ref="A6"/></mergeCells>bad' in merge_cells_tail
+    assert b'<mergeCell ref="A6"/>bad</mergeCells>' in merge_cell_tail
+    assert error(package(tmp_path / "merge-cells-tail.xlsx", sheet_one=merge_cells_tail)) == (
+        "invalid-worksheet-content", "xl/worksheets/first.xml", "worksheet", "tail"
+    )
+    assert error(package(tmp_path / "merge-cell-tail.xlsx", sheet_one=merge_cell_tail)) == (
+        "invalid-worksheet-content", "xl/worksheets/first.xml", "mergeCells", "tail"
+    )
 
 
 def test_dependency_precedence_is_topology_then_cell_then_structure(tmp_path):

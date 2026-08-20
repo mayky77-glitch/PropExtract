@@ -40,3 +40,8 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_structure_r
 - Added standalone duplicate-row exact tuple, one-call evidence for every custom `PathLike`, complete immutable first/second-sheet projections, and explicit empty merge/auto-filter projections.
 - Added parameterized exact child/tail cases for `worksheet`, `dimension`, `sheetData`, `row`, `autoFilter`, `mergeCells`, and `mergeCell`.
 - Validation: focused composite 260 passed; full 697 passed with the pre-existing OpenPyXL x14 warning; compileall and diff checks clean.
+
+## P6 tail distinction — 2026-08-20
+
+- Split `mergeCells/tail` from `mergeCell/tail`: former is literal tail after `</mergeCells>` and fails at `worksheet`; latter remains literal tail after `mergeCell` and fails at `mergeCells`. Tests assert distinct payload bytes and execute both exact tuples.
+- Validation: focused composite 261 passed; full 698 passed with the pre-existing OpenPyXL x14 warning; compileall and diff checks clean.
