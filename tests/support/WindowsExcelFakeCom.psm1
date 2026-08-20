@@ -150,8 +150,11 @@ function New-WindowsExcelFakeCom {
 }
 
 function Get-WindowsExcelFakeComErrorEnvelope {
-    param($Exception)
+    param($Exception, [string]$ScriptStackTrace = '')
     if ($null -eq $Exception) { return $null }
+    if (-not $Exception.Data.Contains('stage')) {
+        Write-Warning ("fake_com_unexpected_exception type={0}; message={1}; stack={2}" -f $Exception.GetType().FullName, $Exception.Message, $ScriptStackTrace)
+    }
     [pscustomobject]@{
         message = $Exception.Message
         stage = [string]$Exception.Data['stage']
@@ -167,7 +170,7 @@ function Invoke-WindowsExcelFakeComScenario {
     $fake = New-WindowsExcelFakeCom -Faults $Faults
     $proxies = [System.Collections.Generic.List[object]]::new()
     $app = $fake.Application; [void]$proxies.Add($app)
-    $error = $null; $cleanupErrors = [System.Collections.Generic.List[object]]::new()
+    $error = $null; $primaryErrorRecord = $null; $cleanupErrors = [System.Collections.Generic.List[object]]::new()
     try {
         $workbooks = $app.Workbooks; [void]$proxies.Add($workbooks)
         $control = $workbooks.Open('control.xlsx', 0, $false); [void]$proxies.Add($control)
@@ -183,13 +186,14 @@ function Invoke-WindowsExcelFakeComScenario {
         $linkAnchor = $cells.Item($InsertionRow, 23); [void]$proxies.Add($linkAnchor)
         $link = $hyperlinks.Add($linkAnchor, "https://example.invalid/$InsertionRow"); [void]$proxies.Add($link)
         $app.CalculateFullRebuild(); $candidate.Save(); $candidate.Close($true); $app.Quit()
-    } catch { $error = $_.Exception }
+    } catch { $error = $_.Exception; $primaryErrorRecord = $_ }
     finally {
         for ($index = $proxies.Count - 1; $index -ge 0; $index--) {
-            try { $proxies[$index].Release() } catch { [void]$cleanupErrors.Add((Get-WindowsExcelFakeComErrorEnvelope $_.Exception)) }
+            try { $proxies[$index].Release() } catch { [void]$cleanupErrors.Add((Get-WindowsExcelFakeComErrorEnvelope $_.Exception $_.ScriptStackTrace)) }
         }
     }
-    $primaryError = Get-WindowsExcelFakeComErrorEnvelope $error
+    $primaryStackTrace = if ($null -eq $primaryErrorRecord) { '' } else { $primaryErrorRecord.ScriptStackTrace }
+    $primaryError = Get-WindowsExcelFakeComErrorEnvelope $error $primaryStackTrace
     $cleanup = @($cleanupErrors)
     $classification = if ($null -ne $primaryError) {
         if ($cleanup.Count -gt 0) { 'primary_and_cleanup_failure' } else { 'primary_failure' }
