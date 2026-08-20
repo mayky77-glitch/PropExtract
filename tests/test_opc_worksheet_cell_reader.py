@@ -88,6 +88,61 @@ def test_accepts_excel_metadata_preserved_text_and_uncached_formula(tmp_path):
     assert cells[0].inline_text == " x " and cells[1].formula and cells[1].value is None
 
 
+def test_validates_and_ignores_native_row_properties_without_changing_projection(tmp_path):
+    body = ('<row r="6"><c r="A6"><v>1</v></c></row>'
+            '<row r="10"><c r="B10"><f>SUM(A6)</f><v>2</v></c></row>'
+            '<row r="104"><c r="C104"><v>3</v></c></row>')
+    decorated = ('<row r="6" spans="1:1" ht="12.5" s="0" customHeight="1" customFormat="false" hidden="0" outlineLevel="7" collapsed="true"><c r="A6"><v>1</v></c></row>'
+                 '<row r="10" ht="1E2" s="4294967295" customHeight="false" customFormat="1" hidden="true" outlineLevel="0" collapsed="0"><c r="B10"><f>SUM(A6)</f><v>2</v></c></row>'
+                 '<row r="104" ht=".25" s="3" customHeight="0" customFormat="true" hidden="false" outlineLevel="3" collapsed="1"><c r="C104"><v>3</v></c></row>')
+    links = '<hyperlinks><hyperlink ref="A6" location="Другой!A1"/></hyperlinks>'
+    baseline = read_worksheet_cell_semantics(package(tmp_path / "baseline.xlsx", sheet_one=worksheet(body, links))).worksheets[0]
+    result = read_worksheet_cell_semantics(package(tmp_path / "decorated.xlsx", sheet_one=worksheet(decorated, links))).worksheets[0]
+    assert result.cells == baseline.cells
+    assert result.hyperlinks == baseline.hyperlinks
+
+
+@pytest.mark.parametrize(("row", "expected"), [
+    ('<row r="6" ht="NaN"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "ht", "NaN")),
+    ('<row r="10" ht="-1"><c r="A10"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "ht", "-1")),
+    ('<row r="104" ht="1e9999"><c r="A104"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "ht", "1e9999")),
+    ('<row r="6" s="4294967296"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "s", "4294967296")),
+    ('<row r="10" s="-1"><c r="A10"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "s", "-1")),
+    ('<row r="104" outlineLevel="8"><c r="A104"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "outlineLevel", "8")),
+    ('<row r="6" outlineLevel="-1"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "outlineLevel", "-1")),
+    ('<row r="10" customHeight="yes"><c r="A10"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "customHeight", "yes")),
+    ('<row r="104" customFormat="yes"><c r="A104"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "customFormat", "yes")),
+    ('<row r="6" hidden="yes"><c r="A6"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "hidden", "yes")),
+    ('<row r="10" collapsed="yes"><c r="A10"><v>1</v></c></row>', ("invalid-row-property", "xl/worksheets/first.xml", "collapsed", "yes")),
+])
+def test_rejects_malformed_or_out_of_range_row_properties_before_cell_projection(tmp_path, row, expected):
+    assert error(package(tmp_path / "row-property.xlsx", sheet_one=worksheet(row))) == expected
+
+
+@pytest.mark.parametrize(("attribute", "row", "expected"), [
+    ("ht", 6, ("invalid-row-property", "xl/worksheets/first.xml", "ht")),
+    ("s", 10, ("invalid-row-property", "xl/worksheets/first.xml", "s")),
+    ("customHeight", 104, ("invalid-row-property", "xl/worksheets/first.xml", "customHeight")),
+    ("customFormat", 6, ("invalid-row-property", "xl/worksheets/first.xml", "customFormat")),
+    ("hidden", 10, ("invalid-row-property", "xl/worksheets/first.xml", "hidden")),
+    ("outlineLevel", 104, ("invalid-row-property", "xl/worksheets/first.xml", "outlineLevel")),
+    ("collapsed", 6, ("invalid-row-property", "xl/worksheets/first.xml", "collapsed")),
+])
+def test_bounds_each_row_property_lexical_before_conversion(tmp_path, attribute, row, expected):
+    lexical = "9" * 5000
+    sheet = worksheet(f'<row r="{row}" {attribute}="{lexical}"><c r="A{row}"><v>1</v></c></row>')
+    assert error(package(tmp_path / f"long-{attribute}.xlsx", sheet_one=sheet)) == (*expected, lexical)
+
+
+def test_rejects_namespace_confused_and_duplicate_row_attributes(tmp_path):
+    confused = worksheet('<row xmlns:x="urn:other" r="6" x:hidden="true"><c r="A6"><v>1</v></c></row>')
+    assert error(package(tmp_path / "confused-row-attribute.xlsx", sheet_one=confused)) == (
+        "unknown-row-attribute", "xl/worksheets/first.xml", "attribute", "{urn:other}hidden")
+    duplicate = worksheet('<row r="6" ht="1" ht="2"><c r="A6"><v>1</v></c></row>')
+    assert error(package(tmp_path / "duplicate-row-attribute.xlsx", sheet_one=duplicate)) == (
+        "malformed-worksheet-xml", "xl/worksheets/first.xml", "xml", "xml")
+
+
 def test_rejects_mixed_nested_hyperlink_and_formula_payload_matrix(tmp_path):
     nested = worksheet('<row r="6"><c r="A6"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A6" location="a"><x/></hyperlink></hyperlinks>')
     assert error(package(tmp_path / "nested.xlsx", sheet_one=nested)) == ("invalid-hyperlink-content", "xl/worksheets/first.xml", "content", "nested")

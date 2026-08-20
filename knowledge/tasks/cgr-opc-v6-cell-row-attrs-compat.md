@@ -26,3 +26,9 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_cell_reader
 - Apply XML-whitespace and integer/boolean lexical rules consistently with accepted readers. Bound lexical length before numeric conversion; reject NaN/infinity, negative/out-of-range values, malformed booleans, duplicates, namespace-confused attributes, and every still-unknown row attribute with stable exact `OPCWorksheetCellReaderError` tuples.
 - Positive tests combine all fields on native rows 6, 10, and 104 and prove cell/formula/hyperlink output is byte-for-value unchanged. Negative tests cover every field's malformed/range/long lexical boundary and exact error precedence before cell projection.
 - No structure-reader implementation, styles, package graph/topology, mutation, CF/DV/X14, README, PDF, or XLSX edits. Run every acceptance command; human identity commit/push only; no merge, rebase, amend, or force-push.
+
+## Implementation evidence
+
+- Native row `ht`, `s`, `customHeight`, `customFormat`, `hidden`, `outlineLevel`, and `collapsed` are accepted only after bounded strict validation and remain absent from immutable cell-reader output.
+- The cell/formula/hyperlink projection is equal with or without valid native row properties at rows 6, 10, and 104.
+- Negative coverage freezes malformed, range, long-lexical, namespace-confused, and duplicate-attribute failures before cell projection.
