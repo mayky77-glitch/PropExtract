@@ -52,3 +52,8 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_style_semantic_reader
 - No XLSX mutation or row insertion, formatting writes, shared-string/value/formula interpretation, conditional formatting, data validation, X14, `dxfs`, named/table/pivot styles, theme rendering, locale rendering, or visual color resolution.
 - Do not merge, copy, or reuse stale V5 branch `codex/cgr-style-table-semantic-reader-v1` or its obsolete API/card. No README, source PDF/XLSX, accepted topology/cell/graph, CF, or DV edits.
 - Run every acceptance command; human identity commit/push only. No merge, rebase, amend, or force-push.
+
+## Implementation evidence
+
+- Feature implementation preserves accepted topology and cell-reader failures, then resolves one strict native styles part and direct `worksheet/sheetData/row/c@s` usage only.
+- Fixture corpus covers explicit styles on two worksheets at rows 6, 10, and 104; default/final style indices; aliases, relationship/content-type failures, nested cells, owned XML order/lexical failures, and one-shot paths.
