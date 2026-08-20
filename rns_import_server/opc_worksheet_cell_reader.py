@@ -28,7 +28,6 @@ _HYPERLINKS: Final = f"{{{_SML}}}hyperlinks"
 _HYPERLINK: Final = f"{{{_SML}}}hyperlink"
 _REL_ID: Final = f"{{{_REL}}}id"
 _HYPERLINK_TYPE: Final = f"{_REL}/hyperlink"
-_XML_ENCODING: Final = re.compile(br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']', re.I)
 _A1: Final = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})\Z")
 _INDEX: Final = re.compile(r"[0-9]+\Z")
 _ROW_HEIGHT: Final = re.compile(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?\Z")
@@ -225,17 +224,11 @@ def _no_mixed(element: ET.Element, part: CanonicalPartURI, field: str) -> None:
 
 
 def _parse_xml(payload: bytes, part: CanonicalPartURI) -> ET.Element:
-    candidate = payload[3:] if payload.startswith(b"\xef\xbb\xbf") else payload
-    if _XML_ENCODING.match(candidate) is not None:
-        try:
-            ET.fromstring(payload)
-        except (LookupError, ValueError):
-            _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
     try:
         root = ET.fromstring(payload)
-    except LookupError:
+    except (LookupError, ValueError):
         _fail("unsupported-xml-encoding", part.value, "xml", "encoding")
-    except (ET.ParseError, UnicodeError, ValueError):
+    except (ET.ParseError, UnicodeError, TypeError):
         _fail("malformed-worksheet-xml", part.value, "xml", "xml")
     if root.tag != _WORKSHEET:
         _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
