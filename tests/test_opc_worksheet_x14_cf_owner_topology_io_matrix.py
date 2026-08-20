@@ -79,13 +79,12 @@ def test_path_input_matrix_is_exact_and_coerced_once(monkeypatch, tmp_path):
         (_PathLike(TypeError("bad")), ("invalid-package-path", f"{__name__}._PathLike", "path", "TypeError")),
         (_PathLike(ValueError("bad")), ("unreadable-package", f"{__name__}._PathLike", "path", "ValueError")),
         (_PathLike(OSError("bad")), ("unreadable-package", f"{__name__}._PathLike", "path", "OSError")),
-        (b"not-a-path", ("invalid-package-path", "builtins.bytes", "path", "bytes")),
+        (_PathLike(b"not-a-path"), ("invalid-package-path", f"{__name__}._PathLike", "path", "bytes")),
         (_PathLike("bad\0path"), ("unreadable-package", "bad\0path", "path", "embedded-nul")),
     )
     for value, expected in cases:
         assert error(value) == expected
-        if isinstance(value, _PathLike):
-            assert value.calls == 1
+        assert value.calls == 1
 
 
 def test_topology_identity_descriptor_equality_and_canonical_selection(monkeypatch, tmp_path):
