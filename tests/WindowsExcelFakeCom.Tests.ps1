@@ -5,7 +5,7 @@ if ($env:WINDOWS_EXCEL_FAKE_COM_PESTER_DISCOVERY -ne '1') {
     $env:WINDOWS_EXCEL_FAKE_COM_PESTER_DISCOVERY = '1'
     try { $result = Invoke-Pester -Path $PSCommandPath -PassThru -Output Detailed }
     finally { Remove-Item Env:WINDOWS_EXCEL_FAKE_COM_PESTER_DISCOVERY -ErrorAction SilentlyContinue }
-    if ($result.FailedCount -gt 0) { exit 1 }
+    if ($null -eq $result -or $result.Result -ne 'Passed' -or $result.TotalCount -ne 9 -or $result.PassedCount -ne 9 -or $result.FailedCount -ne 0) { exit 1 }
     exit 0
 }
 
