@@ -74,6 +74,37 @@ def test_duplicate_priority_and_sibling_x14_dv_coexist(tmp_path):
     assert len(read_worksheet_x14_cf_envelope(package(tmp_path / "dv.xlsx", sheet_one=worksheet(valid))).worksheets[0].containers) == 1
 
 
+def test_two_sheet_corpus_preserves_rows_orders_and_full_projection(tmp_path):
+    first = envelope(container(6, 10, "0") + container(10, 3, "false"))
+    second = envelope(container(104, 7, "1"))
+    result = read_worksheet_x14_cf_envelope(package(
+        tmp_path / "two-sheet.xlsx", sheet_one=worksheet(first), sheet_two=worksheet(second),
+    ))
+    assert [[rule.document_order for box in sheet.containers for rule in box.rules] for sheet in result.worksheets] == [[1, 2], [1]]
+    assert [[rule.priority for box in sheet.containers for rule in box.rules] for sheet in result.worksheets] == [[10, 3], [7]]
+    assert asdict(result)["worksheets"][1]["containers"][0]["sqref_text"] == " raw 104 "
+
+
+def test_xm_content_in_sibling_x14_dv_is_unowned(tmp_path):
+    dv = ('<extLst><ext uri="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}"><x14:dataValidations>'
+          '<x14:dataValidation><xm:f>not-cf</xm:f><xm:sqref>not-cf</xm:sqref></x14:dataValidation>'
+          '</x14:dataValidations></ext></extLst>')
+    result = read_worksheet_x14_cf_envelope(package(tmp_path / "sibling.xlsx", sheet_one=worksheet(dv)))
+    assert result.worksheets[0].containers == ()
+
+
+@pytest.mark.parametrize(("body", "code"), [
+    ('<extLst><ext uri="' + URI + '"/></extLst>', "invalid-x14-cf-cardinality"),
+    ('<extLst><ext uri="' + URI + '"><x14:conditionalFormattings/></ext>'
+     '<ext uri="' + URI + '"><x14:conditionalFormattings/></ext></extLst>', "invalid-x14-cf-cardinality"),
+    (envelope('<x14:conditionalFormatting><x14:cfRule type="expression" priority="\u00a01\u00a0" stopIfTrue="true" id="x"><xm:f>x</xm:f><x14:dxf/></x14:cfRule><xm:sqref>A6</xm:sqref></x14:conditionalFormatting>'), "invalid-x14-cf-priority"),
+    (envelope('<x14:conditionalFormatting><x14:cfRule type="expression" priority="999999999999999999999999999999999999999" stopIfTrue="true" id="x"><xm:f>x</xm:f><x14:dxf/></x14:cfRule><xm:sqref>A6</xm:sqref></x14:conditionalFormatting>'), "invalid-x14-cf-priority"),
+    (envelope('<x14:conditionalFormatting><x14:cfRule type="expression" priority="1" stopIfTrue="true" id="x"><xm:f>x</xm:f><x14:dxf><border/></x14:dxf></x14:cfRule><xm:sqref>A6</xm:sqref></x14:conditionalFormatting>'), "unknown-x14-cf-child"),
+])
+def test_p6_exact_boundaries(tmp_path, body, code):
+    assert error(package(tmp_path / "p6.xlsx", sheet_one=worksheet(body)))[0] == code
+
+
 @pytest.mark.parametrize(("body", "code"), [
     ('<extLst bad="x"><ext uri="' + URI + '"><x14:conditionalFormattings/></ext></extLst>', "unknown-x14-cf-attribute"),
     ('<extLst><ext uri="' + URI + '"><x14:conditionalFormattings bad="x"/></ext></extLst>', "unknown-x14-cf-attribute"),
