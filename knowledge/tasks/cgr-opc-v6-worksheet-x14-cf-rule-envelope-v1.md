@@ -1,8 +1,8 @@
 ---
 type: task
-status: planned
+status: implemented
 work_id: cgr-opc-v6-worksheet-x14-cf-rule-envelope-v1
-tags: [task/implementation, feature/x14-cf-rule-envelope, status/planned]
+tags: [task/implementation, feature/x14-cf-rule-envelope, status/implemented]
 last_verified: 2026-08-21
 updated: 2026-08-21
 ---
@@ -48,3 +48,10 @@ Acceptance:
 `git diff --check`
 
 Independent P6 must inspect XML-event precedence, X1 compatibility, exact anti-shallow corpus and absence of blocked ancestry. X2a makes no sqref, dxf-child, formula-meaning, X14-DV, range mapping, insertion, publication, UI/CrossOver or native-Excel claim.
+
+## Implementation evidence
+
+- Implemented on `codex/cgr-opc-x14-cf-rule-envelope-v1` from planning base `c942adefcac50c41596e566a69a54308ab2143e1`; accepted dependency `ea280eeb2101c87213bc538d3b697fc0ea6a982e` is an ancestor.
+- The reader and X2a projection use `_accepted`: one package-path coercion, workbook topology read, canonical member read and XML parse per worksheet, followed by complete X1 validation before any envelope work. X2a does not invoke the public X1 reader.
+- Added direct-rule projection, worksheet-global numeric priority uniqueness, immutable records, and a synthetic two-sheet test corpus. `xm:sqref` remains neither read into the projection nor validated by X2a.
+- Validation: focused X2a suite (33 passed); frozen acceptance command (552 passed); full suite (1304 passed, one pre-existing openpyxl extension warning); compileall and `git diff --check` passed.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 from typing import Final
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, LargeZipFile, ZipFile
@@ -22,7 +23,7 @@ _CF_URI="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"; _DV_URI="{CCE6A557-97BC-4b89-A
 _OWNED=frozenset({_FORMS,_FORM,_RULE,_DXF,_F,_SQREF})
 _LOCALS=frozenset({"conditionalFormattings","conditionalFormatting","cfRule","dxf","f","sqref"})
 
-__all__=("OPCWorksheetX14CfOwnerTopologyError","X14CfContainerOwner","WorksheetX14CfOwnerTopology","WorkbookX14CfOwnerTopology","read_worksheet_x14_cf_owner_topology")
+__all__=("OPCWorksheetX14CfOwnerTopologyError","X14CfContainerOwner","WorksheetX14CfOwnerTopology","WorkbookX14CfOwnerTopology","X14CfRuleEnvelope","X14CfOwnerRuleEnvelope","WorksheetX14CfRuleEnvelope","WorkbookX14CfRuleEnvelope","read_worksheet_x14_cf_owner_topology","read_worksheet_x14_cf_rule_envelope")
 
 @dataclass(frozen=True)
 class X14CfContainerOwner:
@@ -35,6 +36,27 @@ class WorksheetX14CfOwnerTopology:
 @dataclass(frozen=True)
 class WorkbookX14CfOwnerTopology:
     worksheets: tuple[WorksheetX14CfOwnerTopology,...]
+@dataclass(frozen=True)
+class X14CfRuleEnvelope:
+    owner_path: str
+    document_order: int
+    type: str
+    priority: int
+    stop_if_true: bool | None
+    rule_id: str
+    formula: str
+    has_inline_dxf: bool
+@dataclass(frozen=True)
+class X14CfOwnerRuleEnvelope:
+    owner: X14CfContainerOwner
+    rules: tuple[X14CfRuleEnvelope,...]
+@dataclass(frozen=True)
+class WorksheetX14CfRuleEnvelope:
+    worksheet: WorksheetDescriptor
+    containers: tuple[X14CfOwnerRuleEnvelope,...]
+@dataclass(frozen=True)
+class WorkbookX14CfRuleEnvelope:
+    worksheets: tuple[WorksheetX14CfRuleEnvelope,...]
 @dataclass
 class OPCWorksheetX14CfOwnerTopologyError(ValueError):
     code: str
@@ -140,13 +162,14 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
             if _nonwhite(child.tail) and tag in {_EXTLST,_FORMS,_FORM,_RULE}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"tail")
         if cf_ext and sum(child.tag==_FORMS for child in node)!=1:add(1,"invalid-x14-cf-cardinality","ext","conditionalFormattings")
         if tag==_FORMS and forms and not any(child.tag==_FORM for child in node):add(1,"invalid-x14-cf-cardinality","conditionalFormattings","conditionalFormatting")
-        if tag==_FORM and form:owners.append((start,extlst_index or 0,ext_index or 0))
+        if tag==_FORM and form:owners.append((start,extlst_index or 0,ext_index or 0,node))
         event+=1
     walk(root,None,parent_direct_extlst=False,parent_cf_ext=False,parent_dv_ext=False,parent_dv=False,parent_dv_item=False,parent_forms=False,parent_form=False,parent_rule=False,extlst_index=None,ext_index=None)
     return faults,owners,event
 
-def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->WorkbookX14CfOwnerTopology:
-    path=_path(package_path); topology=read_workbook_topology(path)
+def _accepted(path:str):
+    """Read once and retain only trees that passed the complete X1 gate."""
+    topology=read_workbook_topology(path)
     trees=[(sheet,sheet.worksheet_part,_xml(_member(path,sheet.worksheet_part),sheet.worksheet_part)) for sheet in topology.worksheets]
     for _,part,root in trees:
         if root.tag!=_WORKSHEET:_fail("invalid-worksheet-root",part.value,"root",str(root.tag))
@@ -158,8 +181,82 @@ def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->Wor
     worksheets=[]
     for sheet,part,specs in inspected:
         counts={}; owners=[]
-        for document_order,(_,extlst,ext) in enumerate(specs,1):
+        for document_order,(_,extlst,ext,node) in enumerate(specs,1):
             key=(extlst,ext);counts[key]=counts.get(key,0)+1
-            owners.append(X14CfContainerOwner(f"{part.value}/worksheet/extLst[{extlst}]/ext[{ext}]/conditionalFormattings[1]/conditionalFormatting[{counts[key]}]",document_order))
-        worksheets.append(WorksheetX14CfOwnerTopology(sheet,tuple(owners)))
-    return WorkbookX14CfOwnerTopology(tuple(worksheets))
+            owner=X14CfContainerOwner(f"{part.value}/worksheet/extLst[{extlst}]/ext[{ext}]/conditionalFormattings[1]/conditionalFormatting[{counts[key]}]",document_order)
+            owners.append((owner,node))
+        worksheets.append((sheet,part,tuple(owners)))
+    return worksheets
+
+def read_worksheet_x14_cf_owner_topology(package_path:os.PathLike[str]|str)->WorkbookX14CfOwnerTopology:
+    accepted=_accepted(_path(package_path))
+    return WorkbookX14CfOwnerTopology(tuple(
+        WorksheetX14CfOwnerTopology(sheet,tuple(owner for owner,_ in owners))
+        for sheet,_,owners in accepted
+    ))
+
+_GUID=re.compile(r"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$")
+_INT32_MAX=2147483647
+
+def _rule_fail(code:str,part:CanonicalPartURI,field:str,detail:str)->None:
+    _fail(code,part.value,field,detail)
+
+def _priority(value:str,part:CanonicalPartURI)->int:
+    collapsed=" ".join(value.split())
+    if not collapsed or "\u00a0" in value or not re.fullmatch(r"\+?[0-9]+",collapsed):
+        _rule_fail("invalid-x14-cf-priority",part,"priority",value)
+    digits=collapsed.removeprefix("+").lstrip("0") or "0"
+    if len(digits)>10:
+        _rule_fail("invalid-x14-cf-priority",part,"priority",value)
+    result=int(collapsed)
+    if result < 1 or result > _INT32_MAX:
+        _rule_fail("invalid-x14-cf-priority",part,"priority",value)
+    return result
+
+def _rule(rule:ET.Element,part:CanonicalPartURI,owner:X14CfContainerOwner,document_order:int,path_index:int,priorities:set[int])->X14CfRuleEnvelope:
+    allowed={"type","priority","stopIfTrue","id"}
+    unknown=sorted(set(rule.attrib)-allowed)
+    if unknown:_rule_fail("unknown-x14-cf-attribute",part,"attribute",unknown[0])
+    missing=sorted({"type","priority","id"}-set(rule.attrib))
+    if missing:_rule_fail("invalid-x14-cf-cardinality",part,"attribute",missing[0])
+    kind=rule.attrib["type"]
+    if kind!="expression":_rule_fail("unsupported-x14-cf-rule-type",part,"type",kind)
+    priority=_priority(rule.attrib["priority"],part)
+    if priority in priorities:_rule_fail("duplicate-x14-cf-priority",part,"priority",str(priority))
+    stop=rule.attrib.get("stopIfTrue")
+    if stop is None: stop_value=None
+    elif stop in {"0","false"}: stop_value=False
+    elif stop in {"1","true"}: stop_value=True
+    else:_rule_fail("invalid-x14-cf-boolean",part,"stopIfTrue",stop)
+    rule_id=rule.attrib["id"]
+    if not _GUID.fullmatch(rule_id):_rule_fail("invalid-x14-cf-id",part,"id",rule_id)
+    children=list(rule)
+    formulas=[child for child in children if child.tag==_F]
+    dxfs=[child for child in children if child.tag==_DXF]
+    if len(formulas)!=1:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","f")
+    if len(dxfs)!=1:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","dxf")
+    formula,dxf=formulas[0],dxfs[0]
+    if children.index(formula)!=0 or children.index(dxf)!=1:_rule_fail("invalid-x14-cf-order",part,"cfRule","f,dxf")
+    if formula.attrib:_rule_fail("invalid-x14-cf-formula",part,"f","attribute")
+    if list(formula):_rule_fail("invalid-x14-cf-formula",part,"f","child")
+    if not _nonwhite(formula.text):_rule_fail("invalid-x14-cf-formula",part,"f","text")
+    if _nonwhite(formula.tail):_rule_fail("invalid-x14-cf-formula",part,"f","tail")
+    if dxf.attrib:_rule_fail("invalid-x14-cf-dxf",part,"dxf","attribute")
+    if _nonwhite(dxf.text):_rule_fail("invalid-x14-cf-dxf",part,"dxf","text")
+    if _nonwhite(dxf.tail):_rule_fail("invalid-x14-cf-dxf",part,"dxf","tail")
+    priorities.add(priority)
+    return X14CfRuleEnvelope(f"{owner.owner_path}/cfRule[{path_index}]",document_order,kind,priority,stop_value,rule_id,formula.text,True)
+
+def read_worksheet_x14_cf_rule_envelope(package_path:os.PathLike[str]|str)->WorkbookX14CfRuleEnvelope:
+    """Project X2a rule envelopes after the shared, complete X1 owner gate."""
+    accepted=_accepted(_path(package_path)); worksheets=[]
+    for sheet,part,owners in accepted:
+        priorities:set[int]=set(); rule_order=0; projected=[]
+        for owner,node in owners:
+            rules=[]
+            for path_index,child in enumerate((item for item in node if item.tag==_RULE),1):
+                if child.tag==_RULE:
+                    rule_order+=1; rules.append(_rule(child,part,owner,rule_order,path_index,priorities))
+            projected.append(X14CfOwnerRuleEnvelope(owner,tuple(rules)))
+        worksheets.append(WorksheetX14CfRuleEnvelope(sheet,tuple(projected)))
+    return WorkbookX14CfRuleEnvelope(tuple(worksheets))
