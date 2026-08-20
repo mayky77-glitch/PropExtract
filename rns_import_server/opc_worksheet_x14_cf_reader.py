@@ -183,54 +183,55 @@ def _mixed(element: ET.Element, part: CanonicalPartURI, field: str) -> None:
             _fail("invalid-x14-cf-content", part.value, field, "tail")
 
 
+def _owned_child_collision(element: ET.Element, part: CanonicalPartURI,
+                           legal: frozenset[str]) -> None:
+    """Reject only local-name impostors in a recognized CF owner subtree."""
+    for child in element:
+        if _local(child.tag) in _OWNED_LOCALS and child.tag not in legal:
+            _fail("x14-cf-namespace-collision", part.value, "tag", str(child.tag))
+
+
 def _parent_chain(root: ET.Element, part: CanonicalPartURI) -> tuple[tuple[ET.Element, ET.Element, int], ...]:
-    """Validate every owned tag's ancestry before inspecting envelope semantics."""
+    """Find owned formatters with the deliberately narrow, ordered ownership walk.
+
+    The worksheet can carry other X14 extensions (notably the data-validation
+    extension).  A whole-tree local-name search would accidentally make those
+    foreign payloads ours.  Only the worksheet/extLst/ext ownership depths are
+    therefore collision-sensitive.
+    """
     if root.tag != _WORKSHEET:
         _fail("invalid-worksheet-root", part.value, "root", str(root.tag))
     found: list[tuple[ET.Element, ET.Element, int]] = []
-    parents = {child: parent for parent in root.iter() for child in parent}
-    matching_exts = {
-        ext for ext_list in root if ext_list.tag == _EXT_LIST
-        for ext in ext_list if ext.tag == _EXT and ext.attrib.get("uri") == _URI
-    }
-
-    def in_matching_extension(element: ET.Element | None) -> bool:
-        while element is not None:
-            if element in matching_exts:
-                return True
-            element = parents.get(element)
-        return False
-
-    for element in root.iter():
-        parent = parents.get(element)
-        legal = {
-            _EXT: {_FORMATTINGS},
-            _FORMATTINGS: {_CONTAINER},
-            _CONTAINER: {_RULE, _SQREF},
-            _RULE: {_FORMULA, _DXF},
-        }.get(parent.tag if parent is not None else None)
-        if legal is not None and in_matching_extension(parent) and _local(element.tag) in _OWNED_LOCALS and element.tag not in legal:
-            _fail("x14-cf-namespace-collision", part.value, "tag", str(element.tag))
-        if element.tag not in _OWNED_TAGS:
+    for worksheet_child in root:
+        if _local(worksheet_child.tag) == "conditionalFormattings":
+            if worksheet_child.tag == _FORMATTINGS:
+                _fail("invalid-x14-cf-parent", part.value, "tag", str(worksheet_child.tag))
+            _fail("x14-cf-namespace-collision", part.value, "tag", str(worksheet_child.tag))
+        if worksheet_child.tag != _EXT_LIST:
             continue
-        if element.tag == _FORMATTINGS:
-            if parent is None or parent.tag != _EXT:
-                _fail("invalid-x14-cf-parent", part.value, "tag", str(element.tag))
-            ext_list = parents.get(parent)
-            if ext_list is None or ext_list.tag != _EXT_LIST or parents.get(ext_list) is not root:
-                _fail("invalid-x14-cf-parent", part.value, "tag", str(element.tag))
-            if parent.attrib.get("uri") != _URI:
-                _fail("unsupported-x14-cf-extension-uri", part.value, "uri", parent.attrib.get("uri", ""))
-            found.append((parent, element, list(ext_list).index(parent) + 1))
-        elif element.tag == _CONTAINER:
-            if parent is None or parent.tag != _FORMATTINGS:
-                _fail("invalid-x14-cf-parent", part.value, "tag", str(element.tag))
-        elif element.tag == _RULE:
-            if parent is None or parent.tag != _CONTAINER:
-                _fail("invalid-x14-cf-parent", part.value, "tag", str(element.tag))
-        elif element.tag == _DXF:
-            if parent is None or parent.tag != _RULE:
-                _fail("invalid-x14-cf-parent", part.value, "tag", str(element.tag))
+        for ext_index, ext in enumerate(worksheet_child, start=1):
+            if _local(ext.tag) == "conditionalFormattings":
+                if ext.tag == _FORMATTINGS:
+                    _fail("invalid-x14-cf-parent", part.value, "tag", str(ext.tag))
+                _fail("x14-cf-namespace-collision", part.value, "tag", str(ext.tag))
+            if ext.tag != _EXT:
+                continue
+            for formatting in ext:
+                if _local(formatting.tag) != "conditionalFormattings":
+                    continue
+                if formatting.tag != _FORMATTINGS:
+                    _fail("x14-cf-namespace-collision", part.value, "tag", str(formatting.tag))
+                if ext.attrib.get("uri") != _URI:
+                    _fail("unsupported-x14-cf-extension-uri", part.value, "uri", ext.attrib.get("uri", ""))
+                _owned_child_collision(formatting, part, frozenset({_CONTAINER}))
+                for container in formatting:
+                    if container.tag != _CONTAINER:
+                        continue
+                    _owned_child_collision(container, part, frozenset({_RULE, _SQREF}))
+                    for rule in container:
+                        if rule.tag == _RULE:
+                            _owned_child_collision(rule, part, frozenset({_FORMULA, _DXF}))
+                found.append((ext, formatting, ext_index))
     return tuple(found)
 
 
@@ -345,7 +346,9 @@ def _worksheet(root: ET.Element, part: CanonicalPartURI) -> tuple[X14CfContainer
             if ext.tag != _EXT or ext.attrib.get("uri") != _URI:
                 continue
             _attributes(ext_list, part, frozenset())
+            _mixed(ext_list, part, "extLst")
             _attributes(ext, part, frozenset({"uri"}), rule=True)
+            _mixed(ext, part, "ext")
             formattings = [child for child in ext if child.tag == _FORMATTINGS]
             if any(child.tag != _FORMATTINGS for child in ext):
                 _fail("unknown-x14-cf-child", part.value, "tag", str(next(child.tag for child in ext if child.tag != _FORMATTINGS)))
@@ -356,6 +359,7 @@ def _worksheet(root: ET.Element, part: CanonicalPartURI) -> tuple[X14CfContainer
                 raise AssertionError("validated X14 CF extension missing from ancestry walk")
             formatting_index = 1
             _attributes(formatting, part, frozenset())
+            _mixed(formatting, part, "conditionalFormattings")
             if not list(formatting):
                 _fail("invalid-x14-cf-cardinality", part.value, "conditionalFormattings", "conditionalFormatting")
             for container_index, container in enumerate(formatting, start=1):
