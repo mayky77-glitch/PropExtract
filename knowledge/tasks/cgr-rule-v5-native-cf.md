@@ -1,7 +1,7 @@
 ---
 card_id: cgr-rule-v5-native-cf
 status: review
-version: 2
+version: 3
 work_id: cgr-ooxml-rule-semantics-v5-20260818
 task_id: native-cf-reader-v1
 purpose: Parse complete native conditional-formatting container and rule semantics.
@@ -80,3 +80,13 @@ Input is `(worksheet_part, worksheet_xml)`; output immutable ordered typed model
   unsupported-x14 warning); `compileall` and `git diff --check` passed.
 - Residual risk remains scoped to opaque foreign extension semantics; this
   reader preserves but does not interpret them.
+
+## P6 lexical semantics follow-up — 2026-08-20
+
+- Integer whitespace collapse now recognizes only XML whitespace (`#x9`,
+  `#xA`, `#xD`, `#x20`), rather than Python's broader Unicode whitespace.
+- Unsigned integers accept signed zero (`-0` and leading-zero variants), but
+  reject every other negative lexical value. `dxfId` coverage includes signed
+  zero, signed `UInt32` maximum, overflow, and a non-breaking-space rejection.
+- Evidence: focused `133 passed`; full `419 passed` (one pre-existing OpenPyXL
+  unsupported-x14 warning); `compileall` and `git diff --check` passed.

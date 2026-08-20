@@ -96,17 +96,19 @@ def _bool(v: str | None, path: str, key: str) -> bool | None:
     if v in ("1","true"): return True
     if v in ("0","false"): return False
     _fail("invalid_boolean", path, key)
+def _collapse_xml_whitespace(v: str) -> str:
+    return re.sub(r"[\x09\x0A\x0D\x20]+", " ", v).strip(" ")
 def _i32(v: str | None, path: str, key: str) -> int | None:
     if v is None: return None
-    lexical = " ".join(v.split())
+    lexical = _collapse_xml_whitespace(v)
     if not re.fullmatch(r"[+-]?[0-9]+", lexical): _fail("invalid_integer", path, key)
     result = int(lexical)
     if not INT32_MIN <= result <= INT32_MAX: _fail("integer_out_of_range", path, key)
     return result
 def _u32(v: str | None, path: str, key: str) -> int | None:
     if v is None: return None
-    lexical = " ".join(v.split())
-    if not re.fullmatch(r"\+?[0-9]+", lexical): _fail("invalid_integer", path, key)
+    lexical = _collapse_xml_whitespace(v)
+    if not re.fullmatch(r"(?:\+?[0-9]+|-0+)", lexical): _fail("invalid_integer", path, key)
     result = int(lexical)
     if result > UINT32_MAX: _fail("integer_out_of_range", path, key)
     return result

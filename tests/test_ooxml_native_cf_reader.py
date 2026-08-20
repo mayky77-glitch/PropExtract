@@ -117,17 +117,25 @@ def test_field_specific_int32_uint32_boundaries(attribute: str, value: str, code
     with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml))
     assert error.value.code == code
 
-@pytest.mark.parametrize(("value","expected"), (("2147483648",2147483648),(str(UINT32_MAX),UINT32_MAX),(" +00000042 ",42)))
+@pytest.mark.parametrize(("value","expected"), (("2147483648",2147483648),(str(UINT32_MAX),UINT32_MAX),(f"+{UINT32_MAX}",UINT32_MAX),(" -000 ",0),(" +00000042 ",42)))
 def test_dxf_id_is_uint32_and_preserves_xsd_lexical_forms(value: str, expected: int):
     xml=f'<conditionalFormatting sqref="A1"><cfRule type="expression" priority="+0001" dxfId="{value}"><formula>1</formula></cfRule></conditionalFormatting>'
     rule=read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml)).containers[0].rules[0]
     assert (rule.priority, rule.dxf_id) == (1,expected)
 
-@pytest.mark.parametrize(("value","code"), (("-1","invalid_integer"),(str(UINT32_MAX+1),"integer_out_of_range")))
+@pytest.mark.parametrize(("value","code"), (("-1","invalid_integer"),("-0001","invalid_integer"),(str(UINT32_MAX+1),"integer_out_of_range")))
 def test_dxf_id_rejects_negative_and_uint32_overflow(value: str, code: str):
     xml=f'<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1" dxfId="{value}"><formula>1</formula></cfRule></conditionalFormatting>'
     with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(xml))
     assert error.value.code == code
+
+def test_integer_lexical_collapse_accepts_xml_whitespace_but_rejects_nbsp():
+    accepted='<conditionalFormatting sqref="A1"><cfRule type="expression" priority="&#x9;+0001&#xD;" dxfId="&#xA;-000&#x20;"><formula>1</formula></cfRule></conditionalFormatting>'
+    rule=read_native_conditional_formatting("xl/worksheets/s.xml",_ws(accepted)).containers[0].rules[0]
+    assert (rule.priority,rule.dxf_id) == (1,0)
+    rejected='<conditionalFormatting sqref="A1"><cfRule type="expression" priority="&#xA0;1" dxfId="&#xA0;-0"><formula>1</formula></cfRule></conditionalFormatting>'
+    with pytest.raises(NativeCfParseError) as error: read_native_conditional_formatting("xl/worksheets/s.xml",_ws(rejected))
+    assert error.value.code == "invalid_integer"
 
 @pytest.mark.parametrize(("field","value","expected"), (
     ("priority"," \t+00001\n ",1), ("stdDev"," +0002 ",2),
