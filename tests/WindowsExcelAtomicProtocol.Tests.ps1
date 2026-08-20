@@ -60,6 +60,32 @@ Describe 'Windows Excel atomic protocol' {
         $value.inserted | Should -Be 1
     }
 
+    It 'removes a preseeded error before publishing the sole successful result' {
+        [System.IO.File]::WriteAllText($script:error, '{"status":"error"}', [System.Text.UTF8Encoding]::new($false))
+        $callbacks = @{
+            BuildLease = { param($r) @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
+            ReadAck = { param($r) @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
+            Open = { param($r) $script:events.Add('open') }
+            Execute = { param($r) @{ inserted = 1 } }
+        }
+        Invoke-WindowsExcelAtomicProtocol -Request $script:request -Callbacks $callbacks -LeaseFile $script:lease -ResultFile $script:result -ErrorFile $script:error | Out-Null
+        Test-Path -LiteralPath $script:result | Should -BeTrue
+        Test-Path -LiteralPath $script:error | Should -BeFalse
+    }
+
+    It 'removes a preseeded result before publishing the sole failed outcome' {
+        [System.IO.File]::WriteAllText($script:result, '{"status":"ok"}', [System.Text.UTF8Encoding]::new($false))
+        $callbacks = @{
+            BuildLease = { param($r) @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
+            ReadAck = { param($r) @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
+            Open = { param($r) $script:events.Add('open') }
+            Execute = { param($r) throw [System.ComponentModel.Win32Exception]::new(5, 'save denied') }
+        }
+        { Invoke-WindowsExcelAtomicProtocol -Request $script:request -Callbacks $callbacks -LeaseFile $script:lease -ResultFile $script:result -ErrorFile $script:error } | Should -Throw 'excel_atomic_protocol_failed:execute'
+        Test-Path -LiteralPath $script:result | Should -BeFalse
+        Test-Path -LiteralPath $script:error | Should -BeTrue
+    }
+
     It 'does not open on an invalid ACK and records the exact primary failure' {
         $callbacks = @{
             BuildLease = { param($r) $script:events.Add('lease'); @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce } }
@@ -90,5 +116,75 @@ Describe 'Windows Excel atomic protocol' {
         $failure.primary.winerror | Should -Be 5
         $failure.cleanup_failure.message | Should -Be 'first cleanup'
         Test-Path -LiteralPath $script:result | Should -BeFalse
+    }
+
+    $faultCases = @(
+        @{ name = 'lease'; events = @('lease', 'cleanup-first', 'cleanup-later') },
+        @{ name = 'open'; events = @('lease', 'ack', 'open', 'cleanup-first', 'cleanup-later') },
+        @{ name = 'execute'; events = @('lease', 'ack', 'open', 'execute', 'cleanup-first', 'cleanup-later') },
+        @{ name = 'cleanup'; events = @('lease', 'ack', 'open', 'execute', 'cleanup-first', 'cleanup-later') }
+    )
+    It 'keeps exact <name> failure diagnostics and excludes downstream callbacks' -TestCases $faultCases {
+        param($name, $events)
+            $script:faultStage = $name
+            $script:primaryFault = [System.ComponentModel.Win32Exception]::new(5, ($name + ' denied'))
+            $script:cleanupFault = [System.ComponentModel.Win32Exception]::new(32, 'cleanup locked')
+            $callbacks = @{
+                BuildLease = {
+                    param($r)
+                    $script:events.Add('lease')
+                    if ($script:faultStage -eq 'lease') { throw $script:primaryFault }
+                    @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce }
+                }
+                ReadAck = {
+                    param($r)
+                    $script:events.Add('ack')
+                    @{ operation_id = $r.operation_id; owner_nonce = $r.owner_nonce; pair_nonce = $r.pair_nonce }
+                }
+                Open = {
+                    param($r)
+                    $script:events.Add('open')
+                    if ($script:faultStage -eq 'open') { throw $script:primaryFault }
+                }
+                Execute = {
+                    param($r)
+                    $script:events.Add('execute')
+                    if ($script:faultStage -eq 'execute') { throw $script:primaryFault }
+                    @{ inserted = 1 }
+                }
+                Cleanup = @(
+                    {
+                        param($r)
+                        $script:events.Add('cleanup-first')
+                        throw $script:cleanupFault
+                    },
+                    { param($r) $script:events.Add('cleanup-later') }
+                )
+            }
+            { Invoke-WindowsExcelAtomicProtocol -Request $script:request -Callbacks $callbacks -LeaseFile $script:lease -ResultFile $script:result -ErrorFile $script:error } | Should -Throw ('excel_atomic_protocol_failed:' + $name)
+            $script:events | Should -Be $events
+            $failure = Get-Content -Raw -LiteralPath $script:error | ConvertFrom-Json
+            $failure.primary.stage | Should -Be $name
+            if ($name -eq 'cleanup') {
+                $failure.primary.hresult | Should -Be $script:cleanupFault.HResult
+                $failure.primary.winerror | Should -Be 32
+            } else {
+                $failure.primary.hresult | Should -Be $script:primaryFault.HResult
+                $failure.primary.winerror | Should -Be 5
+            }
+            $failure.cleanup_failure.stage | Should -Be 'cleanup'
+            $failure.cleanup_failure.hresult | Should -Be $script:cleanupFault.HResult
+            $failure.cleanup_failure.winerror | Should -Be 32
+            Test-Path -LiteralPath $script:result | Should -BeFalse
+    }
+
+    It 'makes final publication failures explicit and cannot report success' {
+        $source = Get-Content -Raw -LiteralPath $modulePath
+        $remove = $source.IndexOf('[System.IO.File]::Delete($StaleOpposite)', [System.StringComparison]::Ordinal)
+        $write = $source.IndexOf('Write-AtomicProtocolJson -Path $Destination', [System.StringComparison]::Ordinal)
+        $failure = $source.IndexOf('excel_atomic_protocol_final_publication_failed:', [System.StringComparison]::Ordinal)
+        $remove | Should -BeGreaterThan -1
+        $write | Should -BeGreaterThan $remove
+        $failure | Should -BeGreaterThan -1
     }
 }

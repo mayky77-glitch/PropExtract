@@ -92,6 +92,47 @@ function Assert-ExactAtomicLease {
     }
 }
 
+function New-FinalPublicationException {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Artifact,
+        [Parameter(Mandatory = $true)]$PublicationException,
+        $Primary,
+        $CleanupFailure
+    )
+
+    $failure = [System.InvalidOperationException]::new(('excel_atomic_protocol_final_publication_failed:{0}:{1}' -f $Artifact, $PublicationException.Message), $PublicationException)
+    # No artifact may exist when its atomic replacement fails. Retain the
+    # already-observed operation diagnostics on the thrown failure instead of
+    # claiming a successful protocol run or discarding its primary cause.
+    $failure.Data['primary'] = $Primary
+    $failure.Data['cleanup_failure'] = $CleanupFailure
+    return $failure
+}
+
+function Publish-AtomicProtocolFinalArtifact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('result', 'error')][string]$Artifact,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$StaleOpposite,
+        [Parameter(Mandatory = $true)]$Value,
+        $Primary,
+        $CleanupFailure
+    )
+
+    try {
+        # A stale opposite outcome must be gone before the sole final outcome
+        # is atomically published. If either delete or publication fails, the
+        # protocol raises a deterministic failure and never reports success.
+        if ([System.IO.File]::Exists($StaleOpposite)) { [System.IO.File]::Delete($StaleOpposite) }
+        Write-AtomicProtocolJson -Path $Destination -Value $Value
+    }
+    catch {
+        throw (New-FinalPublicationException -Artifact $Artifact -PublicationException $_.Exception -Primary $Primary -CleanupFailure $CleanupFailure)
+    }
+}
+
 function Invoke-WindowsExcelAtomicProtocol {
     <#
     Callbacks are intentionally injected so this protocol can be tested without
@@ -161,11 +202,11 @@ function Invoke-WindowsExcelAtomicProtocol {
     if ($null -eq $primary -and $null -ne $cleanupFailure) { $primary = $cleanupFailure }
     if ($null -ne $primary) {
         $failure = [ordered]@{ status = 'error'; primary = $primary; cleanup_failure = $cleanupFailure }
-        Write-AtomicProtocolJson -Path $ErrorFile -Value $failure
+        Publish-AtomicProtocolFinalArtifact -Artifact 'error' -Destination $ErrorFile -StaleOpposite $ResultFile -Value $failure -Primary $primary -CleanupFailure $cleanupFailure
         throw ([System.InvalidOperationException]::new(('excel_atomic_protocol_failed:{0}' -f $primary.stage)))
     }
 
-    Write-AtomicProtocolJson -Path $ResultFile -Value ([ordered]@{ status = 'ok'; result = $result; cleanup_failure = $null })
+    Publish-AtomicProtocolFinalArtifact -Artifact 'result' -Destination $ResultFile -StaleOpposite $ErrorFile -Value ([ordered]@{ status = 'ok'; result = $result; cleanup_failure = $null }) -Primary $null -CleanupFailure $null
     return $result
 }
 
