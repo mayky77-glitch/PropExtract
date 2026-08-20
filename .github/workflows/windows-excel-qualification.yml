@@ -1,0 +1,151 @@
+name: Windows Excel Pester qualification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-excel-qualification.yml"
+      - "scripts/WindowsExcelRequestSchema.psm1"
+      - "scripts/WindowsExcelAtomicProtocol.psm1"
+      - "tests/WindowsExcelRequestSchema.Tests.ps1"
+      - "tests/WindowsExcelAtomicProtocol.Tests.ps1"
+      - "tests/WindowsExcelFakeCom.Tests.ps1"
+      - "tests/support/WindowsExcelFakeCom.psm1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pester-qualification:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Initialize qualification summary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summary = [ordered]@{
+            candidate_sha = $env:CANDIDATE_SHA
+            event_github_sha = $env:GITHUB_SHA
+            checkout_sha = $null
+            checkout_status = 'not-run'
+            pester_version = $null
+            suites = @(
+              [ordered]@{ name = 'request-schema'; path = 'tests/WindowsExcelRequestSchema.Tests.ps1'; total = $null; passed = $null; failed = $null; skipped = $null; result = $null; status = 'not-run' },
+              [ordered]@{ name = 'atomic-protocol'; path = 'tests/WindowsExcelAtomicProtocol.Tests.ps1'; total = $null; passed = $null; failed = $null; skipped = $null; result = $null; status = 'not-run' },
+              [ordered]@{ name = 'fake-com'; path = 'tests/WindowsExcelFakeCom.Tests.ps1'; total = $null; passed = $null; failed = $null; skipped = $null; result = $null; status = 'not-run' }
+            )
+          }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json') -Encoding utf8
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+
+      - name: Verify candidate checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $actualSha = (git rev-parse HEAD).Trim()
+          $summary.checkout_sha = $actualSha
+          $summary.checkout_status = if ($actualSha -eq $env:CANDIDATE_SHA) { 'verified' } else { 'failed' }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          Write-Host "candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA checkout_sha=$actualSha"
+          if ($actualSha -ne $env:CANDIDATE_SHA) { throw 'checkout SHA does not match the requested candidate SHA' }
+
+      - name: Record checkout failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $summary.checkout_status = 'failed'
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+
+      - name: Install and verify Pester 5.6.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name Pester -RequiredVersion 5.6.1 -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+          Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
+          $pester = Get-Module Pester | Where-Object { $_.Version -eq [version]'5.6.1' } | Select-Object -First 1
+          if ($null -eq $pester -or $pester.Version.ToString() -ne '5.6.1') { throw 'Pester 5.6.1 was not imported exactly' }
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $summary.pester_version = $pester.Version.ToString()
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          Write-Host "pester_version=$($pester.Version) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA"
+
+      - name: Qualify request-schema suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
+          $result = Invoke-Pester -Path 'tests/WindowsExcelRequestSchema.Tests.ps1' -PassThru -Output Detailed
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $suite = $summary.suites | Where-Object { $_.name -eq 'request-schema' } | Select-Object -First 1
+          if ($null -eq $result) {
+            $suite.total = 0; $suite.passed = 0; $suite.failed = 0; $suite.skipped = 0; $suite.result = 'null'; $suite.status = 'failed'
+          } else {
+            $suite.total = [int]$result.TotalCount; $suite.passed = [int]$result.PassedCount; $suite.failed = [int]$result.FailedCount; $suite.skipped = [int]$result.SkippedCount; $suite.result = [string]$result.Result
+            $suite.status = if ($result.Result -eq 'Passed' -and $result.FailedCount -eq 0 -and $result.TotalCount -gt 0 -and $result.PassedCount -eq $result.TotalCount -and $result.SkippedCount -eq 0 -and $result.NotRunCount -eq 0) { 'passed' } else { 'failed' }
+          }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          Write-Host "suite=$($suite.name) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
+          if ($suite.status -ne 'passed') { throw 'request-schema Pester qualification did not complete cleanly' }
+
+      - name: Qualify atomic-protocol suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
+          $env:WINDOWS_EXCEL_ATOMIC_PROTOCOL_PESTER = '1'
+          try { $result = Invoke-Pester -Path 'tests/WindowsExcelAtomicProtocol.Tests.ps1' -PassThru -Output Detailed }
+          finally { Remove-Item Env:WINDOWS_EXCEL_ATOMIC_PROTOCOL_PESTER -ErrorAction SilentlyContinue }
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $suite = $summary.suites | Where-Object { $_.name -eq 'atomic-protocol' } | Select-Object -First 1
+          if ($null -eq $result) {
+            $suite.total = 0; $suite.passed = 0; $suite.failed = 0; $suite.skipped = 0; $suite.result = 'null'; $suite.status = 'failed'
+          } else {
+            $suite.total = [int]$result.TotalCount; $suite.passed = [int]$result.PassedCount; $suite.failed = [int]$result.FailedCount; $suite.skipped = [int]$result.SkippedCount; $suite.result = [string]$result.Result
+            $suite.status = if ($result.Result -eq 'Passed' -and $result.FailedCount -eq 0 -and $result.TotalCount -gt 0 -and $result.PassedCount -eq $result.TotalCount -and $result.SkippedCount -eq 0 -and $result.NotRunCount -eq 0) { 'passed' } else { 'failed' }
+          }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          Write-Host "suite=$($suite.name) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
+          if ($suite.status -ne 'passed') { throw 'atomic-protocol Pester qualification did not complete cleanly' }
+
+      - name: Qualify fake-COM suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.6.1 -Force -ErrorAction Stop
+          $env:WINDOWS_EXCEL_FAKE_COM_PESTER_DISCOVERY = '1'
+          try { $result = Invoke-Pester -Path 'tests/WindowsExcelFakeCom.Tests.ps1' -PassThru -Output Detailed }
+          finally { Remove-Item Env:WINDOWS_EXCEL_FAKE_COM_PESTER_DISCOVERY -ErrorAction SilentlyContinue }
+          $summaryPath = Join-Path $env:RUNNER_TEMP 'windows-excel-qualification-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+          $suite = $summary.suites | Where-Object { $_.name -eq 'fake-com' } | Select-Object -First 1
+          if ($null -eq $result) {
+            $suite.total = 0; $suite.passed = 0; $suite.failed = 0; $suite.skipped = 0; $suite.result = 'null'; $suite.status = 'failed'
+          } else {
+            $suite.total = [int]$result.TotalCount; $suite.passed = [int]$result.PassedCount; $suite.failed = [int]$result.FailedCount; $suite.skipped = [int]$result.SkippedCount; $suite.result = [string]$result.Result
+            $suite.status = if ($result.Result -eq 'Passed' -and $result.FailedCount -eq 0 -and $result.TotalCount -eq 9 -and $result.PassedCount -eq $result.TotalCount -and $result.SkippedCount -eq 0 -and $result.NotRunCount -eq 0) { 'passed' } else { 'failed' }
+          }
+          $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          Write-Host "suite=$($suite.name) candidate_sha=$env:CANDIDATE_SHA event_github_sha=$env:GITHUB_SHA pester_version=$($summary.pester_version) total=$($suite.total) passed=$($suite.passed) failed=$($suite.failed) skipped=$($suite.skipped) result=$($suite.result)"
+          if ($suite.status -ne 'passed') { throw 'fake-COM Pester qualification did not complete cleanly' }
+
+      - name: Upload qualification summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-excel-qualification-summary
+          path: ${{ runner.temp }}/windows-excel-qualification-summary.json
+          if-no-files-found: error
