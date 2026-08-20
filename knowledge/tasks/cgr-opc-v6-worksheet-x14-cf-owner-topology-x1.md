@@ -1,6 +1,6 @@
 ---
 type: task
-status: planned
+status: completed
 work_id: cgr-opc-v6-worksheet-x14-cf-owner-topology-x1
 tags: [task/implementation, feature/x14-cf-owner-topology, status/planned]
 last_verified: 2026-08-20
@@ -52,3 +52,7 @@ Acceptance commands:
 `python3 -m compileall -q rns_import_server/opc_worksheet_x14_cf_owner_topology.py tests/opc_worksheet_x14_cf_owner_fixture_factory.py tests/test_opc_worksheet_x14_cf_owner_topology.py`
 
 `git diff --check`
+
+## Implementation evidence
+
+Implemented from direct parent `d6d007528ceed65ed6c6597015c187ea536ee544` without rejected X14-envelope ancestry. 2026-08-20 validation passed: focused `15`, compatibility `398`, full `1150` tests (one existing openpyxl extension warning), `compileall`, and `git diff --check`.
