@@ -35,6 +35,17 @@ def test_unreserved_percent_aliases_normalize_before_lookup_and_collide():
     )
 
 
+def test_exact_duplicate_part_names_are_collisions():
+    values = ["xl/workbook.xml", "xl/workbook.xml"]
+    collisions = normalized_part_collisions(values)
+    assert [item.as_tuple() for item in collisions] == [
+        ("duplicate-normalized-part", "xl/workbook.xml", "xl/workbook.xml", "xl/workbook.xml")
+    ]
+    assert error_tuple(require_unique_part_uris, values) == (
+        "duplicate-normalized-part", "xl/workbook.xml", "xl/workbook.xml"
+    )
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -55,6 +66,13 @@ def test_part_rejections_have_exact_tuples(value, expected):
     assert error_tuple(canonicalize_part_uri, value) == expected
 
 
+def test_percent_encoded_utf8_continuation_bytes_are_validated_after_decoding():
+    assert canonicalize_part_uri("xl/%C3%A9.xml") == CanonicalPartURI("xl/%C3%A9.xml")
+    assert error_tuple(canonicalize_part_uri, "xl/%C2%80.xml") == (
+        "invalid-control", "xl/%C2%80.xml", "xl/%C2%80.xml"
+    )
+
+
 def test_relative_resolution_is_source_relative_idempotent_and_rejects_root_escape():
     source = CanonicalPartURI("xl/worksheets/sheet1.xml")
     result = resolve_relative_part_uri(source, "../workbook.xml")
@@ -63,6 +81,20 @@ def test_relative_resolution_is_source_relative_idempotent_and_rejects_root_esca
     assert parse_relative_part_uri("../workbook.xml").value == "../workbook.xml"
     assert error_tuple(resolve_relative_part_uri, CanonicalPartURI("root.xml"), "../escape.xml") == (
         "package-root-escape", "../escape.xml", "../escape.xml"
+    )
+
+
+def test_relative_resolution_keeps_raw_dot_segments_and_percent_escapes_distinct():
+    source = CanonicalPartURI("xl/worksheets/sheet1.xml")
+    assert resolve_relative_part_uri(source, "../shared%20strings.xml") == CanonicalPartURI(
+        "xl/shared%20strings.xml"
+    )
+
+
+@pytest.mark.parametrize("target", [".", "..", "a/.", "a/.."])
+def test_relative_resolution_rejects_terminal_directory_targets(target):
+    assert error_tuple(resolve_relative_part_uri, CanonicalPartURI("xl/worksheets/sheet1.xml"), target) == (
+        "invalid-part-uri", target, target
     )
 
 

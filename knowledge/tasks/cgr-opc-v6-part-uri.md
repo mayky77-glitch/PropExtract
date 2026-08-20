@@ -26,4 +26,5 @@ Return typed raw/canonical/relative forms. Normalize percent-encoded unreserved 
 
 - Added typed raw, canonical and relative URI forms plus stable `OPCPartURIError` and collision tuples.
 - Unreserved escapes normalize before lookup (`%77` equals `w`); encoded separators, controls, malformed escapes, non-NFC/format Unicode and unsafe path topology fail closed.
-- Focused pytest, compileall and whitespace-diff checks recorded with feature handoff.
+- P6 validation: focused URI suite `22 passed`; full suite `308 passed` with one existing OpenPyXL synthetic-x14 warning; `python3 -m compileall -q rns_import_server/opc_part_uri.py` and `git diff --check` passed.
+- P6 remediation: raw `..` resolves even when another valid escape is present; only percent-decoded dot segments are rejected. Percent bytes reject only raw ASCII C0/DEL before UTF-8 decode, then decoded C1 remains a typed control failure (`%C2%80`); valid UTF-8 continuation bytes are accepted. Exact duplicate raw names now collide. Terminal directory targets (`.`, `..`, `a/.`, `a/..`) fail `invalid-part-uri` rather than resolving to a part.

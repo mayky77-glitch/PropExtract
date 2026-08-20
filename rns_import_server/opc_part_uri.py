@@ -83,17 +83,18 @@ def _coerce(value: str | RawPartURI | CanonicalPartURI | RelativePartURI, subjec
     return value
 
 
-def _validate_unicode(value: str, subject: str) -> None:
+def _validate_unicode(value: str, subject: str, detail: str | None = None) -> None:
+    error_detail = value if detail is None else detail
     if not value:
-        _fail("empty-uri", subject, value)
+        _fail("empty-uri", subject, error_detail)
     if value != unicodedata.normalize("NFC", value):
-        _fail("ambiguous-unicode", subject, value)
+        _fail("ambiguous-unicode", subject, error_detail)
     for character in value:
         ordinal = ord(character)
         if ordinal <= 31 or ordinal == 127 or 128 <= ordinal <= 159:
-            _fail("invalid-control", subject, value)
+            _fail("invalid-control", subject, error_detail)
         if unicodedata.category(character) in {"Cf", "Cs"}:
-            _fail("ambiguous-unicode", subject, value)
+            _fail("ambiguous-unicode", subject, error_detail)
 
 
 def _percent_normalize(value: str, subject: str) -> str:
@@ -115,7 +116,7 @@ def _percent_normalize(value: str, subject: str) -> str:
         byte = int(token[1:], 16)
         if byte in {0x2F, 0x5C}:
             _fail("encoded-separator", subject, value)
-        if byte <= 31 or byte == 127 or 128 <= byte <= 159:
+        if byte <= 31 or byte == 127:
             _fail("invalid-control", subject, value)
         character_from_byte = chr(byte)
         if character_from_byte in _UNRESERVED:
@@ -131,12 +132,20 @@ def _percent_normalize(value: str, subject: str) -> str:
         decoded = unquote_to_bytes(normalized).decode("utf-8")
     except UnicodeDecodeError:
         _fail("ambiguous-unicode", subject, value)
-    _validate_unicode(decoded, subject)
+    _validate_unicode(decoded, subject, value)
     if "/" in decoded and "%2F" in normalized.upper():
         _fail("encoded-separator", subject, value)
     if "\\" in decoded:
         _fail("invalid-backslash", subject, value)
     return normalized
+
+
+def _has_percent_decoded_dot_segment(raw: str, normalized: str) -> bool:
+    """Return whether percent decoding, rather than raw syntax, made a dot segment."""
+    return any(
+        normalized_segment in {".", ".."} and raw_segment != normalized_segment
+        for raw_segment, normalized_segment in zip(raw.split("/"), normalized.split("/"), strict=True)
+    )
 
 
 def _validate_path_chars(value: str, subject: str) -> None:
@@ -152,7 +161,7 @@ def canonicalize_part_uri(value: str | RawPartURI | CanonicalPartURI) -> Canonic
     normalized = _percent_normalize(raw, raw)
     _validate_path_chars(normalized, raw)
     segments = normalized.split("/")
-    if "%" in raw and any(segment in {".", ".."} for segment in segments):
+    if _has_percent_decoded_dot_segment(raw, normalized):
         _fail("encoded-traversal", raw, normalized)
     if any(segment in {"", ".", ".."} for segment in segments):
         _fail("invalid-part-segment", raw, normalized)
@@ -167,7 +176,7 @@ def parse_relative_part_uri(value: str | RelativePartURI) -> RelativePartURI:
         _fail("invalid-target-character", raw, normalized)
     if normalized.startswith("/") or normalized.endswith("/") or "//" in normalized:
         _fail("invalid-slash", raw, normalized)
-    if "%" in raw and any(segment in {".", ".."} for segment in normalized.split("/")):
+    if _has_percent_decoded_dot_segment(raw, normalized):
         _fail("encoded-traversal", raw, normalized)
     if not normalized:
         _fail("empty-uri", raw, normalized)
@@ -180,6 +189,8 @@ def resolve_relative_part_uri(
     """Resolve internal target relative to source part, never above package root."""
     canonical_source = None if source is None else canonicalize_part_uri(source)
     relative = parse_relative_part_uri(target)
+    if relative.value.split("/")[-1] in {".", ".."}:
+        _fail("invalid-part-uri", relative.value, relative.value)
     stack = [] if canonical_source is None else canonical_source.value.split("/")[:-1]
     for segment in relative.value.split("/"):
         if segment in {"", "."}:
@@ -206,7 +217,7 @@ def normalized_part_collisions(values: tuple[str | RawPartURI, ...] | list[str |
         first = seen.get(canonical.value)
         if first is None:
             seen[canonical.value] = raw
-        elif first.value != raw.value:
+        else:
             collisions.append(PartURICollision(canonical, first, raw))
     return tuple(collisions)
 
