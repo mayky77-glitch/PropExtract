@@ -1,6 +1,6 @@
 ---
 card_id: cgr-opc-v6-package-graph
-status: ready
+status: review
 version: 1
 work_id: cgr-opc-package-graph-v1-20260820
 task_id: package-graph-v1
@@ -9,6 +9,10 @@ role: developer
 route: P4
 assigned_model: gpt-5.6-terra
 reasoning_effort: high
+launch_status: inherited
+actual_model: unknown
+actual_reasoning_effort: unknown
+fallback_reason: collaboration runtime did not expose launch override confirmation
 planning_parent_sha: b6ebf9914167a872895631ab7deffcdd17fa86f4
 dependency_shas: [d31d974551c44e9ae6b91b4e629362ffcb50a5b4, cbe0a7c3510454c1a98d1da05b0a3cfbda532b7d, bfb0065ce4c8915dc5163b74e3b841bd72bab5c9]
 branch: codex/cgr-opc-package-graph-v1
@@ -44,3 +48,11 @@ Build a read-only, immutable package graph from a filesystem path to an OPC ZIP.
 - Unit cases: valid root and nested relationships; source derivation; missing source; missing internal target; external relative/rooted/network/absolute references; exact duplicate and percent alias; root escape; misplaced `.rels`; invalid content-types root; corrupt/non-ZIP/encrypted input; deterministic member/XML order; immutable records.
 - Drive the accepted independent V6 corpus by writing its package bytes and checking every valid case succeeds and every invalid case fails with the correct stable first category/context. Production must not import from `tests`.
 - Regression commands in front matter pass. Human commit/push; no merge, rebase, amend, force-push, or unrelated edits.
+
+## Implementation evidence
+
+- Added the immutable ZIP package graph in `rns_import_server/opc_package_graph.py`, using only the accepted part-URI and relationship-XML primitives.
+- Added focused package-graph cases in `tests/test_opc_package_graph.py`, including the independent V6 corpus replay.
+- `python3 -m pytest -q tests/test_opc_package_graph.py tests/test_opc_part_uri.py tests/test_opc_relationship_xml.py tests/test_opc_package_v6_corpus.py` → 120 passed.
+- `python3 -m pytest -q` → 406 passed, 1 existing openpyxl warning; `git diff --check` passed.
+- Known contract risk: the corpus's raw-Unicode relationship target is labelled valid, but the accepted relationship parser rejects non-ASCII URI references. The graph keeps that parser as the responsible typed-error boundary.
