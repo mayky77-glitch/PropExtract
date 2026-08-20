@@ -33,3 +33,10 @@ acceptance_commands: ["python3 -m pytest -q tests/test_opc_worksheet_structure_r
 - Implemented the runtime-only reader on the accepted cell-boundary parent. It forwards topology/cell typed errors unchanged and does not re-own XML declaration, BOM, encoding, or row lexical validation.
 - Runtime cases: immutable dimensions, rows (including accepted `ht`, `s`, and `outlineLevel` lexicals), strict A1 bounds, required exact merge count with row-major canonical merge order, optional auto-filter, and owned namespace/order/content failures.
 - Validation: focused 165 passed; full 604 passed with the pre-existing OpenPyXL x14 warning; compileall and `git diff --check` clean.
+
+
+## P6 residual remediation — 2026-08-20
+
+- Added an exact parent/depth validator for every correctly namespaced owned tag: `dimension`, `sheetData`, `autoFilter`, and `mergeCells` are direct worksheet children; `row` is only under `sheetData`; `mergeCell` is only under `mergeCells`. Invalid direct/nested occurrences fail with `invalid-owned-worksheet-parent`; no tag is silently omitted.
+- Added 8 focused regressions covering direct root `mergeCell`/`row` and nested leaks for all six owned tag types, including `dimension` inside a foreign extension.
+- Revalidation after remediation: focused 175 passed; full 612 passed with the pre-existing OpenPyXL x14 warning; compileall and `git diff --check` clean.

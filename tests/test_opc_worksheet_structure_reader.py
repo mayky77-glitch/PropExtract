@@ -140,3 +140,24 @@ def test_rejects_empty_namespace_owned_name_collision(tmp_path):
     assert error(package(tmp_path / "empty-namespace.xlsx", sheet_one=payload)) == (
         "owned-worksheet-namespace-collision", "xl/worksheets/first.xml", "tag", "autoFilter"
     )
+
+
+@pytest.mark.parametrize(("leak", "tag"), [
+    ('<mergeCell ref="A6:B6"/>', "mergeCell"),
+    ('<row r="10"><c r="A10"><v>2</v></c></row>', "row"),
+    ('<ext xmlns="urn:extension"><dimension xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ref="A6"/></ext>', "dimension"),
+    ('<ext xmlns="urn:extension"><sheetData xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/></ext>', "sheetData"),
+    ('<ext xmlns="urn:extension"><autoFilter xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ref="A6"/></ext>', "autoFilter"),
+    ('<ext xmlns="urn:extension"><mergeCells xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="0"/></ext>', "mergeCells"),
+    ('<ext xmlns="urn:extension"><row xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" r="10"/></ext>', "row"),
+    ('<ext xmlns="urn:extension"><mergeCell xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ref="A6:B6"/></ext>', "mergeCell"),
+])
+def test_rejects_owned_tags_outside_their_exact_legal_parent(tmp_path, leak, tag):
+    payload = (
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData>' + leak + '</worksheet>'
+    ).encode()
+    assert error(package(tmp_path / "owned-parent.xlsx", sheet_one=payload)) == (
+        "invalid-owned-worksheet-parent", "xl/worksheets/first.xml", "tag",
+        "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}" + tag,
+    )

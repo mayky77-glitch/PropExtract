@@ -187,6 +187,27 @@ def _row(element: ET.Element, part: str, previous: int) -> WorksheetRowPropertie
     return WorksheetRowProperties(row, height, style, _bool(element.attrib["customHeight"], part, "customHeight") if "customHeight" in element.attrib else None, _bool(element.attrib["customFormat"], part, "customFormat") if "customFormat" in element.attrib else None, _bool(element.attrib["hidden"], part, "hidden") if "hidden" in element.attrib else None, outline, _bool(element.attrib["collapsed"], part, "collapsed") if "collapsed" in element.attrib else None)
 
 
+def _validate_owned_placement(root: ET.Element, part: CanonicalPartURI) -> None:
+    """Reject correctly-namespaced owned tags outside their legal parent."""
+    expected_parent = {
+        _DIMENSION: _WORKSHEET,
+        _SHEET_DATA: _WORKSHEET,
+        _AUTO_FILTER: _WORKSHEET,
+        _MERGE_CELLS: _WORKSHEET,
+        _ROW: _SHEET_DATA,
+        _MERGE_CELL: _MERGE_CELLS,
+    }
+
+    def visit(parent: ET.Element) -> None:
+        for child in parent:
+            expected = expected_parent.get(child.tag)
+            if expected is not None and parent.tag != expected:
+                _fail("invalid-owned-worksheet-parent", part.value, "tag", str(child.tag))
+            visit(child)
+
+    visit(root)
+
+
 def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) -> tuple[A1Range | None, tuple[WorksheetRowProperties, ...], tuple[A1Range, ...], WorksheetAutoFilter | None]:
     owned = {_DIMENSION: "dimension", _SHEET_DATA: "sheetData", _AUTO_FILTER: "autoFilter", _MERGE_CELLS: "mergeCells"}
     expected_tags = {
@@ -197,6 +218,7 @@ def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) 
         local_name = element.tag.rsplit("}", 1)[-1]
         if local_name in expected_tags and element.tag != expected_tags[local_name]:
             _fail("owned-worksheet-namespace-collision", part.value, "tag", str(element.tag))
+    _validate_owned_placement(root, part)
     elements = [child for child in root if child.tag in owned]
     order = [_DIMENSION, _SHEET_DATA, _AUTO_FILTER, _MERGE_CELLS]
     positions = [order.index(element.tag) for element in elements]
