@@ -110,12 +110,12 @@ def _qualify_native_cancel_listener(root: Path) -> str:
     listener = helper[source_start:source_end]
     probe = root / "native-cancel-listener-probe.ps1"
     probe.write_text(
-        "Add-Type -ReferencedAssemblies 'System.Runtime.Serialization.dll' -TypeDefinition @'\n"
+        "param([int]$Iterations=300)\nAdd-Type -ReferencedAssemblies 'System.Runtime.Serialization.dll' -TypeDefinition @'\n"
         + listener
         + "\n'@\n"
         + "$l=New-Object NativeCancelListener;$l.Start();if(-not $l.WaitForOpen(5000)){exit 6};"
         + "[Console]::Out.WriteLine('ready');"
-        + "for($i=0;$i -lt 300;$i++){$l.Poll();if($l.Failed){exit 5};"
+        + "for($i=0;$i -lt $Iterations;$i++){$l.Poll();if($l.Failed){exit 5};"
         + "if($l.IsCancellationRequested){[Console]::Out.WriteLine('cancelled');exit 4};"
         + "Start-Sleep -Milliseconds 10};[Console]::Out.WriteLine('complete');exit 0\n",
         encoding="utf-8",
@@ -123,7 +123,7 @@ def _qualify_native_cancel_listener(root: Path) -> str:
 
     def run(*, cancel: bool) -> tuple[int, str]:
         process = subprocess.Popen(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe), "-Iterations", "300" if cancel else "30"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
