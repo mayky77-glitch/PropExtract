@@ -38,7 +38,7 @@ from rns_import_server.workbook_mutation_manifest import (
     validate_insertion,
 )
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
-from rns_import_server.registry_storage import RegistryConflictError
+from rns_import_server.registry_storage import RegistryConflictError, RegistryError
 from rns_import_server.workbook_cutover import (
     WorkbookCutoverError,
     fsync_file,
@@ -47,6 +47,12 @@ from rns_import_server.workbook_cutover import (
     verify_pre_cutover_target,
 )
 from rns_import_server.workbook_finalization_snapshot import FinalizationSnapshotError, build_payload
+
+_FINALIZATION_AUTHORITY_CODES = frozenset({
+    "workbook_contract_id_required", "consumer_action_identity_mismatch", "finalization_snapshot_required",
+    "finalization_snapshot_invalid", "finalization_snapshot_too_large", "finalization_snapshot_conflict",
+    "finalization_authority_missing", "finalization_authority_corrupt", "finalization_authority_journal_failed",
+})
 
 
 class GroupRowInsertionError(RuntimeError):
@@ -481,8 +487,13 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 authority_recorded = True
             except FinalizationSnapshotError as error:
                 raise GroupRowInsertionError(error.code, stage="finalization_authority", cause=error) from error
+            except RegistryError as error:
+                code = str(error)
+                if code in _FINALIZATION_AUTHORITY_CODES:
+                    raise GroupRowInsertionError(code, stage="finalization_authority", cause=error) from error
+                raise GroupRowInsertionError("finalization_authority_journal_failed", stage="finalization_authority") from error
             except Exception as error:
-                raise GroupRowInsertionError("finalization_authority_journal_failed", stage="finalization_authority", cause=error) from error
+                raise GroupRowInsertionError("finalization_authority_journal_failed", stage="finalization_authority") from error
             _recheck(context, plan, request.source)
             try:
                 verify_pre_cutover_target(source=request.source, output=request.output, pre_hash=plan.workbook_hash)

@@ -85,3 +85,10 @@ knowledge_paths:
 - `record_finalization_authority` inserts/verifies the canonical sanitized snapshot and records `post_hash` in one `BEGIN IMMEDIATE` transaction. `published` verifies the snapshot digest and fails closed when it is absent/corrupt.
 - Focused: `117 passed, 2 skipped` (snapshot, journal, storage, group insertion, report observability, native-contract compatibility); seed build/check and validator green; compileall/diff green.
 - Full: `1675 passed, 2 skipped`, with 12 pre-existing environment-only failures from the documented stale absolute XLSX path `/Users/x/Автоматизация РнС и ГРО/Реестр РНС Иркутск.xlsx`, plus one known OpenPyXL x14 warning. No source XLSX was copied, linked, or mutated.
+
+## P6 remediation evidence
+
+- `published` now revalidates the full stored payload against the current journal authority: exact action/consumer identity, required immutable workbook contract, target-row schema and `report_payload.final_state.workbook_sha256 == journal.post_hash`. A forged canonical payload with a recomputed digest is blocked.
+- Legacy v1/null-contract data is readable only through an exact replay of an already persisted row. Every fresh `create`/`reserve`, including an intent-v1 shaped request, requires a contract and action/consumer identity.
+- Finalization input validation runs before report projection, accepting only exact JSON primitives/containers with string keys and finite numbers. The 16 MiB ceiling applies exactly to canonical payload, not the digest envelope. Allowlisted typed authority codes reach `finalization_authority` without report/payload text.
+- Remediation-owned focused: `105 passed`; seed build/check and validator, compileall/diff green. Full: `1680 passed, 2 skipped`, 12 known stale absolute-XLSX failures plus one intentionally stale forbidden test fixture `tests/test_excel_native_contract.py::test_verified_lease_commits_real_sqlite_journal_before_ack_and_open` (fresh null-contract/consumer-mismatch new-row input now correctly raises `workbook_contract_id_required`); one known OpenPyXL x14 warning.

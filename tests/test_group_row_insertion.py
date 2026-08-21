@@ -19,7 +19,7 @@ from rns_import_server.opc_workbook_filter_database_insertion_oracle import OPCW
 from rns_import_server.opc_worksheet_structure_insertion_oracle import OPCWorksheetStructureInsertionOracleError
 from rns_import_server.workbook_groups import MutationPlan
 from rns_import_server.workbook_mutation_manifest import MutationManifestError
-from rns_import_server.registry_storage import RegistryConflictError
+from rns_import_server.registry_storage import RegistryConflictError, RegistryError
 from rns_import_server.registry_storage import RegistryStorage
 from rns_import_server.excel_process_authority import ExcelProcessLease
 from rns_import_server.workbook_operation_journal import WorkbookOperationJournal
@@ -123,6 +123,19 @@ def test_blank_fill_requires_context() -> None:
     plan = MutationPlan("existing_blank", 5, "book", "hash", 1, "construction", "RU-00000000-00-2026")
     with pytest.raises(GroupRowInsertionError, match="publication_authority_required"):
         publish_group_row(GroupRowRequest(plan, Path("source"), Path("out"), "Реестр РНС", {}), native_script=Path("x"), operation_directory=Path("ops"))
+
+
+def test_finalization_authority_preserves_allowlisted_code_without_report_leak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal = Journal()
+    def reject(*_args, **_kwargs):
+        raise RegistryError("finalization_snapshot_conflict")
+    monkeypatch.setattr(journal, "record_finalization_authority", reject)
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: "private-report-must-not-leak"}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage) == ("finalization_snapshot_conflict", "finalization_authority")
+    assert "private-report-must-not-leak" not in str(captured.value) and not output.exists()
 
 
 def test_blank_fill_native_unavailable_keeps_group_publication_failure_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

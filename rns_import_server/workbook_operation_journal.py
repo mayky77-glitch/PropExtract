@@ -127,13 +127,6 @@ class WorkbookOperationJournal:
             raise RegistryError("Неподдерживаемый тип workbook operation")
         if mutation_mode not in {"bootstrap_fill", "blank_fill", "middle_insert"}:
             raise RegistryError("Неподдерживаемый режим workbook mutation")
-        legacy_v1 = intent_version == "intent-v1"
-        if operation_kind == "new_row" and not canonical_rns:
-            raise RegistryError("workbook_contract_id_required")
-        if operation_kind == "new_row" and not legacy_v1 and (not isinstance(workbook_contract_id, str) or not workbook_contract_id.strip()):
-            raise RegistryError("workbook_contract_id_required")
-        if operation_kind == "new_row" and not legacy_v1 and consumer_id != operation_id:
-            raise RegistryError("consumer_action_identity_mismatch")
         immutable = {
             **required,
             "canonical_rns": canonical_rns,
@@ -158,6 +151,10 @@ class WorkbookOperationJournal:
                 ):
                     return JournalOperation(dict(collisions[0])), False
                 raise RegistryConflictError("Повтор journal operation не совпадает с исходным immutable intent")
+            if operation_kind == "new_row" and (not canonical_rns or not isinstance(workbook_contract_id, str) or not workbook_contract_id.strip()):
+                raise RegistryError("workbook_contract_id_required")
+            if operation_kind == "new_row" and consumer_id != operation_id:
+                raise RegistryError("consumer_action_identity_mismatch")
             if expected_generation != self.storage.generation:
                 raise RegistryConflictError("Справочник изменился до планирования операции")
             owner_id, pair_nonce = nonce_factory()
@@ -216,13 +213,6 @@ class WorkbookOperationJournal:
             raise RegistryError("Неподдерживаемый тип workbook operation")
         if mutation_mode not in {"bootstrap_fill", "blank_fill", "middle_insert"}:
             raise RegistryError("Неподдерживаемый режим workbook mutation")
-        legacy_v1 = intent_version == "intent-v1"
-        if operation_kind == "new_row" and not canonical_rns:
-            raise RegistryError("workbook_contract_id_required")
-        if operation_kind == "new_row" and not legacy_v1 and (not isinstance(workbook_contract_id, str) or not workbook_contract_id.strip()):
-            raise RegistryError("workbook_contract_id_required")
-        if operation_kind == "new_row" and not legacy_v1 and consumer_id != operation_id:
-            raise RegistryError("consumer_action_identity_mismatch")
         immutable = {
             "operation_id": operation_id, "idempotency_key": idempotency_key, "consumer_id": consumer_id,
             "owner_id": owner_id, "pair_nonce": pair_nonce, "construction_id": construction_id,
@@ -241,6 +231,10 @@ class WorkbookOperationJournal:
                 if len(collisions) == 1 and all(collisions[0][key] == value for key, value in immutable.items()):
                     return JournalOperation(dict(collisions[0]))
                 raise RegistryConflictError("Повтор journal operation не совпадает с исходным immutable intent")
+            if operation_kind == "new_row" and (not canonical_rns or not isinstance(workbook_contract_id, str) or not workbook_contract_id.strip()):
+                raise RegistryError("workbook_contract_id_required")
+            if operation_kind == "new_row" and consumer_id != operation_id:
+                raise RegistryError("consumer_action_identity_mismatch")
             if expected_generation != self.storage.generation:
                 raise RegistryConflictError("Справочник изменился до планирования операции")
             try:
@@ -293,7 +287,9 @@ class WorkbookOperationJournal:
             ).fetchone()
             if snapshot is None:
                 raise RegistryError("finalization_snapshot_required")
-            if not verify_snapshot(operation_id=operation_id, snapshot_version=snapshot["snapshot_version"],
+            if not verify_snapshot(operation_id=operation_id, consumer_id=current["consumer_id"],
+                                   workbook_contract_id=current["workbook_contract_id"], post_hash=current["post_hash"],
+                                   snapshot_version=snapshot["snapshot_version"],
                                    canonical_payload=snapshot["canonical_payload"], digest=snapshot["digest"]):
                 raise RegistryError("finalization_snapshot_invalid")
         if next_phase == PHASE_BACKUP_VERIFIED and not hashes.get("backup_hash"):
@@ -430,7 +426,10 @@ class WorkbookOperationJournal:
                 current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
                 if current is None or current["phase"] != expected_phase:
                     raise JournalTransitionError("finalization_authority_journal_failed")
-                canonical, digest = validate_payload(operation_id=operation_id, consumer_id=current["consumer_id"], post_hash=post_hash, payload=payload)
+                canonical, digest = validate_payload(
+                    operation_id=operation_id, consumer_id=current["consumer_id"],
+                    workbook_contract_id=current["workbook_contract_id"], post_hash=post_hash, payload=payload,
+                )
                 existing = connection.execute(
                     "SELECT snapshot_version, canonical_payload, digest FROM workbook_finalization_snapshots WHERE operation_id=?", (operation_id,)
                 ).fetchone()
