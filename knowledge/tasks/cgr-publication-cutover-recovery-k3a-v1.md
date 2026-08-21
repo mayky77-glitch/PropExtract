@@ -64,3 +64,4 @@ knowledge_paths:
 - `workbook_cutover.py` provides same-filesystem replace, target and parent fsync, exact post-hash verification, and hash/phase-only recovery classification.
 - `group_row_insertion.py` records post-hash before cutover, leaves finalizer flags and `finalized` to K3b, and exposes journal/manual-repair failures.
 - Focused gate: `66 passed, 2 skipped` (native-Excel host skips). Full suite remains environment-blocked only by absent external corpus `/Users/x/Автоматизация РнС и ГРО/Реестр РНС Иркутск.xlsx`.
+- P6 remediation adds authoritative-target recheck before replace and typed replace/fsync/hash/published-journal boundaries. Focused gate: `74 passed, 2 skipped`; full suite: `1650 passed, 2 skipped, 12 corpus-missing failures`.

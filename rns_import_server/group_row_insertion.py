@@ -44,6 +44,7 @@ from rns_import_server.workbook_cutover import (
     fsync_file,
     recovery_state,
     replace_verified,
+    verify_pre_cutover_target,
 )
 
 
@@ -458,10 +459,14 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             context.journal.record_post_hash(operation_id, expected_phase=phase, post_hash=post_hash)
             _recheck(context, plan, request.source)
             try:
+                verify_pre_cutover_target(source=request.source, output=request.output, pre_hash=plan.workbook_hash)
                 replace_verified(candidate=candidate, target=request.output, post_hash=post_hash)
             except WorkbookCutoverError as error:
-                raise GroupRowInsertionError(str(error), stage="cutover", cause=error) from error
-            context.journal.transition(operation_id, expected_phase=phase, next_phase="published")
+                raise GroupRowInsertionError(error.code, stage=f"cutover_{error.stage}", cause=error) from error
+            try:
+                context.journal.transition(operation_id, expected_phase=phase, next_phase="published")
+            except Exception as error:
+                raise GroupRowInsertionError("published_journal_failed", stage="cutover_published", cause=error) from error
             return {"mode": mode, "row": plan.target_row, "published": True, "operation_id": operation_id, "manifest": candidate_manifest.digest}
     except GroupRowInsertionError as error:
         if created_operation and not (phase == "backup_verified" and 'post_hash' in locals()):

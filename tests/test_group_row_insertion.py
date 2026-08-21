@@ -478,6 +478,44 @@ def test_post_hash_recovery_publishes_once_without_finalizer_or_native_call(tmp_
     assert journal.calls == [("published", {})]
 
 
+def test_separate_existing_output_is_not_overwritten_after_durable_post_hash(tmp_path: Path) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"; _book(source); output.write_bytes(b"third")
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal = Journal()
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage, output.read_bytes()) == ("cutover_target_third_hash", "cutover_target_recheck", b"third")
+    assert journal.operation["phase"] == "backup_verified" and journal.operation["post_hash"]
+
+
+def test_same_path_first_publication_remains_safe(tmp_path: Path) -> None:
+    source = tmp_path / "source.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    result = publish_group_row(GroupRowRequest(plan, source, source, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, Journal())), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert result["published"] is True and load_workbook(source, read_only=True)["Реестр РНС"].cell(5, 6).value == plan.canonical_rns
+
+
+def test_published_journal_failure_after_replace_recovers_without_second_native_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class CrashJournal(Journal):
+        def __init__(self): super().__init__(); self.crash = True
+        def transition(self, operation_id, *, expected_phase, next_phase, **kwargs):
+            if self.crash and next_phase == "published":
+                self.crash = False; raise RuntimeError("crash after replace")
+            return super().transition(operation_id, expected_phase=expected_phase, next_phase=next_phase, **kwargs)
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, native_calls = CrashJournal(), []
+    def native(request, script, current_journal):
+        native_calls.append(request.operation_id); return _trusted_native_insert(request, script, current_journal)
+    monkeypatch.setattr(insertion, "run_native_insert", native)
+    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal))
+    with pytest.raises(GroupRowInsertionError, match="published_journal_failed"):
+        publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert output.exists() and journal.operation["phase"] == "backup_verified" and journal.operation["post_hash"] == sha256(output)
+    replay = publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (replay["recovery"], journal.operation["phase"], len(native_calls)) == ("finalization_pending", "published", 1)
+
+
 def test_manual_repair_journal_failure_is_typed_and_observable(tmp_path: Path) -> None:
     class BrokenJournal(Journal):
         def transition(self, *args, **kwargs):
