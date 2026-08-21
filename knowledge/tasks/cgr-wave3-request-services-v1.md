@@ -1,8 +1,8 @@
 ---
 type: task
-status: frozen
+status: implemented
 work_id: cgr-wave3-request-services-v1
-tags: [task/implementation, feature/construction-routing, status/frozen]
+tags: [task/implementation, feature/construction-routing, status/implemented]
 last_verified: 2026-08-21
 updated: 2026-08-21
 ---
@@ -37,3 +37,15 @@ Group provisioning must call existing `RegistryAdminService` to create a draft; 
 5. restart before journal replans a draft from fresh hash/generation; pending action requires new job authorization.
 
 Keep tests compact and interface-driven. Run three direct tests, relevant registry/group/journal regressions, full pytest once, compile new modules, diff check, exact scope/ancestry/identity/clean. This Gate does not qualify XLSX mutation, native Excel, recovery, HTTP/UI or operator success.
+
+## Implementation evidence
+
+- Added port-only `new_row` and `group_provisioning` services. Both require
+  injected projections and CAS pending ports; neither opens or mutates XLSX.
+- `NewRowService` admits only ASCII four-digit suffixes, forms C on the server,
+  resolves after its reservation, and reopens solely after typed pre-hash proof.
+- `GroupProvisioningService` creates a RegistryAdminService draft, plans two
+  validated rows from A:X/AA business occupancy, and leaves the draft unroutable.
+- Focused coverage: 5 new tests and 35 related registry/group/journal
+  regressions passed. Full pytest ran 1,509 passing; 10 existing loopback HTTP
+  tests are sandbox-blocked at socket bind (`PermissionError`).
