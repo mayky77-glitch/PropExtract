@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 from typing import Protocol
 
 
@@ -21,7 +22,9 @@ class ExcelProcessAuthorityError(RuntimeError):
 
 def strict_utc(value: object) -> str:
     """Normalize whole-second UTC only; local/nonzero-offset time is forbidden."""
-    if not isinstance(value, str):
+    if not isinstance(value, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)", value
+    ) is None:
         raise ExcelProcessAuthorityError("excel_lease_timestamp_invalid")
     try:
         normalized = value[:-1] + "+00:00" if value.endswith("Z") else value

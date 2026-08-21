@@ -62,6 +62,17 @@ def test_lease_constructor_normalizes_zero_offset_and_rejects_non_utc_timestamp(
     assert error.value.code == "excel_lease_timestamp_invalid"
 
 
+@pytest.mark.parametrize("value", [
+    "2026-08-21 00:00:00+00:00", "20260821T000000Z", "2026-08-21T00:00+00:00",
+    "2026-08-21T00:00:00+0000", "2026-08-21T00:00:00+00", "2026-08-21T00:00:00-00:00",
+    "2026-W34-5T00:00:00+00:00", "2026-08-21T00:00:00.1Z",
+])
+def test_lease_constructor_rejects_noncanonical_utc_lexicals(value: str) -> None:
+    with pytest.raises(ExcelProcessAuthorityError) as error:
+        _lease(adapter_started_at=value)
+    assert error.value.code == "excel_lease_timestamp_invalid"
+
+
 @pytest.mark.parametrize("lease_change,snapshot,adapter,excel,hwnd_pid,launched,code", [
     ({}, RuntimeError(), None, None, 22, 11, "excel_lease_snapshot_unavailable"),
     ({}, frozenset({22}), None, None, 22, 11, "excel_lease_excel_preexisting"),
