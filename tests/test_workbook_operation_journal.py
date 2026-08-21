@@ -8,6 +8,7 @@ import pytest
 
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage
 from rns_import_server.excel_process_authority import ExcelProcessLease
+from rns_import_server.workbook_finalization import finalize_published_binding
 from rns_import_server.workbook_operation_journal import (
     JournalStorageError,
     JournalTransitionError,
@@ -60,7 +61,8 @@ def _finalized_operation(journal: WorkbookOperationJournal, storage: RegistrySto
                        hashes={"backup_hash": "backup"})
     _authority(journal, operation_id, "post")
     journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
-    for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
+    finalize_published_binding(storage, operation_id)
+    for flag in ("capability_finalized", "history_finalized", "report_finalized"):
         journal.finalize_flag(operation_id, flag)
     journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
     return operation_id
@@ -121,7 +123,8 @@ def test_journal_requires_legal_cas_phases_and_durable_hash_evidence(tmp_path: P
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
         with pytest.raises(RegistryError):
             journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
-        for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
+        finalize_published_binding(storage, operation_id)
+        for flag in ("capability_finalized", "history_finalized", "report_finalized"):
             journal.finalize_flag(operation_id, flag)
         finished = journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
         assert finished.phase == PHASE_FINALIZED
@@ -227,7 +230,8 @@ def test_finalization_flag_replay_after_finalized_restart_preserves_first_timest
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
         _authority(journal, operation_id, "post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
-        for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
+        finalize_published_binding(storage, operation_id)
+        for flag in ("capability_finalized", "history_finalized", "report_finalized"):
             journal.finalize_flag(operation_id, flag)
         original_at = journal.get(operation_id)["report_finalized_at"]  # type: ignore[index]
         journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
