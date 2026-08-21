@@ -58,3 +58,10 @@ knowledge_paths:
 - Compact matrix covers same-path and separate output, pre/post/third/missing target hashes, published/finalized replay, CAS failure after replace, manual-repair journal failure, and both mutation modes.
 - Publication ordering proves candidate fsync → backup fsync/hash → durable post-hash → recheck → replace → target/parent fsync → post-hash verify → published. No finalizer flag or `finalized` transition occurs.
 - Existing K1/K2A/K2B1/K2B2a/K2B2b tests stay green. Native Excel COM and full UI journey remain external Gates.
+
+## K3a implementation evidence
+
+- `workbook_cutover.py` provides same-filesystem replace, target and parent fsync, exact post-hash verification, and hash/phase-only recovery classification.
+- `group_row_insertion.py` records post-hash before cutover, leaves finalizer flags and `finalized` to K3b, and exposes journal/manual-repair failures.
+- Focused gate: `66 passed, 2 skipped` (native-Excel host skips). Full suite remains environment-blocked only by absent external corpus `/Users/x/Автоматизация РнС и ГРО/Реестр РНС Иркутск.xlsx`.
+- P6 remediation adds authoritative-target recheck before replace and typed replace/fsync/hash/published-journal boundaries. Focused gate: `74 passed, 2 skipped`; full suite: `1650 passed, 2 skipped, 12 corpus-missing failures`.
