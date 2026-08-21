@@ -10,6 +10,7 @@ from rns_import_server.audit import sha256
 from rns_import_server.group_row_insertion import GroupRowInsertionError, GroupRowRequest, PublicationContext, publish_group_row, recover_group_row
 from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import OPCWorksheetX14CfInsertionOracleError
 from rns_import_server.opc_workbook_filter_database_insertion_oracle import OPCWorkbookFilterDatabaseInsertionOracleError
+from rns_import_server.opc_worksheet_structure_insertion_oracle import OPCWorksheetStructureInsertionOracleError
 from rns_import_server.workbook_groups import MutationPlan
 
 
@@ -64,18 +65,36 @@ def _patch_middle_insert_pre_oracle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(insertion, "validate_control", lambda *_: None)
     monkeypatch.setattr(insertion, "validate_insertion", lambda *_: None)
     monkeypatch.setattr(insertion, "validate_filter_database_middle_insert", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(insertion, "validate_worksheet_structure_middle_insert", lambda *_args, **_kwargs: None)
 
 
-def test_middle_insert_calls_x14_oracle_after_generic_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_middle_insert_validators_precede_fsync_backup_and_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("insert_before_header", 6, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal = Journal(); _patch_middle_insert_pre_oracle(monkeypatch)
     calls = []
-    monkeypatch.setattr(insertion, "validate_x14_cf_middle_insert", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(insertion, "validate_control", lambda *_: calls.append("generic-control"))
+    monkeypatch.setattr(insertion, "validate_insertion", lambda *_: calls.append("generic-insertion"))
+    x14_call = []
+    monkeypatch.setattr(insertion, "validate_x14_cf_middle_insert", lambda *args, **kwargs: (calls.append("x14"), x14_call.append((args, kwargs))))
+    monkeypatch.setattr(insertion, "validate_filter_database_middle_insert", lambda *_args, **_kwargs: calls.append("filter"))
+    monkeypatch.setattr(insertion, "validate_worksheet_structure_middle_insert", lambda *_args, **_kwargs: calls.append("structure"))
+    fsync = insertion._fsync
+    def spy_fsync(path):
+        if path.name == "candidate.xlsx": calls.append("fsync")
+        if path.name == "backup.xlsx": calls.append("backup")
+        fsync(path)
+    monkeypatch.setattr(insertion, "_fsync", spy_fsync)
+    replace = insertion.os.replace
+    def spy_replace(source, destination):
+        calls.append("replace")
+        replace(source, destination)
+    monkeypatch.setattr(insertion.os, "replace", spy_replace)
     result = publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert result["published"] is True and output.exists()
-    assert len(calls) == 1
-    (control, candidate), kwargs = calls[0]
+    assert calls[calls.index("generic-control"):] == ["generic-control", "generic-insertion", "x14", "filter", "structure", "fsync", "backup", "replace"]
+    assert len(x14_call) == 1
+    (control, candidate), kwargs = x14_call[0]
     assert (control.name, candidate.name, control.parent == candidate.parent) == ("control.xlsx", "candidate.xlsx", True)
     assert kwargs == {"sheet_name": "Реестр РНС", "insertion_row": 6, "format_source_row": 5}
 
@@ -111,6 +130,23 @@ def test_middle_insert_filter_database_oracle_failure_after_x14_blocks_publicati
     assert sha256(source) == source_hash and not output.exists()
     assert not list((tmp_path / "ops").rglob("backup.xlsx"))
     assert "published" not in [name for name, _ in journal.calls] and journal.calls[-1][0] == "manual_repair"
+
+
+def test_middle_insert_structure_oracle_runs_after_x14_and_filter_and_blocks_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    source_hash = sha256(source)
+    plan = MutationPlan("insert_before_header", 6, "book", source_hash, 1, "construction", "RU-00000000-00-2026")
+    journal = Journal(); _patch_middle_insert_pre_oracle(monkeypatch)
+    calls = []
+    monkeypatch.setattr(insertion, "validate_x14_cf_middle_insert", lambda *_args, **_kwargs: calls.append("x14"))
+    monkeypatch.setattr(insertion, "validate_filter_database_middle_insert", lambda *_args, **_kwargs: calls.append("filter"))
+    failure = OPCWorksheetStructureInsertionOracleError("worksheet-structure-range-mismatch", "Реестр РНС", "dimension", "geometry")
+    monkeypatch.setattr(insertion, "validate_worksheet_structure_middle_insert", lambda *_args, **_kwargs: calls.append("structure") or (_ for _ in ()).throw(failure))
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage, captured.value.cause) == (failure.code, "validate", failure)
+    assert calls == ["x14", "filter", "structure"]
+    assert sha256(source) == source_hash and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
 
 
 def test_third_hash_recovery_is_manual_repair(tmp_path: Path) -> None:

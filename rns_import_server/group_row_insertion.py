@@ -19,6 +19,10 @@ from rns_import_server.opc_workbook_filter_database_insertion_oracle import (
     OPCWorkbookFilterDatabaseInsertionOracleError,
     validate_filter_database_middle_insert,
 )
+from rns_import_server.opc_worksheet_structure_insertion_oracle import (
+    OPCWorksheetStructureInsertionOracleError,
+    validate_worksheet_structure_middle_insert,
+)
 from rns_import_server.workbook_groups import MutationPlan
 from rns_import_server.workbook_mutation_manifest import manifest_for, validate_control, validate_insertion
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
@@ -182,6 +186,15 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                         insertion_row=plan.target_row,
                     )
                 except OPCWorkbookFilterDatabaseInsertionOracleError as error:
+                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
+                try:
+                    validate_worksheet_structure_middle_insert(
+                        control,
+                        candidate,
+                        sheet_name=request.sheet,
+                        insertion_row=plan.target_row,
+                    )
+                except OPCWorksheetStructureInsertionOracleError as error:
                     raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
             if sha256(request.source) != plan.workbook_hash: raise GroupRowInsertionError("workbook_pre_hash_mismatch", stage="pre_replace")
             _fsync(candidate)
