@@ -106,7 +106,7 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
     finally:
         migrated.close()
     newer = RegistryStorage(path)
-    newer.connection.execute("UPDATE registry_meta SET schema_version=6")
+    newer.connection.execute("UPDATE registry_meta SET schema_version=?", (SCHEMA_VERSION + 1,))
     newer.close()
     with pytest.raises(RegistrySchemaError):
         RegistryStorage(path)

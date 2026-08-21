@@ -44,6 +44,7 @@ def _authority(path: Path, **changes: object) -> WorkbookProjectionAuthority:
         "sheet_identity": "Реестр РНС",
         "template_version": "template-v1",
         "registry_generation": 7,
+        "expected_source_sha256": _hash(path),
         "template_cells": (TemplateCellEvidence(1, 4, "Стройка"),),
         "group_ownership": tuple(GroupOwnershipEvidence(row, row == 3) for row in range(1, 5)),
     }
@@ -102,6 +103,12 @@ def test_adapter_requires_injected_authority_port(tmp_path: Path) -> None:
             return _authority(path)
 
     assert WorkbookProjectionAdapter(Port()).read().code is WorkbookProjectionCode.OK
+
+
+def test_rejects_descriptor_bound_source_hash_mismatch(tmp_path: Path) -> None:
+    path = tmp_path / "book.xlsx"
+    _make_book(path)
+    assert project_workbook(_authority(path, expected_source_sha256="0" * 64)).code is WorkbookProjectionCode.SOURCE_HASH_MISMATCH
 
 
 def test_rejects_path_replacement_after_hash_even_with_equal_size_and_mtime(tmp_path: Path, monkeypatch) -> None:
