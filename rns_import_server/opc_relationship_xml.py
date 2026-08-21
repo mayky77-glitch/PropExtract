@@ -21,6 +21,10 @@ _ALLOWED_ATTRIBUTES: Final = _REQUIRED_ATTRIBUTES | {"TargetMode"}
 _TARGET_MODES: Final = frozenset({"Internal", "External"})
 _URI_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _PERCENT_ESCAPE: Final = re.compile(r"%[0-9A-Fa-f]{2}")
+_XML_DECLARATION_ENCODING: Final = re.compile(
+    br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 _IPV_FUTURE: Final = re.compile(r"v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+", re.IGNORECASE)
 _IPV4_ADDRESS: Final = re.compile(
     r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
@@ -28,6 +32,9 @@ _IPV4_ADDRESS: Final = re.compile(
 )
 _UNRESERVED: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _SUB_DELIMS: Final = frozenset("!$&'()*+,;=")
+_TRANSITIONAL_HYPERLINK_RELATIONSHIP: Final = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
 
 
 @dataclass(frozen=True)
@@ -215,6 +222,55 @@ def _is_relative_uri_reference(value: str) -> bool:
     return parsed is not None and parsed[0] is None and not parsed[1].startswith("/")
 
 
+def _is_package_root_internal_reference(value: str) -> bool:
+    """Accept one rooted, package-local Internal target and no URI extras."""
+    parsed = _split_uri_reference(value)
+    return (
+        parsed is not None
+        and parsed[0] is None
+        and parsed[1].startswith("/")
+        and not parsed[1].startswith("//")
+        and len(parsed[1]) > 1
+        and parsed[2] is None
+        and parsed[3] is None
+    )
+
+
+def _is_raw_space_hyperlink_target(value: str, type_uri: str, target_mode: str) -> bool:
+    """Validate the one Openpyxl-compatible raw-space hyperlink form.
+
+    The source string remains the returned target. Its percent-escaped view is
+    validation-only and never becomes a resolved or rewritten URI.
+    """
+    if (
+        " " not in value
+        or value.startswith(" ")
+        or value.endswith(" ")
+        or type_uri != _TRANSITIONAL_HYPERLINK_RELATIONSHIP
+        or target_mode != "External"
+    ):
+        return False
+    validation_view = value.replace(" ", "%20")
+    scheme_match = _URI_SCHEME.match(validation_view)
+    if scheme_match is not None and scheme_match.group()[:-1].lower() == "file":
+        remainder = validation_view[scheme_match.end() :]
+        # ``file:///absolute/path`` has an explicitly empty authority. The
+        # strict general URI parser rejects it; permit it only here after
+        # applying the same path-component validation to the escaped view.
+        if remainder.startswith("///"):
+            return not remainder.startswith("////") and _is_valid_path(remainder[2:])
+    parsed = _split_uri_reference(validation_view)
+    if parsed is not None:
+        scheme, path, query, fragment = parsed
+        return (
+            query is None
+            and fragment is None
+            and not path.startswith("//")
+            and (scheme is None or scheme.lower() == "file")
+        )
+    return False
+
+
 def _require_attributes(part: str, attributes: dict[str, str]) -> None:
     unknown = sorted(set(attributes) - _ALLOWED_ATTRIBUTES)
     if unknown:
@@ -249,6 +305,130 @@ def _contains_doctype(payload: bytes | str) -> bool:
         else:
             position += 1
     return False
+
+
+def _decode_xml_lexical_source(payload: bytes | str) -> str | None:
+    """Decode only enough to inspect literal XML attribute characters.
+
+    ElementTree deliberately normalizes literal TAB/LF/CR in attributes. This
+    decoder keeps their lexical form while following the document's encoding
+    declaration or BOM. A decoding failure stays with ElementTree's existing
+    typed XML error path.
+    """
+    if isinstance(payload, str):
+        return payload
+    if payload.startswith((b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00")):
+        encoding = "utf-32"
+    elif payload.startswith((b"\xfe\xff", b"\xff\xfe")):
+        encoding = "utf-16"
+    elif payload.startswith(b"\xef\xbb\xbf"):
+        encoding = "utf-8-sig"
+    elif payload.startswith(b"<\x00?\x00x\x00m\x00l\x00"):
+        # ElementTree accepts this BOM-less UTF-16LE form when the XML
+        # declaration says ``utf-16``.  Decode its unambiguous byte signature
+        # here too, so literal attribute controls cannot bypass the lexer.
+        encoding = "utf-16-le"
+    elif payload.startswith(b"\x00<\x00?\x00x\x00m\x00l"):
+        # Same contract for the big-endian signature.
+        encoding = "utf-16-be"
+    else:
+        match = _XML_DECLARATION_ENCODING.match(payload)
+        encoding = match.group(1).decode("ascii") if match is not None else "utf-8"
+    try:
+        return payload.decode(encoding)
+    except (LookupError, UnicodeError):
+        return None
+
+
+def _literal_relationship_target_whitespace(payload: bytes | str, relationship_index: int) -> str | None:
+    """Return a literal TAB/LF/CR in ``Relationship@Target``, if any.
+
+    This small lexer recognizes quoted attributes and skips XML comments,
+    processing instructions and CDATA. It intentionally does not decode entity
+    references, so ``&#x9;`` remains on the established ElementTree path.
+    """
+    source = _decode_xml_lexical_source(payload)
+    if source is None:
+        return None
+    position = 0
+    seen_relationships = 0
+    while position < len(source):
+        start = source.find("<", position)
+        if start < 0:
+            return None
+        if source.startswith("<!--", start):
+            position = source.find("-->", start + 4)
+            if position < 0:
+                return None
+            position += 3
+            continue
+        if source.startswith("<?", start):
+            position = source.find("?>", start + 2)
+            if position < 0:
+                return None
+            position += 2
+            continue
+        if source.startswith("<![CDATA[", start):
+            position = source.find("]]>", start + 9)
+            if position < 0:
+                return None
+            position += 3
+            continue
+        position = start + 1
+        if position >= len(source) or source[position] in "/!":
+            end = source.find(">", position)
+            if end < 0:
+                return None
+            position = end + 1
+            continue
+        name_start = position
+        while position < len(source) and source[position] not in "\t\r\n />":
+            position += 1
+        is_relationship = source[name_start:position].rsplit(":", 1)[-1] == "Relationship"
+        while position < len(source):
+            while position < len(source) and source[position] in "\t\r\n ":
+                position += 1
+            if position >= len(source) or source[position] in "/>":
+                end = source.find(">", position)
+                if end < 0:
+                    return None
+                position = end + 1
+                break
+            attribute_start = position
+            while position < len(source) and source[position] not in "\t\r\n =>/":
+                position += 1
+            attribute = source[attribute_start:position]
+            while position < len(source) and source[position] in "\t\r\n ":
+                position += 1
+            if position >= len(source) or source[position] != "=":
+                end = source.find(">", position)
+                if end < 0:
+                    return None
+                position = end + 1
+                break
+            position += 1
+            while position < len(source) and source[position] in "\t\r\n ":
+                position += 1
+            if position >= len(source) or source[position] not in "\"'":
+                end = source.find(">", position)
+                if end < 0:
+                    return None
+                position = end + 1
+                break
+            quote = source[position]
+            position += 1
+            value_start = position
+            position = source.find(quote, position)
+            if position < 0:
+                return None
+            value = source[value_start:position]
+            if is_relationship and attribute == "Target":
+                if seen_relationships == relationship_index and any(character in "\t\r\n" for character in value):
+                    return value
+            position += 1
+        if is_relationship:
+            seen_relationships += 1
+    return None
 
 
 def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationship, ...]:
@@ -297,9 +477,14 @@ def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationshi
         if target_mode not in _TARGET_MODES:
             _fail("invalid-target-mode", part, target_mode)
         target = child.attrib["Target"]
-        if _split_uri_reference(target) is None:
+        literal_target = _literal_relationship_target_whitespace(payload, len(records))
+        if literal_target is not None:
+            _fail("invalid-relationship-target", part, literal_target)
+        if _split_uri_reference(target) is None and not _is_raw_space_hyperlink_target(target, type_uri, target_mode):
             _fail("invalid-relationship-target", part, target)
-        if target_mode == "Internal" and not _is_relative_uri_reference(target):
+        if target_mode == "Internal" and not (
+            _is_relative_uri_reference(target) or _is_package_root_internal_reference(target)
+        ):
             _fail("internal-target-not-relative", part, target)
         seen_ids.add(relationship_id)
         records.append(Relationship(relationship_id, type_uri, target, target_mode))

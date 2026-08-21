@@ -1,6 +1,6 @@
 ---
 type: task
-status: frozen
+status: implementation-complete-pending-p6
 work_id: cgr-opc-v6-openpyxl-relationship-interop-v1
 tags: [task/implementation, feature/opc-relationships, status/frozen]
 last_verified: 2026-08-21
@@ -44,3 +44,27 @@ The next X14 read may still stop on another typed error. Record it exactly; do n
 Tests must cover raw-space `file:` and relative Cyrillic hyperlink targets with raw preservation; already escaped `%20`; all wrong type/mode/scheme/authority/query/fragment/edge-space/backslash/control/non-NFC/bad-percent negatives; rooted Internal success/missing/forbidden/traversal; no external dereference; exact real-corpus counts/hash.
 
 Run focused relationship/graph/part-URI/corpus tests, full `python3 -m pytest -q`, compile the two production modules, and `git diff --check`. Verify exact five-path scope, ancestry, human identity and clean tree. Independent P6 must reproduce the real target read-only. No fallback or standards-wide relaxation.
+
+## Recovery implementation evidence
+
+P6 Recovery closes the literal-control precedence gap without changing the
+frozen graph scope. `ElementTree` now establishes XML well-formedness, root,
+and exact child identity before the lexical `Relationship@Target` verdict; the
+verdict runs only after the existing attribute, Id, Type, and TargetMode
+boundaries and immediately before Target URI validation. Thus duplicate
+`Target` remains `malformed-xml`, a wrong root remains
+`invalid-relationships-root`, and a wrong-namespace child remains
+`invalid-relationships-child` even when its source Target contains literal
+TAB/LF/CR. BOM-less UTF-16LE/BE documents with an explicit `utf-16`
+declaration use their unambiguous byte signatures for the same lexical check;
+valid documents in both forms remain accepted.
+
+Focused relationship/graph/part-URI/corpus tests: 197 passed. Full suite:
+1402 passed, exactly 10 managed-sandbox loopback `socket.bind` denials, and
+one known Openpyxl warning; no product-test failure. The real source workbook
+remained read-only at SHA-256
+`2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`.
+
+## P4 implementation evidence
+
+Implemented on the frozen base: raw U+0020 is accepted only in the specified Transitional External hyperlink form, while output preserves the decoded XML target and leaves `resolved_target` as `None`. Exactly one Internal leading slash is resolved from package root; all other target checks keep their existing typed boundary. P6 remediation adds encoding-aware lexical rejection of literal TAB/LF/CR in quoted `Relationship@Target` before ElementTree normalizes them; character references retain the established parser path. Focused relationship/graph/part-URI tests: 163 passed. Full suite: 1397 passed, 10 sandbox-only loopback `socket.bind` denials, 1 known Openpyxl warning; zero product-test failures. Compile and diff checks passed. Pending independent P6.
