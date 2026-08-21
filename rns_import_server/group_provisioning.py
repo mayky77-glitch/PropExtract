@@ -84,10 +84,7 @@ class GroupProvisioningPublisherPort(Protocol):
 
 
 def _is_business_value(value: object) -> bool:
-    # Formula tails are formatting/service evidence, not business occupancy.
-    if value is None or value == "" or (isinstance(value, str) and not value.strip()):
-        return False
-    return not (isinstance(value, str) and value.startswith("="))
+    return not (value is None or value == "" or (isinstance(value, str) and not value.strip()))
 
 
 def _row_has_business_value(row: ProvisioningRow) -> bool:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rns_import_server.group_provisioning import (
     GroupProvisioningCode, GroupProvisioningProjection, GroupProvisioningRequest,
-    GroupProvisioningService, ProvisioningRow,
+    GroupProvisioningService, ProvisioningRow, plan_first_free_pair,
 )
 from rns_import_server.registry_admin import RegistryAdminService
 from rns_import_server.registry_storage import RegistryStorage
@@ -14,7 +14,7 @@ class Projection:
         self.rows = tuple(
             [ProvisioningRow(number, {1: "data"}, True, True) for number in range(1, 606)]
             + [ProvisioningRow(606, {}, False, True), ProvisioningRow(607, {}, False, True)]
-            + [ProvisioningRow(number, {27: "=formula"}, False, True) for number in range(608, 1002)]
+            + [ProvisioningRow(number, {25: "=formula"}, False, True) for number in range(608, 1002)]
         )
     def read_projection(self):
         generation = self.fixed_generation if self.fixed_generation is not None else self.storage.generation
@@ -23,6 +23,16 @@ class Projection:
 
 class Pending:
     def reserve_pending_to_planning(self, action_id, *, job_authorization): return True
+
+
+def test_formulas_in_business_columns_are_occupied_and_block_a_validated_pair() -> None:
+    for column in (1, 24, 27):  # A, X, AA
+        projection = GroupProvisioningProjection("book", "hash", 1, (
+            ProvisioningRow(1, {1: "data"}, True, True),
+            ProvisioningRow(2, {column: "=formula"}, True, True),
+            ProvisioningRow(3, {}, False, True),
+        ))
+        assert plan_first_free_pair(projection) is None
 
 
 def test_draft_plan_uses_business_occupancy_not_formula_tail_and_stays_non_routable(tmp_path) -> None:
