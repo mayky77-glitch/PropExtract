@@ -73,13 +73,16 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _template_payload(evidence: object) -> tuple[tuple[TemplateCellEvidence, ...], str, str]:
+def _template_payload(
+    evidence: object, *, required_row: int | None = None,
+) -> tuple[tuple[TemplateCellEvidence, ...], str, str]:
     if type(evidence) is not tuple or len(evidence) != 24:
         raise WorkbookAuthorityError("workbook_authority_template_invalid")
     cells: list[TemplateCellEvidence] = []
     for column, item in enumerate(evidence, 1):
         if (type(item) is not TemplateCellEvidence or type(item.row) is not int or type(item.column) is not int
-                or item.row != 3 or item.column != column or not _json_value(item.value)):
+                or item.row < 1 or (required_row is not None and item.row != required_row)
+                or item.column != column or not _json_value(item.value)):
             raise WorkbookAuthorityError("workbook_authority_template_invalid")
         cells.append(item)
     payload = _canonical_json([{"row": item.row, "column": item.column, "value": item.value} for item in cells])
@@ -129,7 +132,7 @@ class WorkbookAuthorityStore:
         ))
         target_path = _canonical_path(enrollment.target_path)
         source_sha256 = _sha256(enrollment.source_sha256)
-        template_cells, template_json, template_digest = _template_payload(enrollment.template_cells)
+        template_cells, template_json, template_digest = _template_payload(enrollment.template_cells, required_row=3)
         ownership, ownership_json, ownership_digest = _ownership_payload(enrollment.group_ownership, enrollment.max_row)
         try:
             with self.storage.transaction() as connection:

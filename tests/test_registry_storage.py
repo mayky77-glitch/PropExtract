@@ -112,6 +112,25 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
         RegistryStorage(path)
 
 
+def test_v6_to_v7_adds_only_an_empty_authority_refresh_receipt_ledger(tmp_path: Path) -> None:
+    runtime = RegistryStorage.bootstrap(tmp_path)
+    path = runtime.path
+    runtime.connection.execute("DROP TRIGGER workbook_authority_refresh_receipts_immutable_update")
+    runtime.connection.execute("DROP TRIGGER workbook_authority_refresh_receipts_immutable_delete")
+    runtime.connection.execute("DROP TABLE workbook_authority_refresh_receipts")
+    runtime.connection.execute("UPDATE registry_meta SET schema_version=6")
+    runtime.close()
+    migrated = RegistryStorage(path)
+    try:
+        assert migrated.connection.execute("SELECT COUNT(*) FROM workbook_authorities").fetchone()[0] == 0
+        assert migrated.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 0
+        assert migrated.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='workbook_authority_refresh_receipts_immutable_update'"
+        ).fetchone()[0] == 1
+    finally:
+        migrated.close()
+
+
 def test_v3_to_v4_preserves_legacy_journal_without_inventing_contract(tmp_path: Path) -> None:
     runtime = RegistryStorage.bootstrap(tmp_path)
     path = runtime.path
