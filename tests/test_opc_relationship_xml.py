@@ -194,6 +194,17 @@ def test_bomless_utf16_declared_document_preserves_literal_target_control_reject
 
 
 @pytest.mark.parametrize("encoding", ("utf-16-le", "utf-16-be"))
+def test_bomless_utf16_without_declaration_preserves_literal_target_control_rejection(encoding: str):
+    target = "file:///run/user/1000/РнС\tи ГРО/реестр.xlsx"
+    payload = _document(_relationship(
+        Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        Target=target,
+        TargetMode="External",
+    )).encode(encoding)
+    assert _error_tuple(payload) == ("invalid-relationship-target", PART, target)
+
+
+@pytest.mark.parametrize("encoding", ("utf-16-le", "utf-16-be"))
 def test_bomless_utf16_declared_document_without_literal_control_stays_accepted(encoding: str):
     payload = (
         '<?xml version="1.0" encoding="utf-16"?>'

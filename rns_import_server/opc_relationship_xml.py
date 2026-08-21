@@ -331,6 +331,14 @@ def _decode_xml_lexical_source(payload: bytes | str) -> str | None:
     elif payload.startswith(b"\x00<\x00?\x00x\x00m\x00l"):
         # Same contract for the big-endian signature.
         encoding = "utf-16-be"
+    elif payload.startswith(b"<\x00") and not payload.startswith(b"<\x00\x00\x00"):
+        # BOM-less UTF-16 XML need not carry a declaration.  A leading ASCII
+        # markup byte followed by its zero high byte is unambiguous here; keep
+        # UTF-32 on its own parsing path below.
+        encoding = "utf-16-le"
+    elif payload.startswith(b"\x00<") and not payload.startswith(b"\x00\x00\x00<"):
+        # Same initial markup signature for big-endian UTF-16.
+        encoding = "utf-16-be"
     else:
         match = _XML_DECLARATION_ENCODING.match(payload)
         encoding = match.group(1).decode("ascii") if match is not None else "utf-8"
