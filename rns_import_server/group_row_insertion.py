@@ -39,6 +39,13 @@ from rns_import_server.workbook_mutation_manifest import (
 )
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
 from rns_import_server.registry_storage import RegistryConflictError
+from rns_import_server.workbook_cutover import (
+    WorkbookCutoverError,
+    fsync_file,
+    recovery_state,
+    replace_verified,
+    verify_pre_cutover_target,
+)
 
 
 class GroupRowInsertionError(RuntimeError):
@@ -86,25 +93,28 @@ class GroupRowRequest:
     context: PublicationContext | None = None
 
 
-def recover_group_row(*, context: PublicationContext, operation: object, source: Path) -> str:
-    """Hash-only recovery: finalise post-hash, re-resolve pre-hash, never overwrite a third hash."""
+def recover_group_row(*, context: PublicationContext, operation: object, source: Path, output: Path | None = None) -> str:
+    """Recover durable publication evidence without rerunning mutation or finalizers."""
     values = operation if isinstance(operation, Mapping) else getattr(operation, "values", operation)
     if not isinstance(values, Mapping):
         raise GroupRowInsertionError("recovery_operation_invalid", stage="recovery")
-    current, phase = sha256(source), str(values.get("phase"))
+    phase = str(values.get("phase"))
     operation_id, pre_hash, post_hash = str(values.get("operation_id")), values.get("pre_hash"), values.get("post_hash")
-    if post_hash and current == post_hash:
-        if phase == "published": _finalize(context, operation_id)
-        return "finalize_only"
-    if pre_hash and current == pre_hash and phase in {"planned", "staged", "native", "validated", "backup_verified"}:
-        return "re_resolve_required"
+    state = recovery_state(source=source, output=output or source, phase=phase, pre_hash=pre_hash, post_hash=post_hash)
+    if state == "publish_recovery":
+        try:
+            context.journal.transition(operation_id, expected_phase="backup_verified", next_phase="published")
+        except Exception as error:
+            raise GroupRowInsertionError("published_recovery_journal_failed", stage="recovery", cause=error) from error
+        return "finalization_pending"
+    if state in {"finalization_pending", "already_finalized", "re_resolve_required"}:
+        return state
     _manual_repair(context, operation_id, phase, "workbook_third_hash_manual_repair")
     return "manual_repair"
 
 
 def _fsync(path: Path) -> None:
-    with path.open("rb") as stream:
-        os.fsync(stream.fileno())
+    fsync_file(path)
 
 
 def _copy_verified(source: Path, destination: Path) -> str:
@@ -247,6 +257,7 @@ def _classify_existing(
     *,
     expected: Mapping[str, object],
     source: Path,
+    output: Path,
 ) -> dict[str, object]:
     """Classify a verified authority without mutating a live first publisher."""
     _existing_operation(operation, expected=expected)
@@ -254,7 +265,7 @@ def _classify_existing(
     # Authority is durable before the first publisher has copied its control
     # file. A concurrent loser must wait, never turn that live operation into
     # manual repair merely because pre-hash evidence is not written yet.
-    recovery = "in_progress" if values.get("phase") == "planned" and not values.get("pre_hash") and not values.get("post_hash") else recover_group_row(context=context, operation=operation, source=source)
+    recovery = "in_progress" if values.get("phase") == "planned" and not values.get("pre_hash") and not values.get("post_hash") else recover_group_row(context=context, operation=operation, source=source, output=output)
     return {
         "published": False,
         "operation_id": expected["operation_id"],
@@ -299,14 +310,8 @@ def _recheck(context: PublicationContext, plan: MutationPlan, source: Path) -> M
 def _manual_repair(context: PublicationContext, operation_id: str, phase: str, code: str) -> None:
     try:
         context.journal.transition(operation_id, expected_phase=phase, next_phase="manual_repair", failure_code=code)
-    except Exception:
-        pass
-
-
-def _finalize(context: PublicationContext, operation_id: str) -> None:
-    for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
-        context.journal.finalize_flag(operation_id, flag)
-    context.journal.transition(operation_id, expected_phase="published", next_phase="finalized")
+    except Exception as error:
+        raise GroupRowInsertionError("manual_repair_journal_failed", stage="manual_repair", cause=error) from error
 
 
 def publish_group_row(request: GroupRowRequest, *, native_script: Path, operation_directory: Path) -> dict[str, object]:
@@ -346,7 +351,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         with context.lock():
             existing = context.journal.get(operation_id)
             if existing is not None:
-                return _classify_existing(context, existing, expected=expected, source=request.source)
+                return _classify_existing(context, existing, expected=expected, source=request.source, output=request.output)
             if plan.registry_generation != context.generation:
                 raise GroupRowInsertionError("registry_generation_stale", stage="authorize")
             plan = _recheck(context, plan, request.source)
@@ -364,9 +369,9 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 stored = context.journal.get(operation_id)
                 if stored is None:
                     raise GroupRowInsertionError("publication_intent_conflict", stage="recovery", cause=error) from error
-                return _classify_existing(context, stored, expected=expected, source=request.source)
+                return _classify_existing(context, stored, expected=expected, source=request.source, output=request.output)
             if not created_operation:
-                return _classify_existing(context, stored, expected=expected, source=request.source)
+                return _classify_existing(context, stored, expected=expected, source=request.source, output=request.output)
             stored_values = _operation_values(stored)
             owner, pair = stored_values.get("owner_id"), stored_values.get("pair_nonce")
             if not isinstance(owner, str) or not owner or not isinstance(pair, str) or not pair:
@@ -450,20 +455,39 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             context.journal.transition(operation_id, expected_phase=phase, next_phase="validated", hashes={"control_hash": sha256(control), "validation_digest": candidate_manifest.digest}); phase = "validated"
             backup = directory / "backup.xlsx"; backup_hash = _copy_verified(request.source, backup)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="backup_verified", hashes={"backup_hash": backup_hash}); phase = "backup_verified"
-            context.journal.record_post_hash(operation_id, expected_phase=phase, post_hash=sha256(candidate))
+            post_hash = sha256(candidate)
+            context.journal.record_post_hash(operation_id, expected_phase=phase, post_hash=post_hash)
             _recheck(context, plan, request.source)
-            os.replace(candidate, request.output)
-            context.journal.transition(operation_id, expected_phase=phase, next_phase="published")
-            _finalize(context, operation_id)
+            try:
+                verify_pre_cutover_target(source=request.source, output=request.output, pre_hash=plan.workbook_hash)
+                replace_verified(candidate=candidate, target=request.output, post_hash=post_hash)
+            except WorkbookCutoverError as error:
+                raise GroupRowInsertionError(error.code, stage=f"cutover_{error.stage}", cause=error) from error
+            try:
+                context.journal.transition(operation_id, expected_phase=phase, next_phase="published")
+            except Exception as error:
+                raise GroupRowInsertionError("published_journal_failed", stage="cutover_published", cause=error) from error
             return {"mode": mode, "row": plan.target_row, "published": True, "operation_id": operation_id, "manifest": candidate_manifest.digest}
     except GroupRowInsertionError as error:
-        if created_operation: _manual_repair(context, operation_id, phase, error.code)
+        if created_operation and not (phase == "backup_verified" and 'post_hash' in locals()):
+            try:
+                _manual_repair(context, operation_id, phase, error.code)
+            except GroupRowInsertionError as cleanup:
+                raise GroupRowInsertionError(error.code, stage=error.stage, cause=error.cause or error, cleanup=cleanup) from error
         raise
     except NativeExcelError as error:
         code = "excel_required_for_group_publication" if mode == "blank_fill" and error.code == "excel_required_for_middle_insert" else error.code
         durable_phase = error.durable_phase if error.durable_phase in {"staged", "native"} else phase
-        if created_operation: _manual_repair(context, operation_id, durable_phase, code)
+        if created_operation:
+            try:
+                _manual_repair(context, operation_id, durable_phase, code)
+            except GroupRowInsertionError as repair_error:
+                raise GroupRowInsertionError(code, stage=error.stage, cause=error, cleanup=repair_error) from error
         raise GroupRowInsertionError(code, stage=error.stage, cause=error, cleanup=error.cleanup) from error
     except Exception as error:
-        if created_operation: _manual_repair(context, operation_id, phase, "group_row_failed")
+        if created_operation and not (phase == "backup_verified" and 'post_hash' in locals()):
+            try:
+                _manual_repair(context, operation_id, phase, "group_row_failed")
+            except GroupRowInsertionError as repair_error:
+                raise GroupRowInsertionError("group_row_failed", stage=phase, cause=error, cleanup=repair_error) from error
         raise GroupRowInsertionError("group_row_failed", stage=phase, cause=error) from error
