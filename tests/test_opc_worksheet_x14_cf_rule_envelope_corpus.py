@@ -276,6 +276,32 @@ def test_sqref_positions_preserve_earliest_invalid_rule_error(tmp_path, before, 
     assert error(corpus(tmp_path / "sqref-invalid-actual.xlsx", first=extension(actual))) == expected
 
 
+@pytest.mark.parametrize("before, between", [
+    ('<xm:sqref bad="x">malformed</xm:sqref>', ""),
+    ("", '<xm:sqref/><xm:sqref>duplicate</xm:sqref>'),
+])
+def test_sqref_positions_preserve_earliest_invalid_formula_error(tmp_path, before, between):
+    invalid_formula = rule(priority="1", children="<xm:f/><x14:dxf/>")
+    later_priority_fault = rule(priority="0")
+    baseline = (
+        "<x14:conditionalFormatting>"
+        + invalid_formula
+        + later_priority_fault
+        + "</x14:conditionalFormatting>"
+    )
+    actual = (
+        "<x14:conditionalFormatting>"
+        + before
+        + invalid_formula
+        + between
+        + later_priority_fault
+        + "</x14:conditionalFormatting>"
+    )
+    expected = error(corpus(tmp_path / "sqref-formula-baseline.xlsx", first=extension(baseline)))
+    assert expected == ("invalid-x14-cf-formula", PART, "f", "text")
+    assert error(corpus(tmp_path / "sqref-formula-actual.xlsx", first=extension(actual))) == expected
+
+
 def test_sqref_between_rules_preserves_earlier_missing_attribute_error(tmp_path):
     missing_id = rule(priority="1").replace(' id="' + GUID + '"', "")
     baseline = '<x14:conditionalFormatting>' + missing_id + rule(priority="0") + '</x14:conditionalFormatting>'
