@@ -39,7 +39,7 @@ _MAX_UNSIGNED: Final = 4_294_967_295
 _MAX_ROW_HEIGHT_LEXICAL: Final = 128
 _MAX_ROW_INTEGER_LEXICAL: Final = 64
 _ROW_BOOLEANS: Final = frozenset({"0", "1", "false", "true"})
-_CELL_TYPES: Final = frozenset({"", "b", "d", "e", "inlineStr", "s", "str"})
+_CELL_TYPES: Final = frozenset({"", "b", "d", "e", "inlineStr", "n", "s", "str"})
 
 
 @dataclass(frozen=True)
@@ -328,7 +328,9 @@ def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previo
     if cell_type == "inlineStr":
         if inline_element is None or value_element is not None:
             _fail("invalid-cell-payload", part.value, "t", cell_type)
-    elif inline_element is not None or (value_element is None and formula_element is None):
+    elif inline_element is not None or (
+        value_element is None and formula_element is None and cell_type != "n" and "t" in element.attrib
+    ):
         _fail("invalid-cell-payload", part.value, "t", cell_type)
     if value_element is not None and (value_element.attrib or len(value_element) or _non_whitespace(value_element.tail)):
         _fail("invalid-cell-value", part.value, "v", "structure")
@@ -392,8 +394,10 @@ def _hyperlinks(root: ET.Element, part: CanonicalPartURI, relationships: tuple[P
         refs.add(ref)
         relationship_id = element.attrib.get(_REL_ID); location = element.attrib.get("location")
         if bool(relationship_id) == bool(location): _fail("invalid-hyperlink-anchor", part.value, "anchor", ref)
-        for key in ("display", "tooltip"):
-            if key in element.attrib and not element.attrib[key].strip(): _fail("blank-hyperlink-attribute", part.value, key, "")
+        if "display" in element.attrib and not element.attrib["display"].strip():
+            _fail("blank-hyperlink-attribute", part.value, "display", "")
+        if "tooltip" in element.attrib and element.attrib["tooltip"] and not element.attrib["tooltip"].strip():
+            _fail("blank-hyperlink-attribute", part.value, "tooltip", "")
         if location is not None and not location.strip(): _fail("blank-hyperlink-attribute", part.value, "location", "")
         if relationship_id is None:
             records.append(WorksheetHyperlink(ref, None, location, element.attrib.get("display"), element.attrib.get("tooltip"), None, None, None)); continue

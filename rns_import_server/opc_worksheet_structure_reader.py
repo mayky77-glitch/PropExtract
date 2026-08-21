@@ -250,7 +250,6 @@ def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) 
             _fail("invalid-merge-count", part.value, "count", "")
         _mixed(merge_container, part.value, "mergeCells")
         seen: set[tuple[str, str]] = set()
-        previous_merge: tuple[int, int, int, int] | None = None
         for item in merge_container:
             if item.tag != _MERGE_CELL: _fail("invalid-merge-cells-child", part.value, "tag", str(item.tag))
             if set(item.attrib) - {"ref"}: _fail("unknown-merge-cell-attribute", part.value, "attribute", sorted(set(item.attrib) - {"ref"})[0])
@@ -258,11 +257,7 @@ def _structure(root: ET.Element, part: CanonicalPartURI, cells: WorksheetCells) 
             record = _range(item.attrib.get("ref"), part.value, "ref")
             key = (record.start, record.end)
             if key in seen: _fail("duplicate-merge-range", part.value, "ref", f"{record.start}:{record.end}" if record.start != record.end else record.start)
-            order_key = (record.min_row, record.min_column, record.max_row, record.max_column)
-            if previous_merge is not None and order_key <= previous_merge:
-                _fail("out-of-order-merge-range", part.value, "ref", f"{record.start}:{record.end}" if record.start != record.end else record.start)
             seen.add(key); merges.append(record)
-            previous_merge = order_key
         if _uint(merge_container.attrib["count"], part.value, "count", "invalid-merge-count") != len(merges):
             _fail("merge-count-mismatch", part.value, "count", merge_container.attrib["count"])
     filter_element = next((e for e in elements if e.tag == _AUTO_FILTER), None)

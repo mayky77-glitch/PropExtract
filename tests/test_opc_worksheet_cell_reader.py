@@ -88,6 +88,26 @@ def test_accepts_excel_metadata_preserved_text_and_uncached_formula(tmp_path):
     assert cells[0].inline_text == " x " and cells[1].formula and cells[1].value is None
 
 
+def test_accepts_native_numeric_empty_cells_and_exact_empty_hyperlink_tooltip(tmp_path):
+    sheet = worksheet(
+        '<row r="6"><c r="A6" t="n"><v>7</v></c><c r="B6" t="n"/><c r="C6"/></row>',
+        '<hyperlinks><hyperlink ref="A6" location="target" tooltip=""/></hyperlinks>',
+    )
+    result = read_worksheet_cell_semantics(package(tmp_path / "native.xlsx", sheet_one=sheet)).worksheets[0]
+    assert [(cell.coordinate, cell.cell_type, cell.value, cell.formula) for cell in result.cells] == [
+        ("A6", "n", "7", None), ("B6", "n", None, None), ("C6", "", None, None),
+    ]
+    assert result.hyperlinks[0].tooltip == ""
+    with pytest.raises(FrozenInstanceError): result.cells[1].value = "8"
+
+
+def test_explicit_empty_cell_type_still_requires_payload(tmp_path):
+    sheet = worksheet('<row r="6"><c r="A6" t=""/></row>')
+    assert error(package(tmp_path / "explicit-empty-type.xlsx", sheet_one=sheet)) == (
+        "invalid-cell-payload", "xl/worksheets/first.xml", "t", ""
+    )
+
+
 def test_validates_and_ignores_native_row_properties_without_changing_projection(tmp_path):
     body = ('<row r="6"><c r="A6"><v>1</v></c></row>'
             '<row r="10"><c r="B10"><f>SUM(A6)</f><v>2</v></c></row>'

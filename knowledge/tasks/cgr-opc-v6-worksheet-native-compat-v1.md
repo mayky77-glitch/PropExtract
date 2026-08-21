@@ -1,8 +1,8 @@
 ---
 type: task
-status: frozen
+status: completed
 work_id: cgr-opc-v6-worksheet-native-compat-v1
-tags: [task/implementation, feature/worksheet-reader, status/frozen]
+tags: [task/implementation, feature/worksheet-reader, status/completed]
 last_verified: 2026-08-21
 updated: 2026-08-21
 ---
@@ -34,3 +34,10 @@ Keep public records and four-field error shapes. Accept explicit native numeric 
 5. source SHA remains `2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`.
 
 Run direct cell/structure tests, compact topology/style/formula regression, full pytest once, compile touched modules, diff check, scope/ancestry/identity/clean. This Gate proves read compatibility only, not insertion safety or Excel publication.
+
+## Completion evidence
+
+- `PYTHONPATH=. python3 -m pytest -q tests/test_opc_worksheet_cell_reader.py tests/test_opc_worksheet_structure_reader.py`: 193 passed.
+- Compact topology/style/formula regression: 142 passed.
+- Read-only source SHA matched exactly; cell and structure readers passed all four worksheets, with `Реестр РНС` at `A1:AQ1001`, `A3:AQ605`, and 12 merges.
+- Full pytest ran once: 1506 passed, 10 blocked by sandbox loopback-socket `PermissionError`; no reader failures.
