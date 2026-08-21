@@ -329,7 +329,7 @@ def _cell(element: ET.Element, part: CanonicalPartURI, expected_row: int, previo
         if inline_element is None or value_element is not None:
             _fail("invalid-cell-payload", part.value, "t", cell_type)
     elif inline_element is not None or (
-        value_element is None and formula_element is None and cell_type not in {"", "n"}
+        value_element is None and formula_element is None and cell_type != "n" and "t" in element.attrib
     ):
         _fail("invalid-cell-payload", part.value, "t", cell_type)
     if value_element is not None and (value_element.attrib or len(value_element) or _non_whitespace(value_element.tail)):
