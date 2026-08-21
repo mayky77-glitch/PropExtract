@@ -50,6 +50,9 @@ class Journal:
         assert self.phase == expected_phase
         if self.operation is not None: self.operation["post_hash"] = post_hash
         self.calls.append(("post", post_hash)); return object()
+    def record_repair_anomaly(self, operation_id, *, failure_code):
+        assert self.phase in {"finalized", "manual_repair"}
+        self.phase = "manual_repair"; self.calls.append(("repair_anomaly", failure_code)); return object()
     def finalize_flag(self, operation_id, flag): self.calls.append((flag, {})); return object()
 
 
@@ -528,6 +531,17 @@ def test_manual_repair_journal_failure_is_typed_and_observable(tmp_path: Path) -
             operation={"operation_id": "op", "phase": "staged", "pre_hash": "old", "post_hash": "new"}, source=source,
         )
     assert isinstance(captured.value.cause, RuntimeError)
+
+
+@pytest.mark.parametrize("phase", ("finalized", "manual_repair"))
+def test_terminal_third_hash_uses_idempotent_repair_anomaly_journal_path(tmp_path: Path, phase: str) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"
+    _book(source); output.write_bytes(b"third")
+    journal = Journal(); journal.phase = phase
+    context = PublicationContext(lambda: nullcontext(), lambda current: current, journal, 1, "book")
+    operation = {"operation_id": "op", "phase": phase, "pre_hash": "pre", "post_hash": "post"}
+    assert recover_group_row(context=context, operation=operation, source=source, output=output) == "manual_repair"
+    assert journal.calls == [("repair_anomaly", "workbook_third_hash_manual_repair")]
 
 
 @pytest.mark.parametrize(
