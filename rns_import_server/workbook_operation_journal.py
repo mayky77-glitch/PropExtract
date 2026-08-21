@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 import sqlite3
 from typing import Any, Callable, Mapping
 
@@ -38,6 +39,7 @@ FINALIZATION_FLAGS = frozenset({
     "capability_finalized", "binding_finalized", "history_finalized", "report_finalized",
 })
 _HASH_FIELDS = frozenset({"pre_hash", "staged_hash", "control_hash", "post_hash", "backup_hash", "validation_digest"})
+_REPAIR_FAILURE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _PHASE_TIMESTAMPS = {
     PHASE_STAGED: "staged_at",
     PHASE_VALIDATED: "validated_at",
@@ -49,6 +51,10 @@ _PHASE_TIMESTAMPS = {
 
 class JournalTransitionError(RegistryConflictError):
     pass
+
+
+class JournalStorageError(RegistryError):
+    """A SQLite failure at the durable journal boundary."""
 
 
 @dataclass(frozen=True)
@@ -341,6 +347,50 @@ class WorkbookOperationJournal:
             if updated != 1:
                 raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
         return self.get(operation_id)  # type: ignore[return-value]
+
+    def record_repair_anomaly(self, operation_id: str, *, failure_code: str) -> JournalOperation:
+        """Durably preserve a terminal repair anomaly without reopening finalization.
+
+        This is intentionally separate from the ordinary phase graph.  It is
+        the sole path that may change a completed operation from ``finalized``
+        to ``manual_repair``.  ``BEGIN IMMEDIATE`` in ``storage.transaction``
+        serializes two live SQLite connections before either observes the
+        terminal phase, so an exact retry is a no-write replay and a different
+        code cannot replace the first evidence.
+        """
+        if not isinstance(operation_id, str) or not operation_id:
+            raise RegistryError("Operation ID repair anomaly имеет неверный формат")
+        if not isinstance(failure_code, str) or not _REPAIR_FAILURE_CODE.fullmatch(failure_code):
+            raise RegistryError("Repair anomaly failure code имеет неверный формат")
+        try:
+            self.storage.connection.execute("PRAGMA synchronous=FULL")
+            with self.storage.transaction() as connection:
+                current = connection.execute(
+                    "SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if current is None:
+                    raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
+                if current["phase"] == PHASE_MANUAL_REPAIR:
+                    if current["failure_code"] != failure_code:
+                        raise JournalTransitionError("Repair anomaly conflict сохраняет первый failure code")
+                    return JournalOperation(dict(current))
+                if current["phase"] != PHASE_FINALIZED:
+                    raise JournalTransitionError("Repair anomaly допускается только для finalized или manual_repair")
+                updated = connection.execute(
+                    "UPDATE workbook_operation_journal SET phase=?, failure_code=?, updated_at=? "
+                    "WHERE operation_id=? AND phase=?",
+                    (PHASE_MANUAL_REPAIR, failure_code, _now(), operation_id, PHASE_FINALIZED),
+                ).rowcount
+                if updated != 1:
+                    raise JournalTransitionError("Operation не найдена или её фаза уже изменилась")
+                repaired = connection.execute(
+                    "SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if repaired is None:
+                    raise JournalStorageError("Repair anomaly не прочитан после durable CAS")
+                return JournalOperation(dict(repaired))
+        except sqlite3.Error as error:
+            raise JournalStorageError("SQLite не сохранил repair anomaly") from error
 
     def record_post_hash(self, operation_id: str, *, expected_phase: str, post_hash: str) -> JournalOperation:
         """Commit post-publication evidence before the caller may replace XLSX."""
