@@ -54,3 +54,10 @@ knowledge_paths:
 - Finalized flags/timestamps and `finalized_at` remain byte/value-identical after the anomaly is recorded; post-hash and authority fields are unchanged.
 - A two-connection barrier proves one exact durable result and no lost update; a different-code contender returns typed conflict.
 - Existing journal transition, lease, publication-authority, and recovery tests remain green.
+
+## Implementation evidence — 2026-08-21
+
+- `record_repair_anomaly()` is a single SQLite `BEGIN IMMEDIATE` transaction with a phase CAS. It is the sole narrow `finalized → manual_repair` repair path; the ordinary transition graph and database schema are unchanged.
+- The operation accepts only lower snake-case failure codes of 1–64 ASCII characters. Exact `manual_repair` replay is a no-write read; a different code raises `JournalTransitionError` and retains the first code. SQLite failures are translated to `JournalStorageError`.
+- Focused local evidence: journal tests `22 passed`; journal/group insertion/Excel native contract tests `63 passed, 2 skipped`; compile and whitespace diff checks pass.
+- Full local corpus result: `1639 passed, 2 skipped, 12 failed`. Every failure is an existing corpus test attempting to read the absent stale absolute path `/Users/x/Автоматизация РнС и ГРО/Реестр РНС Иркутск.xlsx`; no failure names this journal operation.
