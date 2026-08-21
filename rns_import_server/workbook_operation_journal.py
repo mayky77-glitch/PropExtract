@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import sqlite3
 from typing import Any, Callable, Mapping
 
+from rns_import_server.excel_process_authority import ExcelProcessLease
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage
 
 
@@ -251,7 +252,7 @@ class WorkbookOperationJournal:
         next_phase: str,
         failure_code: str | None = None,
         hashes: Mapping[str, str] | None = None,
-        excel_lease: Mapping[str, object] | None = None,
+        excel_lease: ExcelProcessLease | None = None,
     ) -> JournalOperation:
         if next_phase not in LEGAL_TRANSITIONS.get(expected_phase, set()):
             raise JournalTransitionError(f"Недопустимый переход journal: {expected_phase} → {next_phase}")
@@ -270,20 +271,47 @@ class WorkbookOperationJournal:
             raise RegistryError("До publication необходим verified backup hash")
         if next_phase == PHASE_VALIDATED and not hashes.get("validation_digest"):
             raise RegistryError("Validated operation требует validation digest")
+        lease_fields = {
+            "excel_adapter", "excel_adapter_pid", "excel_adapter_started_at", "excel_pid", "excel_hwnd",
+            "excel_process_started_at", "excel_build",
+        }
+        if excel_lease is not None:
+            if type(excel_lease) is not ExcelProcessLease:
+                raise RegistryError("Excel lease имеет неподдерживаемый формат")
+            if next_phase != PHASE_NATIVE or expected_phase != PHASE_STAGED:
+                raise RegistryError("Excel lease допускается только при staged → native")
+            if (excel_lease.operation_id, excel_lease.owner_id, excel_lease.pair_nonce) != (
+                current["operation_id"], current["owner_id"], current["pair_nonce"],
+            ):
+                raise RegistryError("Excel lease не соответствует authority journal operation")
+            lease_values = {
+                "excel_adapter": excel_lease.adapter_type,
+                "excel_adapter_pid": excel_lease.adapter_pid,
+                "excel_adapter_started_at": excel_lease.adapter_started_at,
+                "excel_pid": excel_lease.excel_pid,
+                "excel_hwnd": excel_lease.excel_hwnd,
+                "excel_process_started_at": excel_lease.excel_process_started_at,
+                "excel_build": excel_lease.excel_build,
+            }
+            if (set(lease_values) != lease_fields or lease_values["excel_adapter"] != "com"
+                    or not isinstance(lease_values["excel_adapter_started_at"], str)
+                    or not isinstance(lease_values["excel_process_started_at"], str)
+                    or not isinstance(lease_values["excel_build"], str)
+                    or any(not isinstance(lease_values[name], int) or isinstance(lease_values[name], bool)
+                           or lease_values[name] <= 0 for name in ("excel_adapter_pid", "excel_pid", "excel_hwnd"))):
+                raise RegistryError("Excel lease имеет неполную durable projection")
+        else:
+            lease_values = {}
+        if next_phase == PHASE_NATIVE and current["mutation_mode"] in {"middle_insert", "blank_fill"} and not excel_lease:
+            raise RegistryError("Native mutation требует полный Excel lease до открытия workbook")
         if next_phase == PHASE_VALIDATED and current["mutation_mode"] == "middle_insert":
-            lease = {"excel_adapter", "excel_pid", "excel_hwnd", "excel_process_started_at", "excel_build"}
-            persisted = {name: current[name] for name in lease}
-            persisted.update(excel_lease or {})
             control_hash = hashes.get("control_hash") or current["control_hash"]
-            if not control_hash or any(persisted[name] in {None, ""} for name in lease):
+            if not control_hash or any(current[name] in {None, ""} for name in lease_fields):
                 raise RegistryError("Native mutation требует Excel lease и control_hash до validation")
         if next_phase == PHASE_MANUAL_REPAIR and not failure_code:
             raise RegistryError("Manual repair требует durable failure code")
         if next_phase == PHASE_FINALIZED and not all(current[flag] for flag in FINALIZATION_FLAGS):
             raise RegistryError("Finalized operation требует все finalization flags")
-        lease_fields = {"excel_adapter", "excel_pid", "excel_hwnd", "excel_process_started_at", "excel_build"}
-        if excel_lease and set(excel_lease) - lease_fields:
-            raise RegistryError("Неизвестное поле Excel lease")
         assignments = ["phase=?", "failure_code=?", "updated_at=?"]
         values: list[object] = [next_phase, failure_code, _now()]
         timestamp = _PHASE_TIMESTAMPS.get(next_phase)
@@ -293,18 +321,21 @@ class WorkbookOperationJournal:
         for key, value in hashes.items():
             assignments.append(f"{key}=?")
             values.append(value)
-        for key, value in (excel_lease or {}).items():
+        for key, value in lease_values.items():
             assignments.append(f"{key}=?")
             values.append(value)
         values.extend([operation_id, expected_phase])
+        where = "WHERE operation_id=? AND phase=?"
+        if excel_lease is not None:
+            values.extend([excel_lease.owner_id, excel_lease.pair_nonce])
+            where += " AND owner_id=? AND pair_nonce=?"
         # Set this outside the transaction; SQLite rejects changing safety
         # level after BEGIN.  It is also the storage default, but making it
         # explicit guards an embedding consumer that changed the connection.
         self.storage.connection.execute("PRAGMA synchronous=FULL")
         with self.storage.transaction() as connection:
             updated = connection.execute(
-                f"UPDATE workbook_operation_journal SET {', '.join(assignments)} "
-                "WHERE operation_id=? AND phase=?",
+                f"UPDATE workbook_operation_journal SET {', '.join(assignments)} {where}",
                 values,
             ).rowcount
             if updated != 1:

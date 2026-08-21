@@ -106,10 +106,43 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
     finally:
         migrated.close()
     newer = RegistryStorage(path)
-    newer.connection.execute("UPDATE registry_meta SET schema_version=3")
+    newer.connection.execute("UPDATE registry_meta SET schema_version=4")
     newer.close()
     with pytest.raises(RegistrySchemaError):
         RegistryStorage(path)
+
+
+@pytest.mark.parametrize("mode", ["middle_insert", "blank_fill"])
+@pytest.mark.parametrize("phase,expected_phase", [
+    ("staged", "manual_repair"), ("native", "manual_repair"), ("validated", "manual_repair"),
+    ("backup_verified", "manual_repair"), ("published", "published"), ("finalized", "finalized"),
+])
+def test_v2_lease_migration_quarantines_only_nonterminal_native_history(tmp_path: Path, mode: str, phase: str, expected_phase: str) -> None:
+    runtime = RegistryStorage.bootstrap(tmp_path)
+    path = runtime.path
+    operation_id = _journal_operation(runtime, phase)
+    runtime.connection.execute("UPDATE workbook_operation_journal SET mutation_mode=? WHERE operation_id=?", (mode, operation_id))
+    runtime.connection.execute("UPDATE workbook_operation_journal SET phase=? WHERE operation_id=?", (phase, operation_id))
+    if phase == "finalized":
+        runtime.connection.execute(
+            """UPDATE workbook_operation_journal
+               SET capability_finalized=1, binding_finalized=1, history_finalized=1, report_finalized=1
+             WHERE operation_id=?""",
+            (operation_id,),
+        )
+    runtime.connection.execute("ALTER TABLE workbook_operation_journal DROP COLUMN excel_adapter_pid")
+    runtime.connection.execute("ALTER TABLE workbook_operation_journal DROP COLUMN excel_adapter_started_at")
+    runtime.connection.execute("UPDATE registry_meta SET schema_version=2")
+    runtime.close()
+    migrated = RegistryStorage(path)
+    try:
+        row = migrated.connection.execute("SELECT phase, failure_code FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
+        assert row["phase"] == expected_phase
+        if expected_phase == "manual_repair":
+            assert row["failure_code"] == "legacy_excel_lease_ownership_missing"
+        assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
+    finally:
+        migrated.close()
 
 
 def test_schema_less_or_interrupted_runtime_is_rejected(tmp_path: Path) -> None:

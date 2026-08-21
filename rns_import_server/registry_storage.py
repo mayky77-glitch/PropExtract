@@ -27,8 +27,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 2
-SEED_REVISION = "construction-registry-v2"
+SCHEMA_VERSION = 3
+SEED_REVISION = "construction-registry-v3"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -88,7 +88,9 @@ _REQUIRED_SCHEMA_COLUMNS = {
 _V2_JOURNAL_COLUMNS = frozenset({
     "capability_finalized_at", "binding_finalized_at", "history_finalized_at", "report_finalized_at",
 })
+_V3_JOURNAL_COLUMNS = frozenset({"excel_adapter_pid", "excel_adapter_started_at"})
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
+_LEGACY_LEASE_OWNERSHIP_FAILURE_CODE = "legacy_excel_lease_ownership_missing"
 
 
 @dataclass(frozen=True)
@@ -269,7 +271,7 @@ class RegistryStorage:
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, SCHEMA_VERSION}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         self._validate_schema(version)
         if version < SCHEMA_VERSION:
@@ -292,8 +294,10 @@ class RegistryStorage:
 
     def _validate_schema(self, version: int) -> None:
         required = dict(_REQUIRED_SCHEMA_COLUMNS)
-        if version == SCHEMA_VERSION:
+        if version == 2:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS
+        elif version == SCHEMA_VERSION:
+            required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -429,6 +433,8 @@ class RegistryStorage:
                     backup_hash TEXT,
                     validation_digest TEXT,
                     excel_adapter TEXT,
+                    excel_adapter_pid INTEGER,
+                    excel_adapter_started_at TEXT,
                     excel_pid INTEGER,
                     excel_hwnd INTEGER,
                     excel_process_started_at TEXT,
@@ -466,7 +472,7 @@ class RegistryStorage:
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1}:
+        if version not in {0, 1, 2}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
@@ -498,6 +504,9 @@ class RegistryStorage:
                     f"UPDATE workbook_operation_journal SET {column}=COALESCE(NULLIF(updated_at, ''), created_at) "
                     f"WHERE {flag}_finalized=1 AND {column} IS NULL"
                 )
+            for column, sql_type in (("excel_adapter_pid", "INTEGER"), ("excel_adapter_started_at", "TEXT")):
+                if column not in columns:
+                    connection.execute(f"ALTER TABLE workbook_operation_journal ADD COLUMN {column} {sql_type}")
             any_finalized = " OR ".join(f"{flag}_finalized=1" for flag in ("capability", "binding", "history", "report"))
             missing_finalized = " OR ".join(f"{flag}_finalized IS NOT 1" for flag in ("capability", "binding", "history", "report"))
             # A legacy record without phase-gated finalization cannot be
@@ -511,6 +520,22 @@ class RegistryStorage:
                            AND ({any_finalized}))""",
                 (_LEGACY_JOURNAL_STATE_FAILURE_CODE, utc_now()),
             )
+            # v2 lacks adapter PID/start evidence.  Native work may never be
+            # resumed under a guessed ownership tuple; retain all history and
+            # force a visible repair at the responsible boundary.
+            if version == 2:
+                connection.execute(
+                    """UPDATE workbook_operation_journal
+                       SET phase='manual_repair', failure_code=?, updated_at=?
+                     WHERE mutation_mode IN ('middle_insert', 'blank_fill')
+                       AND phase IN ('staged', 'native', 'validated', 'backup_verified')
+                       AND (excel_adapter IS NULL OR excel_adapter='' OR excel_pid IS NULL
+                            OR excel_hwnd IS NULL OR excel_process_started_at IS NULL
+                            OR excel_process_started_at='' OR excel_build IS NULL OR excel_build=''
+                            OR excel_adapter_pid IS NULL OR excel_adapter_started_at IS NULL
+                            OR excel_adapter_started_at='')""",
+                    (_LEGACY_LEASE_OWNERSHIP_FAILURE_CODE, utc_now()),
+                )
             # v1 had no identity index, so repeated reconciliation could write
             # duplicate unresolved conflicts. Keep resolved history intact.
             connection.execute(
