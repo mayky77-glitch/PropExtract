@@ -19,6 +19,9 @@ from rns_import_server.opc_worksheet_structure_insertion_oracle import OPCWorksh
 from rns_import_server.workbook_groups import MutationPlan
 from rns_import_server.workbook_mutation_manifest import MutationManifestError
 from rns_import_server.registry_storage import RegistryConflictError
+from rns_import_server.registry_storage import RegistryStorage
+from rns_import_server.excel_process_authority import ExcelProcessLease
+from rns_import_server.workbook_operation_journal import WorkbookOperationJournal
 
 
 class Journal:
@@ -142,7 +145,8 @@ def test_mocked_blank_lifecycle_is_locked_journaled_and_published(tmp_path: Path
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal = Journal(); result = publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert result["published"] is True and load_workbook(output, read_only=True)["Реестр РНС"].cell(5, 6).value == plan.canonical_rns
-    assert [name for name, _ in journal.calls if name in {"staged", "native", "validated", "backup_verified", "published", "finalized"}] == ["staged", "native", "validated", "backup_verified", "published", "finalized"]
+    assert [name for name, _ in journal.calls if name in {"staged", "native", "validated", "backup_verified", "published", "finalized"}] == ["staged", "native", "validated", "backup_verified", "published"]
+    assert not [name for name, _ in journal.calls if name.endswith("finalized")]
 
 
 def test_blank_fill_manifest_failure_blocks_fsync_backup_and_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,7 +225,7 @@ def test_exact_replay_enters_recovery_without_second_directory_or_native_mutatio
     directories = tuple((tmp_path / "ops").iterdir())
     replay = publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert (replay["published"], replay["operation_id"], replay["recovery"], calls, tuple((tmp_path / "ops").iterdir())) == (
-        False, "00000000-0000-4000-8000-000000000001", "manual_repair", ["00000000-0000-4000-8000-000000000001"], directories,
+        False, "00000000-0000-4000-8000-000000000001", "finalization_pending", ["00000000-0000-4000-8000-000000000001"], directories,
     )
 
 
@@ -240,7 +244,7 @@ def test_exact_replay_uses_planned_generation_after_independent_registry_bump(tm
     publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     journal.phase = "staged"; journal.operation["phase"] = "staged"
     replay = publish_group_row(replace(request, context=replace(request.context, generation=2)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")  # type: ignore[arg-type]
-    assert (replay["published"], replay["recovery"], calls, journal.operation["expected_generation"]) == (False, "re_resolve_required", ["00000000-0000-4000-8000-000000000001"], 1)
+    assert (replay["published"], replay["recovery"], calls, journal.operation["expected_generation"]) == (False, "manual_repair", ["00000000-0000-4000-8000-000000000001"], 1)
 
 
 def test_concurrent_create_loser_reloads_authority_without_native_or_manual_repair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -462,3 +466,64 @@ def test_third_hash_recovery_is_manual_repair(tmp_path: Path) -> None:
     journal.phase = "staged"; context = PublicationContext(lambda: nullcontext(), lambda current: current, journal, 1, "book")
     assert recover_group_row(context=context, operation={"operation_id": "op", "phase": "staged", "pre_hash": "old", "post_hash": "new"}, source=source) == "manual_repair"
     assert journal.calls[-1][0] == "manual_repair"
+
+
+def test_post_hash_recovery_publishes_once_without_finalizer_or_native_call(tmp_path: Path) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"
+    _book(source); _book(output)
+    journal = Journal(); journal.phase = "backup_verified"
+    context = PublicationContext(lambda: nullcontext(), lambda current: current, journal, 1, "book")
+    operation = {"operation_id": "op", "phase": "backup_verified", "pre_hash": sha256(source), "post_hash": sha256(output)}
+    assert recover_group_row(context=context, operation=operation, source=source, output=output) == "finalization_pending"
+    assert journal.calls == [("published", {})]
+
+
+def test_manual_repair_journal_failure_is_typed_and_observable(tmp_path: Path) -> None:
+    class BrokenJournal(Journal):
+        def transition(self, *args, **kwargs):
+            raise RuntimeError("journal unavailable")
+    source = tmp_path / "source.xlsx"; _book(source)
+    with pytest.raises(GroupRowInsertionError, match="manual_repair_journal_failed") as captured:
+        recover_group_row(
+            context=PublicationContext(lambda: nullcontext(), lambda current: current, BrokenJournal(), 1, "book"),
+            operation={"operation_id": "op", "phase": "staged", "pre_hash": "old", "post_hash": "new"}, source=source,
+        )
+    assert isinstance(captured.value.cause, RuntimeError)
+
+
+def test_real_journal_restart_recovers_post_hash_without_second_mutation(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "runtime")
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"
+    source.write_bytes(b"pre"); output.write_bytes(b"post")
+    try:
+        journal = WorkbookOperationJournal(storage); construction = storage.list_constructions()[0]
+        operation_id = "restart-operation"
+        journal.create(
+            operation_id=operation_id, idempotency_key="restart-key", consumer_id="restart-consumer", owner_id="owner",
+            pair_nonce="pair", construction_id=construction.id, operation_kind="new_row", mutation_mode="blank_fill",
+            target_identity="book", sheet_identity="sheet", template_version="template", expected_generation=storage.generation,
+            intent_version="intent", intent_digest="intent-digest", manifest_version="manifest", manifest_digest="manifest-digest",
+            operation_directory=str(tmp_path / "operation"), canonical_rns="RU-00000000-00-2026",
+        )
+        journal.transition(operation_id, expected_phase="planned", next_phase="staged", hashes={"pre_hash": sha256(source), "staged_hash": sha256(source)})
+        journal.transition(
+            operation_id, expected_phase="staged", next_phase="native", excel_lease=ExcelProcessLease(
+                operation_id, "owner", "pair", "com", "powershell.exe", 10, "2026-08-21T00:00:00Z",
+                "EXCEL.EXE", 11, 12, "2026-08-21T00:00:01Z", "16.0.1",
+            ),
+        )
+        journal.transition(operation_id, expected_phase="native", next_phase="validated", hashes={"control_hash": sha256(source), "validation_digest": "digest"})
+        journal.transition(operation_id, expected_phase="validated", next_phase="backup_verified", hashes={"backup_hash": sha256(source)})
+        journal.record_post_hash(operation_id, expected_phase="backup_verified", post_hash=sha256(output))
+        storage.close(); restarted = RegistryStorage(storage.path)
+        try:
+            restarted_journal = WorkbookOperationJournal(restarted)
+            context = PublicationContext(lambda: nullcontext(), lambda current: current, restarted_journal, 1, "book")
+            operation = restarted_journal.get(operation_id)
+            assert operation and recover_group_row(context=context, operation=operation, source=source, output=output) == "finalization_pending"
+            assert restarted_journal.get(operation_id).phase == "published"  # type: ignore[union-attr]
+        finally:
+            restarted.close()
+    finally:
+        if storage.connection:
+            pass
