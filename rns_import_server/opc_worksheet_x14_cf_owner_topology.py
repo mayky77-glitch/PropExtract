@@ -335,13 +335,13 @@ def read_worksheet_x14_cf_sqref_envelope(package_path:os.PathLike[str]|str)->Wor
     """Project strict X14 CF owners, rules, and their direct typed sqref ranges."""
     accepted=_accepted(_path(package_path)); worksheets=[]
     for sheet,part,owners in accepted:
-        priorities:set[int]=set(); rule_order=0; projected=[]
+        rule_order=0; projected=[]
         for owner,node in owners:
             rules=[]; sqref_text=None; ranges=None
             for path_index,child in enumerate(node,1):
                 if child.tag==_RULE:
                     if sqref_text is not None:_fail("invalid-x14-cf-order",part.value,"conditionalFormatting","cfRule,sqref")
-                    rule_order+=1;rules.append(_rule(child,part,owner,rule_order,path_index,priorities))
+                    rule_order+=1;rules.append(_rule(child,part,owner,rule_order,path_index))
                 elif child.tag==_SQREF:
                     if not rules:_fail("invalid-x14-cf-order",part.value,"conditionalFormatting","cfRule,sqref")
                     if sqref_text is not None:_fail("duplicate-x14-cf-sqref",part.value,"sqref",child.text or "")
