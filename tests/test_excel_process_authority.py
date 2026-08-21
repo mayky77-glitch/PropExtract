@@ -67,6 +67,14 @@ class ReentrantString(str):
         raise AssertionError("attacker-controlled comparison")
 
 
+class ReentrantFrozenSet(frozenset[int]):
+    def __iter__(self):
+        raise AssertionError("attacker-controlled iteration")
+
+    def __contains__(self, value: object) -> bool:
+        raise AssertionError("attacker-controlled containment")
+
+
 @pytest.mark.parametrize("field,code", [
     ("operation_id", "excel_lease_identity_invalid"),
     ("owner_id", "excel_lease_identity_invalid"),
@@ -106,6 +114,12 @@ def test_verifier_revalidates_lease_scalars_before_identity_comparison() -> None
     with pytest.raises(ExcelProcessAuthorityError) as error:
         verify_excel_process_lease(lease, launched_adapter_pid=11, inspector=Inspector())
     assert error.value.code == "excel_lease_identity_invalid"
+
+
+def test_verifier_rejects_frozenset_subclass_before_iteration_or_containment() -> None:
+    with pytest.raises(ExcelProcessAuthorityError) as error:
+        verify_excel_process_lease(_lease(), launched_adapter_pid=11, inspector=Inspector(snapshot=ReentrantFrozenSet({22})))
+    assert error.value.code == "excel_lease_snapshot_unavailable"
 
 
 @pytest.mark.parametrize("value", [

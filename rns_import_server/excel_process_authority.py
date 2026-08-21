@@ -116,7 +116,7 @@ def verify_excel_process_lease(
         raise ExcelProcessAuthorityError("excel_lease_adapter_pid_mismatch")
     try:
         before = inspector.prelaunch_excel_pids()
-        if not isinstance(before, frozenset) or any(type(pid) is not int or pid <= 0 for pid in before):
+        if type(before) is not frozenset or any(type(pid) is not int or pid <= 0 for pid in before):
             raise TypeError("snapshot")
     except ExcelProcessAuthorityError:
         raise

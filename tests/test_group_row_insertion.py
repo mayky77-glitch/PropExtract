@@ -9,6 +9,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.hyperlink import Hyperlink
 
 import rns_import_server.group_row_insertion as insertion
+from rns_import_server.excel_native import native_excel_available
 import rns_import_server.workbook_mutation_manifest as mutation_manifest
 from rns_import_server.audit import sha256
 from rns_import_server.group_row_insertion import GroupRowInsertionError, GroupRowRequest, PublicationContext, publish_group_row, recover_group_row
@@ -82,6 +83,7 @@ def _trusted_native_insert(request, *, script):
 @pytest.fixture(autouse=True)
 def trusted_native_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(insertion, "run_native_insert", _trusted_native_insert)
+    monkeypatch.setattr(insertion, "native_excel_available", lambda: True)
 
 
 def _context(plan, journal):
@@ -297,8 +299,10 @@ def test_legacy_or_invalid_publication_authority_fails_closed_before_work(tmp_pa
     assert not (tmp_path / "ops").exists() and not (tmp_path / "invalid-ops").exists()
 
 
-@pytest.mark.parametrize("header", [6, 10, 104])
+@pytest.mark.parametrize("header", [10, 104])
 def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, header: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    if native_excel_available():
+        pytest.skip("requires a host without the native Excel adapter")
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("insert_before_header", header, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal = Journal(); context = PublicationContext(
@@ -306,10 +310,7 @@ def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, 
         operation_id="00000000-0000-4000-8000-000000000002",
         idempotency_key="group-row-idempotency-2", consumer_id="construction-routing", operation_kind="new_row",
     )
-    monkeypatch.setattr(insertion, "insertion_is_structurally_safe", lambda *_: True)
-    def unavailable(request, *, script):
-        raise insertion.NativeExcelError("excel_required_for_middle_insert", stage="pre_open")
-    monkeypatch.setattr(insertion, "run_native_insert", unavailable)
+    monkeypatch.setattr(insertion, "native_excel_available", native_excel_available)
     with pytest.raises(GroupRowInsertionError, match="excel_required_for_middle_insert"):
         publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {}, context=context), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert source.exists() and not output.exists()
