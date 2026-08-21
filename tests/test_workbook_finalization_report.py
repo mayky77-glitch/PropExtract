@@ -176,7 +176,55 @@ def test_directory_fsync_failure_requires_a_second_publish_before_receipt(tmp_pa
             "finalization_report_write_failed", 0, True,
         )
         assert finalize_published_operation(storage, operation_id).status == "finalized"
-        assert calls >= 4
+        # The retry fsyncs the existing exact report's parent rather than
+        # replacing the report again.
+        assert calls == 3
+    finally:
+        storage.close()
+
+
+def test_receiptless_exact_report_is_fsynced_and_receipted_without_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "registry")
+    try:
+        target = tmp_path / "book.xlsx"; operation_id = _published(storage, target)
+        original_fsync = finalization.os.fsync
+        calls = 0
+
+        def fail_first_directory(descriptor: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("directory fsync")
+            original_fsync(descriptor)
+
+        monkeypatch.setattr(finalization.os, "fsync", fail_first_directory)
+        assert finalize_published_operation(storage, operation_id).error_code == "finalization_report_write_failed"
+        report = _report(target); before = report.stat()
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+        after = report.stat()
+        assert (after.st_ino, after.st_mtime_ns, calls) == (before.st_ino, before.st_mtime_ns, 3)
+    finally:
+        storage.close()
+
+
+def test_interstage_target_mutation_keeps_binding_but_blocks_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "registry")
+    try:
+        target = tmp_path / "book.xlsx"; operation_id = _published(storage, target)
+        original = finalization._finalize_published_binding
+
+        def bind_then_mutate(*args: object, **kwargs: object) -> finalization.FinalizationProgress:
+            result = original(*args, **kwargs)
+            target.write_bytes(b"mutated after binding")
+            return result
+
+        monkeypatch.setattr(finalization, "_finalize_published_binding", bind_then_mutate)
+        result = finalize_published_operation(storage, operation_id)
+        row = WorkbookOperationJournal(storage).get(operation_id)
+        assert row is not None and (result.status, result.error_code, row["binding_finalized"], row["history_finalized"],
+                                    storage.connection.execute("SELECT COUNT(*) FROM new_row_action_history").fetchone()[0]) == (
+                                        "manual_repair", "finalization_target_hash_mismatch", 1, 0, 0,
+                                    )
     finally:
         storage.close()
 

@@ -189,7 +189,9 @@ def _write_binding_receipt(connection: sqlite3.Connection, operation_id: str) ->
     ).rowcount == 1
 
 
-def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> FinalizationProgress:
+def _finalize_published_binding(
+    storage: RegistryStorage, operation_id: str, *, verify_target: bool = False,
+) -> FinalizationProgress:
     """Insert-or-verify the one binding and receipt for a published operation.
 
     A SQLite fault is intentionally surfaced as a pending, non-successful
@@ -236,6 +238,17 @@ def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> F
                 return _manual_repair(connection, operation_id, "finalization_receipt_required")
             if len(bindings) > 1 or (bindings and len(exact) != 1):
                 return _manual_repair(connection, operation_id, "finalization_binding_conflict")
+            # This is deliberately inside the immediate transaction and
+            # directly adjacent to the first binding-side write.  The target
+            # may have changed after the operation-level preflight.
+            if verify_target:
+                target_failure = _target_post_hash_failure(operation, connection.execute(
+                    "SELECT * FROM new_row_pending_actions WHERE action_id=?", (operation_id,)
+                ).fetchone())
+                if target_failure:
+                    if target_failure == "finalization_report_verify_failed":
+                        return _pending(operation_id, target_failure)
+                    return _manual_repair(connection, operation_id, target_failure)
             if bindings:
                 if not _valid_exact_binding(exact[0], values):
                     return _manual_repair(connection, operation_id, "finalization_binding_conflict")
@@ -266,6 +279,11 @@ def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> F
         raise
     except sqlite3.Error:
         return _pending(operation_id, "finalization_binding_storage_failed")
+
+
+def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> FinalizationProgress:
+    """Insert-or-verify binding evidence without report-finalizer authority."""
+    return _finalize_published_binding(storage, operation_id, verify_target=False)
 
 
 def _history_event(*, action_id: str, target_row: int, post_hash: str) -> tuple[str, str]:
@@ -319,7 +337,9 @@ def _valid_history_action(operation: sqlite3.Row, action: sqlite3.Row) -> str | 
     return None
 
 
-def finalize_published_history(storage: RegistryStorage, operation_id: str) -> FinalizationProgress:
+def _finalize_published_history(
+    storage: RegistryStorage, operation_id: str, *, verify_target: bool = False,
+) -> FinalizationProgress:
     """Atomically write the canonical new-row history event and its receipt.
 
     Binding is prerequisite evidence, not a caller promise.  No report or
@@ -386,6 +406,15 @@ def finalize_published_history(storage: RegistryStorage, operation_id: str) -> F
                 return _history_manual_repair(connection, operation_id, "finalization_history_order_invalid")
             if operation["history_finalized_at"] is not None:
                 return _history_manual_repair(connection, operation_id, "finalization_history_order_invalid")
+            # Recheck in this transaction immediately before creating the
+            # history evidence.  Binding is permitted to remain durable when
+            # an interstage target mutation is detected here.
+            if verify_target:
+                target_failure = _target_post_hash_failure(operation, action)
+                if target_failure:
+                    if target_failure == "finalization_report_verify_failed":
+                        return _history_pending(operation_id, target_failure)
+                    return _history_manual_repair(connection, operation_id, target_failure)
             now = utc_now()
             connection.execute(
                 "INSERT INTO new_row_action_history(action_id,event_version,event_type,status,target_row,post_hash,digest,created_at) VALUES(?,1,'new_row','published',?,?,?,?)",
@@ -398,6 +427,11 @@ def finalize_published_history(storage: RegistryStorage, operation_id: str) -> F
         raise
     except sqlite3.Error:
         return _history_pending(operation_id, "finalization_history_storage_failed")
+
+
+def finalize_published_history(storage: RegistryStorage, operation_id: str) -> FinalizationProgress:
+    """Write history evidence without report-finalizer target authority."""
+    return _finalize_published_history(storage, operation_id, verify_target=False)
 
 
 def _stage_pending(operation_id: str, completed: str, next_stage: str, code: str) -> FinalizationProgress:
@@ -420,6 +454,21 @@ def _preflight_target(connection: sqlite3.Connection, operation: sqlite3.Row) ->
             or action["state"] not in {"publishing", "consumed"}
             or not _SHA256.fullmatch(str(action["capability_digest"]))):
         return "finalization_capability_conflict"
+    target_failure = _target_post_hash_failure(operation, action)
+    if target_failure:
+        return target_failure
+    return action, Path(action["target_path"])
+
+
+def _target_post_hash_failure(operation: sqlite3.Row, action: sqlite3.Row | None) -> str | None:
+    """Return the visible result of revalidating target path and post hash.
+
+    Callers invoke this at every stage boundary which can first create durable
+    evidence.  It intentionally keeps ordinary I/O uncertainty pending while
+    making a missing, non-canonical, or changed target a durable repair.
+    """
+    if action is None:
+        return "finalization_capability_conflict"
     target_text = action["target_path"]
     if type(target_text) is not str or not target_text:
         return "finalization_report_path_invalid"
@@ -427,11 +476,13 @@ def _preflight_target(connection: sqlite3.Connection, operation: sqlite3.Row) ->
     if not target.is_absolute():
         return "finalization_report_path_invalid"
     try:
-        target.lstat()
+        info = target.lstat()
     except FileNotFoundError:
         return "finalization_target_hash_mismatch"
     except OSError:
         return "finalization_report_verify_failed"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return "finalization_report_path_invalid"
     try:
         from rns_import_server.new_row_action_store import NewRowActionError, _canonical_target_path
         if _canonical_target_path(target_text) != target_text:
@@ -444,7 +495,7 @@ def _preflight_target(connection: sqlite3.Connection, operation: sqlite3.Row) ->
         return "finalization_report_verify_failed"
     if actual_hash != operation["post_hash"]:
         return "finalization_target_hash_mismatch"
-    return action, target
+    return None
 
 
 def _verify_completed_binding(connection: sqlite3.Connection, operation: sqlite3.Row) -> str | None:
@@ -539,17 +590,22 @@ def _publish_report_bytes(path: Path, payload: bytes) -> None:
             os.close(descriptor)
         os.replace(temporary, path)
         temporary = None
-        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_report_parent(path)
     finally:
         if temporary is not None:
             try:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _fsync_report_parent(path: Path) -> None:
+    """Durably acknowledge an existing same-directory report entry."""
+    directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _finalization_payload(connection: sqlite3.Connection, operation: sqlite3.Row) -> tuple[sqlite3.Row, dict[str, object], bytes] | None:
@@ -589,19 +645,10 @@ def _valid_late_prerequisites(connection: sqlite3.Connection, operation: sqlite3
     failure = _valid_history_action(operation, action)
     if failure:
         return "finalization_capability_conflict"
-    try:
-        target_text = action["target_path"]
-        from rns_import_server.new_row_action_store import _canonical_target_path
-        raw_target = Path(target_text)
-        if raw_target.is_absolute() and not raw_target.exists() and not raw_target.is_symlink():
-            return "finalization_target_hash_mismatch"
-        if _canonical_target_path(target_text) != target_text:
-            return "finalization_report_path_invalid"
-        target = Path(target_text)
-        if _sha256_file(target) != operation["post_hash"]:
-            return "finalization_target_hash_mismatch"
-    except (OSError, ValueError):
-        return "finalization_report_path_invalid"
+    target_failure = _target_post_hash_failure(operation, action)
+    if target_failure:
+        return target_failure
+    target = Path(action["target_path"])
     if not operation["binding_finalized"] or not _is_canonical_utc(operation["binding_finalized_at"]):
         return "finalization_order_invalid"
     if not operation["history_finalized"] or not _is_canonical_utc(operation["history_finalized_at"]):
@@ -792,7 +839,7 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
         return completed
 
     if not existing["binding_finalized"]:
-        binding = finalize_published_binding(storage, operation_id)
+        binding = _finalize_published_binding(storage, operation_id, verify_target=True)
         if binding.status == PHASE_MANUAL_REPAIR or binding.next_stage != "history":
             return binding
     else:
@@ -805,7 +852,7 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
     current = storage.connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
     assert current is not None
     if not current["history_finalized"]:
-        history = finalize_published_history(storage, operation_id)
+        history = _finalize_published_history(storage, operation_id, verify_target=True)
         if history.status == PHASE_MANUAL_REPAIR or history.next_stage != "report":
             return history
     try:
@@ -821,9 +868,15 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
             _, target, content = required
             path = _report_path(target)
             report_receipted = _valid_report_receipt(current, content)
+        exact_report = _read_exact_regular(path, content)
         # An exact file is not proof that a prior rename survived a directory
-        # fsync failure.  Until the DB receipt exists, republish and fsync.
-        if not report_receipted or not _read_exact_regular(path, content):
+        # fsync failure.  Before its first receipt, acknowledge the existing
+        # directory entry, then reopen it without following links.  Do not
+        # replace an exact report: doing so needlessly changes its inode and
+        # mtime during crash recovery.
+        if not report_receipted and exact_report:
+            _fsync_report_parent(path)
+        elif not exact_report:
             _publish_report_bytes(path, content)
         if not _read_exact_regular(path, content):
             return _stage_pending(operation_id, "history", "report", "finalization_report_verify_failed")
