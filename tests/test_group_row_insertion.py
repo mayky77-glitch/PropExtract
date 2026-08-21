@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.hyperlink import Hyperlink
 
 import rns_import_server.group_row_insertion as insertion
 import rns_import_server.workbook_mutation_manifest as mutation_manifest
@@ -65,12 +66,17 @@ class RacingJournal(Journal):
 
 
 def _book(path: Path) -> None:
-    book = Workbook(); sheet = book.active; sheet.title = "Реестр РНС"; sheet.cell(5, 1).value = None; book.save(path); book.close()
+    book = Workbook(); sheet = book.active; sheet.title = "Реестр РНС"; sheet.cell(5, 25).value = "=A5"; book.save(path); book.close()
 
 
 def _context(plan, journal):
     def native(request, _script):
-        book = load_workbook(request.candidate); book[request.sheet].cell(request.insertion_row, 6).value = plan.canonical_rns; book.save(request.candidate); book.close()
+        book = load_workbook(request.candidate); sheet = book[request.sheet]
+        for column, value in request.fields.items(): sheet.cell(request.insertion_row, column).value = value
+        if request.hyperlink is not None:
+            cell = sheet.cell(request.insertion_row, 23)
+            cell._hyperlink = Hyperlink(ref=cell.coordinate, target=request.hyperlink)
+        book.save(request.candidate); book.close()
         return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
     return PublicationContext(
         lambda: nullcontext(), lambda current: current, journal, plan.registry_generation, plan.workbook_identity,
@@ -96,10 +102,37 @@ def test_mocked_blank_lifecycle_is_locked_journaled_and_published(tmp_path: Path
     assert [name for name, _ in journal.calls if name in {"staged", "native", "validated", "backup_verified", "published", "finalized"}] == ["staged", "native", "validated", "backup_verified", "published", "finalized"]
 
 
+def test_blank_fill_manifest_failure_blocks_fsync_backup_and_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, calls = Journal(), []
+    failure = MutationManifestError("blank-fill-value-mismatch", subject="Реестр РНС", field="5")
+    monkeypatch.setattr(insertion, "validate_blank_fill", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+    fsync, replace_file = insertion._fsync, insertion.os.replace
+    monkeypatch.setattr(insertion, "_fsync", lambda path: calls.append(path.name) if path.name in {"candidate.xlsx", "backup.xlsx"} else fsync(path))
+    monkeypatch.setattr(insertion.os, "replace", lambda source, destination: calls.append("replace") or replace_file(source, destination))
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage, captured.value.cause) == (failure.code, "validate", failure)
+    assert calls == ["candidate.xlsx"] and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
+
+
+def test_blank_fill_hyperlink_without_trusted_w_display_blocks_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, calls = Journal(), []
+    replace_file = insertion.os.replace
+    monkeypatch.setattr(insertion.os, "replace", lambda source, destination: calls.append("replace") or replace_file(source, destination))
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, "file:///document", _context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage) == ("blank-fill-hyperlink-display-required", "validate")
+    assert calls == [] and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
+
+
 def test_v2_authority_and_evidence_are_stable_distinct_and_journaled(tmp_path: Path) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
-    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, "file:///one", _context(plan, Journal()))
+    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns, 23: "Документ"}, "file:///one", _context(plan, Journal()))
     baseline = insertion._evidence(context=request.context, request=request, plan=plan, mode="blank_fill")  # type: ignore[arg-type]
     assert baseline == insertion._evidence(context=request.context, request=request, plan=plan, mode="blank_fill")  # type: ignore[arg-type]
     assert baseline[0] != plan.workbook_hash and baseline[1] != plan.workbook_hash and baseline[0] != baseline[1]

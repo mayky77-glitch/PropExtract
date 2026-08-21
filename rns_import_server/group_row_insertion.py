@@ -31,6 +31,7 @@ from rns_import_server.normalization import canonical_rns_identity
 from rns_import_server.workbook_mutation_manifest import (
     MutationManifestError,
     manifest_for,
+    validate_blank_fill,
     validate_control,
     validate_dependent_registry_references,
     validate_inserted_row,
@@ -382,7 +383,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             if mode == "middle_insert" and not insertion_is_structurally_safe(inspect_workbook(request.source, request.sheet), plan.target_row):
                 raise GroupRowInsertionError("group_row_structure_unsafe", stage="preflight")
             native = NativeInsertRequest(operation_id, owner, pair, control, candidate, plan.target_row,
-                directory / "excel-lease.json", directory / "lease-ack.json", request.sheet, request.fields, request.hyperlink)
+                directory / "excel-lease.json", directory / "lease-ack.json", request.sheet, request.fields, request.hyperlink, mode)
             result = context.native_runner(native, native_script) if context.native_runner else run_native_insert(native, script=native_script)
             lease = result.get("lease")
             if not isinstance(lease, dict):
@@ -426,6 +427,14 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                         candidate,
                         sheet_name=request.sheet,
                         insertion_row=plan.target_row,
+                    )
+                else:
+                    validate_blank_fill(
+                        control_manifest,
+                        candidate_manifest,
+                        target_row=plan.target_row,
+                        fields=request.fields,
+                        hyperlink=request.hyperlink,
                     )
             except (
                 MutationManifestError,

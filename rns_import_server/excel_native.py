@@ -50,6 +50,7 @@ class NativeInsertRequest:
     sheet: str
     fields: dict[int, object]
     hyperlink: str | None
+    mutation_mode: str
 
     def payload(self) -> dict[str, Any]:
         value = asdict(self)
@@ -76,6 +77,8 @@ def _lease_from_file(request: NativeInsertRequest, timeout: float) -> dict[str, 
 
 def run_native_insert(request: NativeInsertRequest, *, script: Path, timeout: float = 120.0) -> dict[str, Any]:
     """Run exactly the native helper or fail before either staged file changes."""
+    if not isinstance(request.mutation_mode, str) or request.mutation_mode not in {"middle_insert", "blank_fill"}:
+        raise NativeExcelError("native_mutation_mode_invalid", stage="pre_open")
     if not native_excel_available():
         raise NativeExcelError("excel_required_for_middle_insert", stage="pre_open")
     if request.insertion_row < 1:
