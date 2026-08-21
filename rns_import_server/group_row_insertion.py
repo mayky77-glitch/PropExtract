@@ -11,6 +11,10 @@ from uuid import uuid4
 
 from rns_import_server.audit import sha256
 from rns_import_server.excel_native import NativeExcelError, NativeInsertRequest, native_excel_available, run_native_insert
+from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import (
+    OPCWorksheetX14CfInsertionOracleError,
+    validate_x14_cf_middle_insert,
+)
 from rns_import_server.workbook_groups import MutationPlan
 from rns_import_server.workbook_mutation_manifest import manifest_for, validate_control, validate_insertion
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
@@ -154,7 +158,18 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             original, control_manifest = manifest_for(request.source, request.sheet), manifest_for(control, request.sheet)
             candidate_manifest = manifest_for(candidate, request.sheet, insertion_row=plan.target_row)
             validate_control(original, control_manifest)
-            if mode == "middle_insert": validate_insertion(control_manifest, candidate_manifest, plan.target_row)
+            if mode == "middle_insert":
+                validate_insertion(control_manifest, candidate_manifest, plan.target_row)
+                try:
+                    validate_x14_cf_middle_insert(
+                        control,
+                        candidate,
+                        sheet_name=request.sheet,
+                        insertion_row=plan.target_row,
+                        format_source_row=plan.target_row - 1,
+                    )
+                except OPCWorksheetX14CfInsertionOracleError as error:
+                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
             if sha256(request.source) != plan.workbook_hash: raise GroupRowInsertionError("workbook_pre_hash_mismatch", stage="pre_replace")
             _fsync(candidate)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="validated", hashes={"control_hash": sha256(control), "validation_digest": candidate_manifest.digest}, excel_lease=lease); phase = "validated"
