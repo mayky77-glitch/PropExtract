@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+import hashlib
+import json
+import math
 import os
 from pathlib import Path
 import shutil
 from typing import Callable, Mapping, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from rns_import_server.audit import sha256
 from rns_import_server.excel_native import NativeExcelError, NativeInsertRequest, native_excel_available, run_native_insert
@@ -24,6 +27,7 @@ from rns_import_server.opc_worksheet_structure_insertion_oracle import (
     validate_worksheet_structure_middle_insert,
 )
 from rns_import_server.workbook_groups import MutationPlan
+from rns_import_server.normalization import canonical_rns_identity
 from rns_import_server.workbook_mutation_manifest import (
     MutationManifestError,
     manifest_for,
@@ -33,6 +37,7 @@ from rns_import_server.workbook_mutation_manifest import (
     validate_insertion,
 )
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
+from rns_import_server.registry_storage import RegistryConflictError
 
 
 class GroupRowInsertionError(RuntimeError):
@@ -46,6 +51,7 @@ class GroupRowInsertionError(RuntimeError):
 
 
 class Journal(Protocol):
+    def get(self, operation_id: str) -> object | None: ...
     def create(self, **kwargs: object) -> object: ...
     def transition(self, operation_id: str, *, expected_phase: str, next_phase: str, **kwargs: object) -> object: ...
     def record_post_hash(self, operation_id: str, *, expected_phase: str, post_hash: str) -> object: ...
@@ -62,6 +68,10 @@ class PublicationContext:
     target_identity: str
     template_version: str = "construction-group-template-v1"
     native_runner: Callable[[NativeInsertRequest, Path], dict[str, object]] | None = None
+    operation_id: str | None = None
+    idempotency_key: str | None = None
+    consumer_id: str | None = None
+    operation_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,22 +115,160 @@ def _copy_verified(source: Path, destination: Path) -> str:
     return result
 
 
-def _create(context: PublicationContext, plan: MutationPlan, directory: Path, mode: str) -> tuple[str, str, str]:
-    operation_id, owner, pair = str(uuid4()), str(uuid4()), str(uuid4())
-    context.journal.create(operation_id=operation_id, idempotency_key=operation_id, consumer_id=operation_id, owner_id=owner,
+_INTENT_VERSION = "group-row-intent-v2"
+_MANIFEST_VERSION = "group-row-manifest-v2"
+
+
+def _canonical_json(value: object) -> str:
+    """Encode only finite, genuine JSON values; never coerce unknown objects."""
+    def validate(current: object) -> None:
+        if current is None or isinstance(current, (str, bool)):
+            return
+        if isinstance(current, int) and not isinstance(current, bool):
+            return
+        if isinstance(current, float):
+            if math.isfinite(current):
+                return
+            raise ValueError("nonfinite JSON number")
+        if isinstance(current, list):
+            for item in current:
+                validate(item)
+            return
+        if isinstance(current, dict):
+            for key, item in current.items():
+                if not isinstance(key, str):
+                    raise ValueError("noncanonical JSON object key")
+                validate(item)
+            return
+        raise ValueError("non-JSON value")
+
+    validate(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _authority(context: PublicationContext) -> tuple[str, str, str]:
+    identifiers = (context.operation_id, context.idempotency_key, context.consumer_id)
+    if any(not isinstance(value, str) or not value.strip() for value in identifiers):
+        raise GroupRowInsertionError("publication_authority_required", stage="authorize")
+    operation_id, idempotency_key, consumer_id = identifiers
+    try:
+        if str(UUID(operation_id)) != operation_id:
+            raise ValueError("noncanonical UUID")
+    except ValueError as error:
+        raise GroupRowInsertionError("publication_identity_invalid", stage="authorize", cause=error) from error
+    if context.operation_kind != "new_row":
+        raise GroupRowInsertionError("publication_operation_kind_mismatch", stage="preflight")
+    return operation_id, idempotency_key, consumer_id
+
+
+def _evidence(
+    *,
+    context: PublicationContext,
+    request: GroupRowRequest,
+    plan: MutationPlan,
+    mode: str,
+) -> tuple[str, str]:
+    stable_strings = (
+        context.target_identity, context.template_version, request.sheet,
+        plan.construction_id, plan.canonical_rns, plan.workbook_identity, plan.workbook_hash,
+    )
+    if (
+        not isinstance(request.fields, dict)
+        or not isinstance(request.hyperlink, (str, type(None)))
+        or any(not isinstance(value, str) or not value.strip() for value in stable_strings)
+        or type(plan.registry_generation) is not int
+        or type(context.generation) is not int
+        or type(plan.target_row) is not int
+        or plan.target_row < 2
+        or canonical_rns_identity(plan.canonical_rns) != plan.canonical_rns
+    ):
+        raise GroupRowInsertionError("publication_intent_value_invalid", stage="authorize")
+    try:
+        fields: list[list[object]] = []
+        for column, value in sorted(request.fields.items()):
+            if type(column) is not int or not 1 <= column <= 16_384:
+                raise ValueError("noncanonical field key")
+            _canonical_json(value)
+            fields.append([column, value])
+        intent_digest = _digest({
+            "operation_kind": context.operation_kind,
+            "consumer_id": context.consumer_id,
+            "construction_id": plan.construction_id,
+            "canonical_rns": plan.canonical_rns,
+            "fields": fields,
+            "hyperlink": request.hyperlink,
+        })
+        manifest_digest = _digest({
+            "mutation_mode": mode,
+            "target_identity": context.target_identity,
+            "sheet_identity": request.sheet,
+            "template_identity": context.template_version,
+            "workbook_identity": plan.workbook_identity,
+            "workbook_pre_hash": plan.workbook_hash,
+            "registry_generation": plan.registry_generation,
+            "target_row": plan.target_row,
+            "format_source_row": plan.target_row - 1,
+        })
+    except (TypeError, ValueError) as error:
+        raise GroupRowInsertionError("publication_intent_value_invalid", stage="authorize", cause=error) from error
+    return intent_digest, manifest_digest
+
+
+def _operation_values(operation: object) -> Mapping[str, object]:
+    values = operation if isinstance(operation, Mapping) else getattr(operation, "values", None)
+    if not isinstance(values, Mapping):
+        raise GroupRowInsertionError("legacy_publication_authority_invalid", stage="recovery")
+    return values
+
+
+def _existing_operation(
+    operation: object,
+    *,
+    expected: Mapping[str, object],
+) -> None:
+    values = _operation_values(operation)
+    if values.get("intent_version") != _INTENT_VERSION or values.get("manifest_version") != _MANIFEST_VERSION:
+        raise GroupRowInsertionError("legacy_publication_authority_invalid", stage="recovery")
+    required = ("owner_id", "pair_nonce", "operation_id", "idempotency_key", "consumer_id")
+    if any(not isinstance(values.get(key), str) or not values.get(key) for key in required):
+        raise GroupRowInsertionError("legacy_publication_authority_invalid", stage="recovery")
+    if any(values.get(key) != value for key, value in expected.items()):
+        raise GroupRowInsertionError("publication_intent_conflict", stage="recovery")
+
+
+def _create(
+    context: PublicationContext,
+    plan: MutationPlan,
+    directory: Path,
+    mode: str,
+    *,
+    operation_id: str,
+    idempotency_key: str,
+    consumer_id: str,
+    sheet_identity: str,
+    intent_digest: str,
+    manifest_digest: str,
+) -> tuple[str, str]:
+    owner, pair = str(uuid4()), str(uuid4())
+    context.journal.create(operation_id=operation_id, idempotency_key=idempotency_key, consumer_id=consumer_id, owner_id=owner,
         pair_nonce=pair, construction_id=plan.construction_id, operation_kind="new_row", mutation_mode=mode,
-        target_identity=context.target_identity, sheet_identity="workbook-group-resolution-v1", template_version=context.template_version,
-        expected_generation=context.generation, intent_version="workbook-group-resolution-v1", intent_digest=plan.workbook_hash,
-        manifest_version="native-group-row-insertion-v1", manifest_digest=plan.workbook_hash,
+        target_identity=context.target_identity, sheet_identity=sheet_identity, template_version=context.template_version,
+        expected_generation=context.generation, intent_version=_INTENT_VERSION, intent_digest=intent_digest,
+        manifest_version=_MANIFEST_VERSION, manifest_digest=manifest_digest,
         operation_directory=str(directory), canonical_rns=plan.canonical_rns)
-    return operation_id, owner, pair
+    return owner, pair
 
 
 def _recheck(context: PublicationContext, plan: MutationPlan, source: Path) -> MutationPlan:
     current = context.resolve(plan)
     if (current.workbook_identity != plan.workbook_identity or current.workbook_hash != sha256(source)
             or current.registry_generation != context.generation or current.construction_id != plan.construction_id
-            or current.canonical_rns != plan.canonical_rns or current.target_row != plan.target_row):
+            or current.canonical_rns != plan.canonical_rns or current.target_row != plan.target_row
+            or current.mode != plan.mode):
         raise GroupRowInsertionError("group_row_revalidation_failed", stage="revalidate")
     return current
 
@@ -141,19 +289,71 @@ def _finalize(context: PublicationContext, operation_id: str) -> None:
 def publish_group_row(request: GroupRowRequest, *, native_script: Path, operation_directory: Path) -> dict[str, object]:
     """Publish through lock, resolver, journal, paired native Excel and oracle."""
     if request.context is None:
-        raise GroupRowInsertionError("publication_context_required", stage="authorize")
+        raise GroupRowInsertionError("publication_authority_required", stage="authorize")
     context, plan = request.context, request.plan
-    if plan.registry_generation != context.generation:
-        raise GroupRowInsertionError("registry_generation_stale", stage="authorize")
-    directory = operation_directory / str(uuid4()); directory.mkdir(parents=True, exist_ok=False)
-    phase, operation_id = "planned", ""
+    operation_id, idempotency_key, consumer_id = _authority(context)
+    if plan.mode not in {"existing_blank", "insert_before_header"}:
+        raise GroupRowInsertionError("group_row_plan_invalid", stage="preflight")
+    mode = "blank_fill" if plan.mode == "existing_blank" else "middle_insert"
+    intent_digest, manifest_digest = _evidence(context=context, request=request, plan=plan, mode=mode)
+    directory = operation_directory / operation_id
+    expected = {
+        "operation_id": operation_id,
+        "idempotency_key": idempotency_key,
+        "consumer_id": consumer_id,
+        "construction_id": plan.construction_id,
+        "canonical_rns": plan.canonical_rns,
+        "operation_kind": "new_row",
+        "mutation_mode": mode,
+        "target_identity": context.target_identity,
+        "sheet_identity": request.sheet,
+        "template_version": context.template_version,
+        "expected_generation": context.generation,
+        "intent_version": _INTENT_VERSION,
+        "intent_digest": intent_digest,
+        "manifest_version": _MANIFEST_VERSION,
+        "manifest_digest": manifest_digest,
+        "operation_directory": str(directory),
+    }
+    phase, created_operation = "planned", False
     try:
         with context.lock():
+            existing = context.journal.get(operation_id)
+            if existing is not None:
+                _existing_operation(existing, expected=expected)
+                return {
+                    "published": False,
+                    "operation_id": operation_id,
+                    "recovery": recover_group_row(context=context, operation=existing, source=request.source),
+                }
+            if plan.registry_generation != context.generation:
+                raise GroupRowInsertionError("registry_generation_stale", stage="authorize")
             plan = _recheck(context, plan, request.source)
-            mode = "blank_fill" if plan.mode == "existing_blank" else "middle_insert"
-            if plan.mode not in {"existing_blank", "insert_before_header"}:
-                raise GroupRowInsertionError("group_row_plan_invalid", stage="preflight")
-            operation_id, owner, pair = _create(context, plan, directory, mode)
+            try:
+                owner, pair = _create(
+                    context, plan, directory, mode,
+                    operation_id=operation_id,
+                    idempotency_key=idempotency_key,
+                    consumer_id=consumer_id,
+                    sheet_identity=request.sheet,
+                    intent_digest=intent_digest,
+                    manifest_digest=manifest_digest,
+                )
+            except RegistryConflictError as error:
+                raise GroupRowInsertionError("publication_intent_conflict", stage="recovery", cause=error) from error
+            stored = context.journal.get(operation_id)
+            if stored is None:
+                raise GroupRowInsertionError("publication_intent_conflict", stage="recovery")
+            stored_values = _operation_values(stored)
+            if stored_values.get("owner_id") != owner or stored_values.get("pair_nonce") != pair:
+                _existing_operation(stored, expected=expected)
+                return {
+                    "published": False,
+                    "operation_id": operation_id,
+                    "recovery": recover_group_row(context=context, operation=stored, source=request.source),
+                }
+            created_operation = True
+            directory.mkdir(parents=True, exist_ok=False)
             control, candidate = directory / "control.xlsx", directory / "candidate.xlsx"
             staged_hash = _copy_verified(request.source, control); _copy_verified(request.source, candidate)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="staged", hashes={"pre_hash": plan.workbook_hash, "staged_hash": staged_hash})
@@ -230,11 +430,11 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             _finalize(context, operation_id)
             return {"mode": mode, "row": plan.target_row, "published": True, "operation_id": operation_id, "manifest": candidate_manifest.digest}
     except GroupRowInsertionError as error:
-        if operation_id: _manual_repair(context, operation_id, phase, error.code)
+        if created_operation: _manual_repair(context, operation_id, phase, error.code)
         raise
     except NativeExcelError as error:
-        if operation_id: _manual_repair(context, operation_id, phase, error.code)
+        if created_operation: _manual_repair(context, operation_id, phase, error.code)
         raise GroupRowInsertionError(error.code, stage=error.stage, cause=error) from error
     except Exception as error:
-        if operation_id: _manual_repair(context, operation_id, phase, "group_row_failed")
+        if created_operation: _manual_repair(context, operation_id, phase, "group_row_failed")
         raise GroupRowInsertionError("group_row_failed", stage=phase, cause=error) from error
