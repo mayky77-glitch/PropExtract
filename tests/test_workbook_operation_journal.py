@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage
 from rns_import_server.excel_process_authority import ExcelProcessLease
 from rns_import_server.workbook_operation_journal import (
+    JournalStorageError,
     JournalTransitionError,
     PHASE_BACKUP_VERIFIED,
     PHASE_FINALIZED,
@@ -35,6 +38,24 @@ def _lease(operation_id: str, *, owner: str = "owner-1", pair: str = "nonce-1") 
         adapter_pid=10, adapter_started_at="2026-08-21T00:00:00Z", excel_image="EXCEL.EXE", excel_pid=11,
         excel_hwnd=12, excel_process_started_at="2026-08-21T00:00:01Z", excel_build="16.0.1",
     )
+
+
+def _finalized_operation(journal: WorkbookOperationJournal, storage: RegistryStorage) -> str:
+    operation_id = _operation(journal, storage)
+    journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED,
+                       hashes={"pre_hash": "pre", "staged_hash": "staged"})
+    journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE,
+                       excel_lease=_lease(operation_id))
+    journal.transition(operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED,
+                       hashes={"validation_digest": "validation", "control_hash": "control"})
+    journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED,
+                       hashes={"backup_hash": "backup"})
+    journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="post")
+    journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
+    for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
+        journal.finalize_flag(operation_id, flag)
+    journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
+    return operation_id
 
 
 def test_atomic_reservation_creates_nonce_pair_once_and_reuses_authority(tmp_path: Path) -> None:
@@ -213,6 +234,90 @@ def test_finalization_flag_replay_after_finalized_restart_preserves_first_timest
     finally:
         if storage.connection:
             pass
+
+
+def test_repair_anomaly_moves_finalized_to_manual_repair_without_losing_finalization_evidence(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _finalized_operation(journal, storage)
+        before = journal.get(operation_id)
+        assert before is not None
+        preserved = {
+            key: value for key, value in before.values.items()
+            if key not in {"phase", "failure_code", "updated_at"}
+        }
+        repaired = journal.record_repair_anomaly(operation_id, failure_code="target_hash_mismatch")
+        assert repaired.phase == "manual_repair"
+        assert repaired["failure_code"] == "target_hash_mismatch"
+        assert {key: repaired[key] for key in preserved} == preserved
+        changes_after_first_record = storage.connection.total_changes
+        replayed = journal.record_repair_anomaly(operation_id, failure_code="target_hash_mismatch")
+        assert dict(replayed.values) == dict(repaired.values)
+        assert storage.connection.total_changes == changes_after_first_record
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("failure_code", [None, True, "", "TargetHashMismatch", "a" * 65])
+def test_repair_anomaly_requires_bounded_lower_snake_failure_code(tmp_path: Path, failure_code: object) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        operation_id = _finalized_operation(WorkbookOperationJournal(storage), storage)
+        with pytest.raises(RegistryError):
+            WorkbookOperationJournal(storage).record_repair_anomaly(operation_id, failure_code=failure_code)  # type: ignore[arg-type]
+        assert WorkbookOperationJournal(storage).get(operation_id).phase == PHASE_FINALIZED  # type: ignore[union-attr]
+    finally:
+        storage.close()
+
+
+def test_repair_anomaly_is_typed_for_missing_unsupported_and_sqlite_failures(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        with pytest.raises(JournalTransitionError):
+            journal.record_repair_anomaly("missing-operation", failure_code="target_hash_mismatch")
+        operation_id = _operation(journal, storage)
+        with pytest.raises(JournalTransitionError):
+            journal.record_repair_anomaly(operation_id, failure_code="target_hash_mismatch")
+    finally:
+        storage.close()
+    with pytest.raises(JournalStorageError):
+        journal.record_repair_anomaly(operation_id, failure_code="target_hash_mismatch")
+
+
+def test_repair_anomaly_serializes_two_real_sqlite_connections_and_preserves_first_code(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    operation_id = _finalized_operation(WorkbookOperationJournal(storage), storage)
+    database_path = storage.path
+    storage.close()
+    barrier = Barrier(2)
+
+    def record_from_independent_connection() -> str:
+        connection = RegistryStorage(database_path)
+        try:
+            barrier.wait()
+            return WorkbookOperationJournal(connection).record_repair_anomaly(
+                operation_id, failure_code="target_hash_mismatch"
+            )["failure_code"]
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result() for future in (
+            executor.submit(record_from_independent_connection), executor.submit(record_from_independent_connection),
+        )]
+    verifier = RegistryStorage(database_path)
+    try:
+        journal = WorkbookOperationJournal(verifier)
+        assert results == ["target_hash_mismatch", "target_hash_mismatch"]
+        durable = journal.get(operation_id)
+        assert durable is not None and (durable.phase, durable["failure_code"]) == ("manual_repair", "target_hash_mismatch")
+        with pytest.raises(JournalTransitionError):
+            journal.record_repair_anomaly(operation_id, failure_code="authority_hash_mismatch")
+        assert journal.get(operation_id)["failure_code"] == "target_hash_mismatch"  # type: ignore[index]
+    finally:
+        verifier.close()
 
 
 def test_journal_contract_has_no_pdf_text_cell_content_or_source_path_fields(tmp_path: Path) -> None:
