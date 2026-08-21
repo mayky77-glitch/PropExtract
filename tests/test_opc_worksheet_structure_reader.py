@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 import pytest
 from rns_import_server.opc_workbook_topology import OPCWorkbookTopologyError
-from rns_import_server.opc_worksheet_cell_reader import OPCWorksheetCellReaderError
+from rns_import_server.opc_worksheet_cell_reader import OPCWorksheetCellReaderError, read_worksheet_cell_semantics
 from rns_import_server.opc_worksheet_structure_reader import OPCWorksheetStructureReaderError, read_worksheet_structure_semantics
 from tests.opc_worksheet_structure_fixture_factory import package, worksheet
 
@@ -133,7 +133,7 @@ def test_preserves_cell_reader_row_lexicals_and_two_sheet_runtime_projection(tmp
     assert [item.worksheet.name for item in result.worksheets] == ["Первый", "Второй"]
 
 
-def test_rejects_namespace_collisions_and_non_row_major_merges(tmp_path):
+def test_rejects_namespace_collisions_and_accepts_source_ordered_merges(tmp_path):
     foreign_dimension = (
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:x="urn:foreign"><x:dimension ref="A6"/><sheetData>'
@@ -147,9 +147,10 @@ def test_rejects_namespace_collisions_and_non_row_major_merges(tmp_path):
         '<dimension ref="A6"/><sheetData><row r="6"><c r="A6"><v>1</v></c></row></sheetData>'
         '<mergeCells count="2"><mergeCell ref="B10:C10"/><mergeCell ref="A6:B6"/></mergeCells></worksheet>'
     ).encode()
-    assert error(package(tmp_path / "merge-order.xlsx", sheet_one=empty_dimension)) == (
-        "out-of-order-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6"
-    )
+    merges = read_worksheet_structure_semantics(
+        package(tmp_path / "merge-order.xlsx", sheet_one=empty_dimension)
+    ).worksheets[0].merges
+    assert [(item.start, item.end) for item in merges] == [("B10", "C10"), ("A6", "B6")]
 
 
 def test_forwards_cell_boundary_xml_failures_without_retyping(tmp_path):
@@ -396,13 +397,27 @@ def test_merge_matrix_count_order_and_normalized_duplicate_are_exact(tmp_path):
         ('<mergeCells count=""><mergeCell ref="A6"/></mergeCells>', ("invalid-merge-count", "xl/worksheets/first.xml", "count", "")),
         ('<mergeCells count="4294967296"/>', ("invalid-merge-count", "xl/worksheets/first.xml", "count", "4294967296")),
         ('<mergeCells count="1"><mergeCell ref="A6:B6"/><mergeCell ref="B10:C10"/></mergeCells>', ("merge-count-mismatch", "xl/worksheets/first.xml", "count", "1")),
-        ('<mergeCells count="2"><mergeCell ref="B10:C10"/><mergeCell ref="A6:B6"/></mergeCells>', ("out-of-order-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6")),
         ('<mergeCells count="2"><mergeCell ref="$a$6:$b$6"/><mergeCell ref="A6:B6"/></mergeCells>', ("duplicate-merge-range", "xl/worksheets/first.xml", "ref", "A6:B6")),
         ('<mergeCells count="1"><mergeCell/></mergeCells>', ("invalid-a1-range", "xl/worksheets/first.xml", "ref", "")),
         ('<mergeCells count="1"><bogus/></mergeCells>', ("invalid-merge-cells-child", "xl/worksheets/first.xml", "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}bogus")),
     ]
     for index, (merges, expected) in enumerate(cases):
         assert error(package(tmp_path / f"merge-{index}.xlsx", sheet_one=worksheet(merges=merges))) == expected
+
+
+def test_real_source_all_sheets_keep_native_structure_projection():
+    from hashlib import sha256
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    assert sha256(source.read_bytes()).hexdigest() == "2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1"
+    cells = read_worksheet_cell_semantics(source)
+    result = read_worksheet_structure_semantics(source)
+    assert len(cells.worksheets) == len(result.worksheets) == 4
+    target = result.worksheets[1]
+    assert (target.dimension.start, target.dimension.end) == ("A1", "AQ1001")
+    assert target.auto_filter and (target.auto_filter.reference.start, target.auto_filter.reference.end) == ("A3", "AQ605")
+    assert len(target.merges) == 12
 
 
 def test_second_sheet_values_are_independent_and_ordered(tmp_path):
