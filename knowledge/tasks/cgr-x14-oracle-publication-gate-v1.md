@@ -28,3 +28,10 @@ Map `OPCWorksheetX14CfInsertionOracleError` to `GroupRowInsertionError` with the
 ## Acceptance
 
 Keep two focused scenarios: exact invocation on successful middle insert; injected oracle failure proves same code/stage/cause, no output, unchanged source and no backup/published transition. Existing blank-fill and no-Excel tests must remain green. Run focused group-row/oracle tests, full pytest once, compile/diff, exact scope/identity/clean. Native Excel execution remains a later Windows/CrossOver Gate.
+
+## Implementation evidence
+
+- `middle_insert` runs X14 oracle after `validate_insertion` and before candidate `fsync`, backup, post-hash, or replace.
+- Oracle error retains stable code and original cause in `GroupRowInsertionError` at `validate`; manual repair has no output, backup, or `published` transition.
+- Focused: `PYTHONPATH=. pytest -q tests/test_group_row_insertion.py tests/test_opc_worksheet_x14_cf_insertion_oracle.py` — 18 passed.
+- Full: 1489 passed; 10 loopback HTTP tests blocked only by sandbox `PermissionError: [Errno 1] Operation not permitted`; one existing OpenPyXL extension warning.
