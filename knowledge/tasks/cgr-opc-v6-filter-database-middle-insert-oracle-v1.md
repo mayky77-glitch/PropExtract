@@ -41,3 +41,10 @@ Keep tests bounded to six behaviors:
 6. publication failure preserves source hash, produces no output/backup, and journals `manual_repair` after X14 validation.
 
 Run direct oracle tests, focused defined-name/publication tests, one full pytest run, compile touched modules, `git diff --check`, exact scope/ancestry/identity/clean. Qualify the real source read-only: target `Реестр РНС`, control `_FilterDatabase` `A3:AQ605`, insertion rows 6/10/104, unchanged SHA `2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`. Native Excel insertion and UI E2E remain later Gates.
+
+## Implementation evidence
+
+- Added a read-only `validate_filter_database_middle_insert()` oracle using only the accepted defined-name reader. Its frozen evidence record compares one target owner, semantic A1 geometry, worksheet identity, and the ordered immutable defined-name projection.
+- `middle_insert` calls the FilterDatabase oracle after generic manifest and X14 validation, before candidate fsync, backup, post-hash, and replace. Its typed cause becomes `GroupRowInsertionError` at `validate`; journal recovery records `manual_repair` with no published output or backup.
+- Focused validation: `PYTHONPATH=. python3 -m pytest -q tests/test_opc_workbook_filter_database_insertion_oracle.py tests/test_group_row_insertion.py tests/test_opc_workbook_defined_name_reader.py tests/test_opc_worksheet_x14_cf_insertion_oracle.py` — 181 passed.
+- Full validation: `PYTHONPATH=. python3 -m pytest -q` — 1504 passed; 10 pre-existing loopback HTTP tests could not bind in the managed sandbox (`PermissionError: [Errno 1] Operation not permitted`); one existing OpenPyXL extension warning.
