@@ -1,7 +1,7 @@
 ---
 card_id: cgr-publication-repair-anomaly-journal-k3a0-v1
 status: frozen
-version: 1
+version: 2
 supersedes: null
 work_id: cgr-publication-repair-anomaly-journal-k3a0-v1
 task_id: publication-repair-anomaly-journal
