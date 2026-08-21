@@ -112,14 +112,16 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
         RegistryStorage(path)
 
 
+@pytest.mark.parametrize("mode", ["middle_insert", "blank_fill"])
 @pytest.mark.parametrize("phase,expected_phase", [
     ("staged", "manual_repair"), ("native", "manual_repair"), ("validated", "manual_repair"),
     ("backup_verified", "manual_repair"), ("published", "published"), ("finalized", "finalized"),
 ])
-def test_v2_lease_migration_quarantines_only_nonterminal_native_history(tmp_path: Path, phase: str, expected_phase: str) -> None:
+def test_v2_lease_migration_quarantines_only_nonterminal_native_history(tmp_path: Path, mode: str, phase: str, expected_phase: str) -> None:
     runtime = RegistryStorage.bootstrap(tmp_path)
     path = runtime.path
     operation_id = _journal_operation(runtime, phase)
+    runtime.connection.execute("UPDATE workbook_operation_journal SET mutation_mode=? WHERE operation_id=?", (mode, operation_id))
     runtime.connection.execute("UPDATE workbook_operation_journal SET phase=? WHERE operation_id=?", (phase, operation_id))
     if phase == "finalized":
         runtime.connection.execute(

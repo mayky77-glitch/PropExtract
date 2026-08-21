@@ -527,7 +527,7 @@ class RegistryStorage:
                 connection.execute(
                     """UPDATE workbook_operation_journal
                        SET phase='manual_repair', failure_code=?, updated_at=?
-                     WHERE mutation_mode='middle_insert'
+                     WHERE mutation_mode IN ('middle_insert', 'blank_fill')
                        AND phase IN ('staged', 'native', 'validated', 'backup_verified')
                        AND (excel_adapter IS NULL OR excel_adapter='' OR excel_pid IS NULL
                             OR excel_hwnd IS NULL OR excel_process_started_at IS NULL

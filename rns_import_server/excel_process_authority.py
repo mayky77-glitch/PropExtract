@@ -20,16 +20,17 @@ class ExcelProcessAuthorityError(RuntimeError):
 
 
 def strict_utc(value: object) -> str:
-    """Accept only canonical whole-second UTC timestamps, never local time."""
-    if not isinstance(value, str) or not value.endswith("Z"):
+    """Normalize whole-second UTC only; local/nonzero-offset time is forbidden."""
+    if not isinstance(value, str):
         raise ExcelProcessAuthorityError("excel_lease_timestamp_invalid")
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except ValueError as error:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+    except (TypeError, ValueError, OverflowError) as error:
         raise ExcelProcessAuthorityError("excel_lease_timestamp_invalid") from error
-    if parsed.isoformat().replace("+00:00", "Z") != value:
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed) or parsed.microsecond:
         raise ExcelProcessAuthorityError("excel_lease_timestamp_invalid")
-    return value
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -71,8 +72,8 @@ class ExcelProcessLease:
         for value in (self.adapter_pid, self.excel_pid, self.excel_hwnd):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ExcelProcessAuthorityError("excel_lease_identity_invalid")
-        strict_utc(self.adapter_started_at)
-        strict_utc(self.excel_process_started_at)
+        object.__setattr__(self, "adapter_started_at", strict_utc(self.adapter_started_at))
+        object.__setattr__(self, "excel_process_started_at", strict_utc(self.excel_process_started_at))
 
     def journal_fields(self) -> dict[str, object]:
         """The seven durable fields; operation/owner/pair remain row identity."""
@@ -113,27 +114,29 @@ def verify_excel_process_lease(
         adapter = inspector.process_identity(lease.adapter_pid)
         excel = inspector.process_identity(lease.excel_pid)
         hwnd_pid = inspector.hwnd_process_id(lease.excel_hwnd)
-        if not isinstance(adapter, ProcessIdentity) or not isinstance(excel, ProcessIdentity) or not isinstance(hwnd_pid, int):
+        if (not isinstance(adapter, ProcessIdentity) or not isinstance(excel, ProcessIdentity)
+                or not isinstance(hwnd_pid, int) or isinstance(hwnd_pid, bool) or hwnd_pid <= 0):
             raise TypeError("probe")
+        for identity in (adapter, excel):
+            if (not isinstance(identity.pid, int) or isinstance(identity.pid, bool) or identity.pid <= 0
+                    or not isinstance(identity.image, str) or not isinstance(identity.started_at, str)):
+                raise TypeError("identity")
+        adapter_started = strict_utc(adapter.started_at)
+        excel_started = strict_utc(excel.started_at)
     except ExcelProcessAuthorityError:
         raise
     except Exception as error:
         raise ExcelProcessAuthorityError("excel_lease_probe_unavailable") from error
-    try:
-        strict_utc(adapter.started_at)
-        strict_utc(excel.started_at)
-    except ExcelProcessAuthorityError as error:
-        raise ExcelProcessAuthorityError("excel_lease_probe_invalid") from error
-    if (adapter.pid, adapter.image, adapter.started_at) != (lease.adapter_pid, lease.adapter_image, lease.adapter_started_at):
+    if (adapter.pid, adapter.image, adapter_started) != (lease.adapter_pid, lease.adapter_image, lease.adapter_started_at):
         raise ExcelProcessAuthorityError("excel_lease_adapter_identity_mismatch")
-    if (excel.pid, excel.image, excel.started_at) != (lease.excel_pid, "EXCEL.EXE", lease.excel_process_started_at):
+    if (excel.pid, excel.image, excel_started) != (lease.excel_pid, "EXCEL.EXE", lease.excel_process_started_at):
         raise ExcelProcessAuthorityError("excel_lease_excel_identity_mismatch")
     if hwnd_pid != lease.excel_pid:
         raise ExcelProcessAuthorityError("excel_lease_hwnd_pid_mismatch")
     if lease.excel_pid in before:
         raise ExcelProcessAuthorityError("excel_lease_excel_preexisting")
-    adapter_start = datetime.strptime(lease.adapter_started_at, "%Y-%m-%dT%H:%M:%SZ")
-    excel_start = datetime.strptime(lease.excel_process_started_at, "%Y-%m-%dT%H:%M:%SZ")
+    adapter_start = datetime.fromisoformat(lease.adapter_started_at.replace("Z", "+00:00"))
+    excel_start = datetime.fromisoformat(lease.excel_process_started_at.replace("Z", "+00:00"))
     if excel_start < adapter_start:
         raise ExcelProcessAuthorityError("excel_lease_excel_started_before_adapter")
     return lease

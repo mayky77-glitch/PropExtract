@@ -68,9 +68,12 @@ that Microsoft Excel publication was executed or accepted.
   chronology are required before durability.
 - `staged -> native` now accepts only that full record and atomically projects
   all seven durable process fields after operation/owner/pair matching.
+- P6 remediation: both `middle_insert` and `blank_fill` require the full
+  sealed lease; the CAS includes owner/pair. UTC accepts zero-offset input
+  only after normalizing it to `Z`; malformed process observations stay typed.
 - Schema v3 and deterministic seed are current. v2 native in-flight records
   without adapter PID/start are durable `manual_repair` with
   `legacy_excel_lease_ownership_missing`; published/finalized history remains.
-- Focused: `38 passed`; deterministic build/check and seed validator passed.
-  Full suite: `1585 passed`, 10 known sandbox loopback-bind denials; no product
+- Focused: `46 passed`; deterministic build/check and seed validator passed.
+  Full suite: `1593 passed`, 10 known sandbox loopback-bind denials; no product
   test failure. No Excel process was launched or claimed.

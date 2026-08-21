@@ -270,3 +270,18 @@ def test_native_transition_requires_exact_full_lease_and_authority_pair(tmp_path
         assert journal.get(operation_id).phase == PHASE_STAGED  # type: ignore[union-attr]
     finally:
         storage.close()
+
+
+@pytest.mark.parametrize("mode", ["middle_insert", "blank_fill"])
+def test_each_native_mutation_mode_requires_complete_lease(tmp_path: Path, mode: str) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        storage.connection.execute("UPDATE workbook_operation_journal SET mutation_mode=? WHERE operation_id=?", (mode, operation_id))
+        journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "staged"})
+        with pytest.raises(RegistryError):
+            journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE)
+        assert journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease=_lease(operation_id)).phase == PHASE_NATIVE
+    finally:
+        storage.close()

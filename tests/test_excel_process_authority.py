@@ -55,9 +55,10 @@ def test_verifier_returns_exact_immutable_full_lease() -> None:
     }
 
 
-def test_lease_constructor_rejects_non_utc_timestamp() -> None:
+def test_lease_constructor_normalizes_zero_offset_and_rejects_non_utc_timestamp() -> None:
+    assert _lease(adapter_started_at="2026-08-21T00:00:00+00:00").adapter_started_at == "2026-08-21T00:00:00Z"
     with pytest.raises(ExcelProcessAuthorityError) as error:
-        _lease(adapter_started_at="2026-08-21T00:00:00+00:00")
+        _lease(adapter_started_at="2026-08-21T00:00:00+01:00")
     assert error.value.code == "excel_lease_timestamp_invalid"
 
 
