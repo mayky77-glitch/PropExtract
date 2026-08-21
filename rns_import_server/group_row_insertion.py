@@ -13,7 +13,7 @@ from typing import Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from rns_import_server.audit import sha256
-from rns_import_server.excel_native import NativeExcelError, NativeInsertRequest, native_excel_available, run_native_insert
+from rns_import_server.excel_native import NativeExcelError, NativeInsertRequest, run_native_insert
 from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import (
     OPCWorksheetX14CfInsertionOracleError,
     validate_x14_cf_middle_insert,
@@ -69,7 +69,6 @@ class PublicationContext:
     generation: int
     target_identity: str
     template_version: str = "construction-group-template-v1"
-    native_runner: Callable[[NativeInsertRequest, Path], dict[str, object]] | None = None
     operation_id: str | None = None
     idempotency_key: str | None = None
     consumer_id: str | None = None
@@ -377,14 +376,11 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             staged_hash = _copy_verified(request.source, control); _copy_verified(request.source, candidate)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="staged", hashes={"pre_hash": plan.workbook_hash, "staged_hash": staged_hash})
             phase = "staged"
-            if context.native_runner is None and not native_excel_available():
-                code = "excel_required_for_middle_insert" if mode == "middle_insert" else "excel_required_for_group_publication"
-                raise GroupRowInsertionError(code, stage="pre_open")
             if mode == "middle_insert" and not insertion_is_structurally_safe(inspect_workbook(request.source, request.sheet), plan.target_row):
                 raise GroupRowInsertionError("group_row_structure_unsafe", stage="preflight")
             native = NativeInsertRequest(operation_id, owner, pair, control, candidate, plan.target_row,
                 directory / "excel-lease.json", directory / "lease-ack.json", request.sheet, request.fields, request.hyperlink, mode)
-            result = context.native_runner(native, native_script) if context.native_runner else run_native_insert(native, script=native_script)
+            result = run_native_insert(native, script=native_script)
             lease = result.get("lease")
             if not isinstance(lease, dict):
                 raise GroupRowInsertionError("excel_lease_missing", stage="lease")

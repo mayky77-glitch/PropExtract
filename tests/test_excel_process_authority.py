@@ -62,6 +62,52 @@ def test_lease_constructor_normalizes_zero_offset_and_rejects_non_utc_timestamp(
     assert error.value.code == "excel_lease_timestamp_invalid"
 
 
+class ReentrantString(str):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("attacker-controlled comparison")
+
+
+@pytest.mark.parametrize("field,code", [
+    ("operation_id", "excel_lease_identity_invalid"),
+    ("owner_id", "excel_lease_identity_invalid"),
+    ("pair_nonce", "excel_lease_identity_invalid"),
+    ("adapter_type", "excel_lease_adapter_invalid"),
+    ("adapter_image", "excel_lease_identity_invalid"),
+    ("adapter_started_at", "excel_lease_timestamp_invalid"),
+    ("excel_image", "excel_lease_excel_image_invalid"),
+    ("excel_process_started_at", "excel_lease_timestamp_invalid"),
+    ("excel_build", "excel_lease_identity_invalid"),
+])
+def test_lease_rejects_string_subclasses_before_comparison_or_timestamp_parsing(field: str, code: str) -> None:
+    with pytest.raises(ExcelProcessAuthorityError) as error:
+        _lease(**{field: ReentrantString("value")})
+    assert error.value.code == code
+
+
+@pytest.mark.parametrize("field", ["image", "started_at"])
+def test_verifier_rejects_process_identity_string_subclasses_without_comparison(field: str) -> None:
+    adapter = ProcessIdentity(11, "powershell.exe", "2026-08-21T00:00:00Z")
+    excel = ProcessIdentity(22, "EXCEL.EXE", "2026-08-21T00:00:01Z")
+    identity = adapter if field == "image" else excel
+    identity = ProcessIdentity(identity.pid, ReentrantString(identity.image) if field == "image" else identity.image,
+                               ReentrantString(identity.started_at) if field == "started_at" else identity.started_at)
+    if field == "image":
+        adapter = identity
+    else:
+        excel = identity
+    with pytest.raises(ExcelProcessAuthorityError) as error:
+        verify_excel_process_lease(_lease(), launched_adapter_pid=11, inspector=Inspector(adapter=adapter, excel=excel))
+    assert error.value.code == "excel_lease_probe_unavailable"
+
+
+def test_verifier_revalidates_lease_scalars_before_identity_comparison() -> None:
+    lease = _lease()
+    object.__setattr__(lease, "adapter_image", ReentrantString("powershell.exe"))
+    with pytest.raises(ExcelProcessAuthorityError) as error:
+        verify_excel_process_lease(lease, launched_adapter_pid=11, inspector=Inspector())
+    assert error.value.code == "excel_lease_identity_invalid"
+
+
 @pytest.mark.parametrize("value", [
     "2026-08-21 00:00:00+00:00", "20260821T000000Z", "2026-08-21T00:00+00:00",
     "2026-08-21T00:00:00+0000", "2026-08-21T00:00:00+00", "2026-08-21T00:00:00-00:00",

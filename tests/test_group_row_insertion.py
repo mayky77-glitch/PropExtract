@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -69,23 +69,38 @@ def _book(path: Path) -> None:
     book = Workbook(); sheet = book.active; sheet.title = "Реестр РНС"; sheet.cell(5, 25).value = "=A5"; book.save(path); book.close()
 
 
+def _trusted_native_insert(request, *, script):
+    book = load_workbook(request.candidate); sheet = book[request.sheet]
+    for column, value in request.fields.items(): sheet.cell(request.insertion_row, column).value = value
+    if request.hyperlink is not None:
+        cell = sheet.cell(request.insertion_row, 23)
+        cell._hyperlink = Hyperlink(ref=cell.coordinate, target=request.hyperlink)
+    book.save(request.candidate); book.close()
+    return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
+
+
+@pytest.fixture(autouse=True)
+def trusted_native_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(insertion, "run_native_insert", _trusted_native_insert)
+
+
 def _context(plan, journal):
-    def native(request, _script):
-        book = load_workbook(request.candidate); sheet = book[request.sheet]
-        for column, value in request.fields.items(): sheet.cell(request.insertion_row, column).value = value
-        if request.hyperlink is not None:
-            cell = sheet.cell(request.insertion_row, 23)
-            cell._hyperlink = Hyperlink(ref=cell.coordinate, target=request.hyperlink)
-        book.save(request.candidate); book.close()
-        return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
     return PublicationContext(
         lambda: nullcontext(), lambda current: current, journal, plan.registry_generation, plan.workbook_identity,
-        native_runner=native,
         operation_id="00000000-0000-4000-8000-000000000001",
         idempotency_key="group-row-idempotency-1",
         consumer_id="construction-routing",
         operation_kind="new_row",
     )
+
+
+def test_publication_context_has_no_caller_controlled_native_execution_seam() -> None:
+    assert tuple(field.name for field in fields(PublicationContext)) == (
+        "lock", "resolve", "journal", "generation", "target_identity", "template_version",
+        "operation_id", "idempotency_key", "consumer_id", "operation_kind",
+    )
+    with pytest.raises(TypeError):
+        PublicationContext(lambda: nullcontext(), lambda current: current, Journal(), 1, "book", native_runner=lambda *_: {})
 
 
 def test_blank_fill_requires_context() -> None:
@@ -162,16 +177,16 @@ def test_invalid_v2_intent_value_blocks_before_journal_directory_or_native(tmp_p
     assert not journal.calls and not (tmp_path / "ops").exists() and not output.exists()
 
 
-def test_exact_replay_enters_recovery_without_second_directory_or_native_mutation(tmp_path: Path) -> None:
+def test_exact_replay_enters_recovery_without_second_directory_or_native_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal, calls = Journal(), []
     context = _context(plan, journal)
-    def native(request, _script):
+    def native(request, *, script):
         calls.append(request.operation_id)
         book = load_workbook(request.candidate); book[request.sheet].cell(request.insertion_row, 6).value = plan.canonical_rns; book.save(request.candidate); book.close()
         return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
-    context = replace(context, native_runner=native)
+    monkeypatch.setattr(insertion, "run_native_insert", native)
     request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=context)
     publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     directories = tuple((tmp_path / "ops").iterdir())
@@ -181,16 +196,17 @@ def test_exact_replay_enters_recovery_without_second_directory_or_native_mutatio
     )
 
 
-def test_exact_replay_uses_planned_generation_after_independent_registry_bump(tmp_path: Path) -> None:
+def test_exact_replay_uses_planned_generation_after_independent_registry_bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal, calls = Journal(), []
     context = _context(plan, journal)
-    def native(request, _script):
+    def native(request, *, script):
         calls.append(request.operation_id)
         book = load_workbook(request.candidate); book[request.sheet].cell(request.insertion_row, 6).value = plan.canonical_rns; book.save(request.candidate); book.close()
         return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
-    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=replace(context, native_runner=native))
+    monkeypatch.setattr(insertion, "run_native_insert", native)
+    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=context)
     publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     journal.phase = "staged"; journal.operation["phase"] = "staged"
     replay = publish_group_row(replace(request, context=replace(request.context, generation=2)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")  # type: ignore[arg-type]
@@ -207,12 +223,13 @@ def test_concurrent_create_loser_reloads_authority_without_native_or_manual_repa
         generated.append(str(value))
         return value
     monkeypatch.setattr(insertion, "uuid4", counted_uuid4)
-    def first_native(request, _script):
+    def first_native(request, *, script):
         calls.append((request.operation_id, request.owner_nonce, request.pair_nonce)); native_started.set()
         assert release.wait(timeout=3)
         book = load_workbook(request.candidate); book[request.sheet].cell(request.insertion_row, 6).value = plan.canonical_rns; book.save(request.candidate); book.close()
         return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
-    first_context = replace(_context(plan, journal), native_runner=first_native)
+    monkeypatch.setattr(insertion, "run_native_insert", first_native)
+    first_context = _context(plan, journal)
     request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=first_context)
     result, failures = [], []
     def run(name: str, current: GroupRowRequest) -> None:
@@ -270,7 +287,7 @@ def test_legacy_or_invalid_publication_authority_fails_closed_before_work(tmp_pa
 
 
 @pytest.mark.parametrize("header", [6, 10, 104])
-def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, header: int) -> None:
+def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, header: int, monkeypatch: pytest.MonkeyPatch) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("insert_before_header", header, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal = Journal(); context = PublicationContext(
@@ -278,6 +295,10 @@ def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, 
         operation_id="00000000-0000-4000-8000-000000000002",
         idempotency_key="group-row-idempotency-2", consumer_id="construction-routing", operation_kind="new_row",
     )
+    monkeypatch.setattr(insertion, "insertion_is_structurally_safe", lambda *_: True)
+    def unavailable(request, *, script):
+        raise insertion.NativeExcelError("excel_required_for_middle_insert", stage="pre_open")
+    monkeypatch.setattr(insertion, "run_native_insert", unavailable)
     with pytest.raises(GroupRowInsertionError, match="excel_required_for_middle_insert"):
         publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {}, context=context), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert source.exists() and not output.exists()
