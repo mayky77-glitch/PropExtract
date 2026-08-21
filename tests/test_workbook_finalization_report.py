@@ -8,7 +8,8 @@ import pytest
 
 from rns_import_server.new_row_action_store import NewRowActionStore
 from rns_import_server.registry_storage import RegistryError, RegistryStorage
-from rns_import_server.workbook_finalization import FinalizationError, finalize_published_operation
+import rns_import_server.workbook_finalization as finalization
+from rns_import_server.workbook_finalization import finalize_published_operation
 from rns_import_server.workbook_operation_journal import PHASE_BACKUP_VERIFIED, WorkbookOperationJournal
 
 
@@ -98,6 +99,84 @@ def test_target_hash_mismatch_is_durable_repair_and_never_overwrites_target(tmp_
         result = finalize_published_operation(storage, operation_id)
         row = WorkbookOperationJournal(storage).get(operation_id)
         assert (result.status, result.error_code, row.phase, target.read_bytes()) == ("manual_repair", "finalization_target_hash_mismatch", "manual_repair", b"third workbook")  # type: ignore[union-attr]
+    finally:
+        storage.close()
+
+
+def test_missing_target_repairs_before_binding_or_history_side_effects(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "registry")
+    try:
+        target = tmp_path / "book.xlsx"; operation_id = _published(storage, target); target.unlink()
+        result = finalize_published_operation(storage, operation_id)
+        row = WorkbookOperationJournal(storage).get(operation_id)
+        assert row is not None
+        assert (result.status, result.error_code, row["binding_finalized"], row["history_finalized"],
+                storage.connection.execute("SELECT COUNT(*) FROM construction_bindings").fetchone()[0],
+                storage.connection.execute("SELECT COUNT(*) FROM new_row_action_history").fetchone()[0]) == (
+                    "manual_repair", "finalization_target_hash_mismatch", 0, 0, 0, 0,
+                )
+    finally:
+        storage.close()
+
+
+def test_transient_target_read_stays_pending_without_binding_or_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "registry")
+    try:
+        target = tmp_path / "book.xlsx"; operation_id = _published(storage, target)
+        monkeypatch.setattr(finalization, "_sha256_file", lambda path: (_ for _ in ()).throw(OSError("EIO")))
+        result = finalize_published_operation(storage, operation_id)
+        row = WorkbookOperationJournal(storage).get(operation_id)
+        assert row is not None and (result.status, result.error_code, row["binding_finalized"], row["history_finalized"]) == (
+            "published_pending_finalization", "finalization_report_verify_failed", 0, 0,
+        )
+    finally:
+        storage.close()
+
+
+def test_report_write_failure_after_history_resumes_without_reentering_earlier_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "registry")
+    try:
+        target = tmp_path / "book.xlsx"; operation_id = _published(storage, target)
+        original = finalization._publish_report_bytes
+        calls = 0
+        def fail_once(path: Path, content: bytes) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("injected")
+            original(path, content)
+        monkeypatch.setattr(finalization, "_publish_report_bytes", fail_once)
+        first = finalize_published_operation(storage, operation_id)
+        durable = WorkbookOperationJournal(storage).get(operation_id)
+        assert durable is not None and (first.error_code, durable["binding_finalized"], durable["history_finalized"], durable["report_finalized"]) == (
+            "finalization_report_write_failed", 1, 1, 0,
+        )
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+        assert calls == 2
+    finally:
+        storage.close()
+
+
+def test_directory_fsync_failure_requires_a_second_publish_before_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "registry")
+    try:
+        target = tmp_path / "book.xlsx"; operation_id = _published(storage, target)
+        original_fsync = finalization.os.fsync
+        calls = 0
+        def fail_first_directory(descriptor: int) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # file fsync succeeds; parent-dir fsync fails after replace
+                raise OSError("directory fsync")
+            original_fsync(descriptor)
+        monkeypatch.setattr(finalization.os, "fsync", fail_first_directory)
+        first = finalize_published_operation(storage, operation_id)
+        row = WorkbookOperationJournal(storage).get(operation_id)
+        assert row is not None and (first.error_code, row["report_finalized"], _report(target).exists()) == (
+            "finalization_report_write_failed", 0, True,
+        )
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+        assert calls >= 4
     finally:
         storage.close()
 

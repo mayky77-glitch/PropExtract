@@ -405,6 +405,60 @@ def _stage_pending(operation_id: str, completed: str, next_stage: str, code: str
                                 stage=next_stage, error_code=code)
 
 
+def _preflight_target(connection: sqlite3.Connection, operation: sqlite3.Row) -> tuple[sqlite3.Row, Path] | str:
+    """Check the immutable workbook authority before *any* finalizer write."""
+    if operation["operation_kind"] != "new_row" or operation["consumer_id"] != operation["operation_id"]:
+        return "finalization_journal_failed"
+    if _authority_failure(connection, operation):
+        return "finalization_journal_failed"
+    action = connection.execute("SELECT * FROM new_row_pending_actions WHERE action_id=?", (operation["operation_id"],)).fetchone()
+    if action is None:
+        return "finalization_capability_conflict"
+    if (action["action_id"] != operation["operation_id"]
+            or (action["construction_id"], action["workbook_contract_id"], action["target_identity"])
+            != (operation["construction_id"], operation["workbook_contract_id"], operation["target_identity"])
+            or action["state"] not in {"publishing", "consumed"}
+            or not _SHA256.fullmatch(str(action["capability_digest"]))):
+        return "finalization_capability_conflict"
+    target_text = action["target_path"]
+    if type(target_text) is not str or not target_text:
+        return "finalization_report_path_invalid"
+    target = Path(target_text)
+    if not target.is_absolute():
+        return "finalization_report_path_invalid"
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        return "finalization_target_hash_mismatch"
+    except OSError:
+        return "finalization_report_verify_failed"
+    try:
+        from rns_import_server.new_row_action_store import NewRowActionError, _canonical_target_path
+        if _canonical_target_path(target_text) != target_text:
+            return "finalization_report_path_invalid"
+    except NewRowActionError:  # canonical path rejects non-regular/symlink authority
+        return "finalization_report_path_invalid"
+    try:
+        actual_hash = _sha256_file(target)
+    except OSError:
+        return "finalization_report_verify_failed"
+    if actual_hash != operation["post_hash"]:
+        return "finalization_target_hash_mismatch"
+    return action, target
+
+
+def _verify_completed_binding(connection: sqlite3.Connection, operation: sqlite3.Row) -> str | None:
+    if not operation["binding_finalized"] or not _is_canonical_utc(operation["binding_finalized_at"]):
+        return "finalization_order_invalid"
+    values = _binding_values(operation)
+    if values is None:
+        return "finalization_order_invalid"
+    bindings = connection.execute("SELECT * FROM construction_bindings WHERE construction_id=? ORDER BY id", (values[0],)).fetchall()
+    if len(bindings) != 1 or not _valid_exact_binding(bindings[0], values):
+        return "finalization_order_invalid"
+    return None
+
+
 def _terminal_manual_repair(storage: RegistryStorage, operation_id: str, code: str) -> FinalizationProgress:
     """Make a post-terminal authority contradiction visible and durable."""
     from rns_import_server.workbook_operation_journal import WorkbookOperationJournal
@@ -685,12 +739,35 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
     """
     if type(operation_id) is not str or not operation_id:
         raise FinalizationError("finalization_operation_missing", operation_id if type(operation_id) is str else "", stage="report")
-    # A terminal replay must verify the concrete receipts without attempting
-    # to re-enter earlier published-only stages.
-    existing = storage.connection.execute(
-        "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
-    ).fetchone()
-    if existing is not None and existing["phase"] == PHASE_FINALIZED:
+    try:
+        with storage.transaction() as connection:
+            current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
+            if current is None:
+                raise FinalizationError("finalization_operation_missing", operation_id, stage="binding")
+            if current["phase"] not in {PHASE_PUBLISHED, PHASE_FINALIZED}:
+                raise FinalizationError("finalization_phase_invalid", operation_id, stage="binding")
+            checked_target = _preflight_target(connection, current)
+            if isinstance(checked_target, str):
+                if checked_target == "finalization_report_verify_failed":
+                    return _pending(operation_id, checked_target)
+                if current["phase"] == PHASE_FINALIZED:
+                    repair_code = checked_target
+                else:
+                    return _manual_repair(connection, operation_id, checked_target)
+            else:
+                repair_code = None
+        if repair_code is not None:
+            return _terminal_manual_repair(storage, operation_id, repair_code)
+    except FinalizationError:
+        raise
+    except sqlite3.Error:
+        return _pending(operation_id, "finalization_journal_failed")
+
+    existing = storage.connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
+    assert existing is not None
+    if existing["phase"] == PHASE_FINALIZED:
+        # A terminal replay only restores the snapshot report if needed; it
+        # never re-enters binding/history and never changes a receipt.
         try:
             with storage.transaction() as connection:
                 current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
@@ -713,12 +790,24 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
         completed = _complete_finalization(storage, operation_id)
         assert completed is not None
         return completed
-    binding = finalize_published_binding(storage, operation_id)
-    if binding.status == PHASE_MANUAL_REPAIR or binding.next_stage != "history":
-        return binding
-    history = finalize_published_history(storage, operation_id)
-    if history.status == PHASE_MANUAL_REPAIR or history.next_stage != "report":
-        return history
+
+    if not existing["binding_finalized"]:
+        binding = finalize_published_binding(storage, operation_id)
+        if binding.status == PHASE_MANUAL_REPAIR or binding.next_stage != "history":
+            return binding
+    else:
+        with storage.transaction() as connection:
+            current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
+            assert current is not None
+            binding_failure = _verify_completed_binding(connection, current)
+            if binding_failure:
+                return _manual_repair(connection, operation_id, binding_failure)
+    current = storage.connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
+    assert current is not None
+    if not current["history_finalized"]:
+        history = finalize_published_history(storage, operation_id)
+        if history.status == PHASE_MANUAL_REPAIR or history.next_stage != "report":
+            return history
     try:
         operation = storage.connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
         if operation is None or operation["phase"] != PHASE_PUBLISHED:
@@ -731,16 +820,17 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
                 return _manual_repair(connection, operation_id, required)
             _, target, content = required
             path = _report_path(target)
-            exact = _read_exact_regular(path, content)
-        if not exact:
-            try:
-                _publish_report_bytes(path, content)
-            except OSError:
-                return _stage_pending(operation_id, "history", "report", "finalization_report_write_failed")
+            report_receipted = _valid_report_receipt(current, content)
+        # An exact file is not proof that a prior rename survived a directory
+        # fsync failure.  Until the DB receipt exists, republish and fsync.
+        if not report_receipted or not _read_exact_regular(path, content):
+            _publish_report_bytes(path, content)
         if not _read_exact_regular(path, content):
             return _stage_pending(operation_id, "history", "report", "finalization_report_verify_failed")
     except FinalizationError:
         raise
+    except OSError:
+        return _stage_pending(operation_id, "history", "report", "finalization_report_write_failed")
     except sqlite3.Error:
         return _stage_pending(operation_id, "history", "report", "finalization_journal_failed")
     report = _report_receipt(storage, operation_id, content)
