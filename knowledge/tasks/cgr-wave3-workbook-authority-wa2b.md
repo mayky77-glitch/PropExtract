@@ -2,6 +2,7 @@
 card_id: cgr-wave3-workbook-authority-wa2b
 status: frozen
 version: 2
+supersedes: cgr-wave3-workbook-authority-wa2a
 work_id: cgr-wave3-workbook-authority-wa2b
 task_id: workbook-authority-wa2b
 purpose: "Require the accepted WA2a authority refresh as the first v3 finalizer stage while preserving exact legacy v1/v2 behavior."
