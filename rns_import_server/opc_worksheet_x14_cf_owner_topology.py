@@ -17,7 +17,7 @@ _X14: Final = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
 _XM: Final = "http://schemas.microsoft.com/office/excel/2006/main"
 _WORKSHEET=f"{{{_SML}}}worksheet"; _EXTLST=f"{{{_SML}}}extLst"; _EXT=f"{{{_SML}}}ext"
 _FORMS=f"{{{_X14}}}conditionalFormattings"; _FORM=f"{{{_X14}}}conditionalFormatting"
-_RULE=f"{{{_X14}}}cfRule"; _DXF=f"{{{_X14}}}dxf"; _DV=f"{{{_X14}}}dataValidations"; _DV_ITEM=f"{{{_X14}}}dataValidation"
+_RULE=f"{{{_X14}}}cfRule"; _DXF=f"{{{_X14}}}dxf"; _DV=f"{{{_X14}}}dataValidations"; _DV_ITEM=f"{{{_X14}}}dataValidation"; _DV_FORMULA1=f"{{{_X14}}}formula1"; _DV_FORMULA2=f"{{{_X14}}}formula2"
 _F=f"{{{_XM}}}f"; _SQREF=f"{{{_XM}}}sqref"
 _CF_URI="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"; _DV_URI="{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}"
 _OWNED=frozenset({_FORMS,_FORM,_RULE,_DXF,_F,_SQREF})
@@ -117,7 +117,7 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
     """One DFS event stream: child errors at entry, cardinality at owner exit."""
     faults=[]; owners=[]; event=base; cf_count=0; extlst_seen=0
     def add(tier,code,field,detail):faults.append((tier,event,(code,part.value,field,detail)))
-    def walk(node,parent,*,parent_direct_extlst,parent_cf_ext,parent_dv_ext,parent_dv,parent_dv_item,parent_forms,parent_form,parent_rule,extlst_index,ext_index):
+    def walk(node,parent,*,parent_direct_extlst,parent_cf_ext,parent_dv_ext,parent_dv,parent_dv_item,parent_dv_formula,parent_forms,parent_form,parent_rule,extlst_index,ext_index):
         nonlocal event,cf_count,extlst_seen
         event+=1; start=event; tag=node.tag; local=_local(tag)
         direct_extlst=parent is root and tag==_EXTLST
@@ -131,7 +131,8 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
         dxf=tag==_DXF and parent_rule
         dv_here=tag==_DV and parent_dv_ext
         dv_item=tag==_DV_ITEM and parent_dv
-        dv_value=tag in {_F,_SQREF} and (parent_dv or parent_dv_item)
+        dv_formula=tag in {_DV_FORMULA1,_DV_FORMULA2} and parent_dv_item
+        dv_value=(tag in {_F,_SQREF} and (parent_dv or parent_dv_item)) or (tag==_F and parent_dv_formula)
         if local in _LOCALS and tag not in _OWNED and not _native_allowed(tag,parent):add(1,"x14-cf-namespace-collision","tag",str(tag))
         elif tag==_FORMS and not forms:add(1,"invalid-x14-cf-parent","tag",str(tag))
         elif tag==_FORM and not form:add(1,"invalid-x14-cf-parent","tag",str(tag))
@@ -157,14 +158,14 @@ def _inspect(root:ET.Element,part:CanonicalPartURI,base:int):
         for child in node:
             child_index=ext_index
             if direct_extlst and child.tag==_EXT:child_ext+=1;child_index=child_ext
-            walk(child,node,parent_direct_extlst=direct_extlst,parent_cf_ext=cf_ext,parent_dv_ext=dv_ext,parent_dv=dv_here,parent_dv_item=dv_item,parent_forms=forms,parent_form=form,parent_rule=rule,extlst_index=extlst_index,ext_index=child_index)
+            walk(child,node,parent_direct_extlst=direct_extlst,parent_cf_ext=cf_ext,parent_dv_ext=dv_ext,parent_dv=dv_here,parent_dv_item=dv_item,parent_dv_formula=dv_formula,parent_forms=forms,parent_form=form,parent_rule=rule,extlst_index=extlst_index,ext_index=child_index)
             event+=1
             if _nonwhite(child.tail) and tag in {_EXTLST,_FORMS,_FORM,_RULE}|({_EXT} if cf_ext else set()):add(2,"invalid-x14-cf-content",local,"tail")
         if cf_ext and sum(child.tag==_FORMS for child in node)!=1:add(1,"invalid-x14-cf-cardinality","ext","conditionalFormattings")
         if tag==_FORMS and forms and not any(child.tag==_FORM for child in node):add(1,"invalid-x14-cf-cardinality","conditionalFormattings","conditionalFormatting")
         if tag==_FORM and form:owners.append((start,extlst_index or 0,ext_index or 0,node))
         event+=1
-    walk(root,None,parent_direct_extlst=False,parent_cf_ext=False,parent_dv_ext=False,parent_dv=False,parent_dv_item=False,parent_forms=False,parent_form=False,parent_rule=False,extlst_index=None,ext_index=None)
+    walk(root,None,parent_direct_extlst=False,parent_cf_ext=False,parent_dv_ext=False,parent_dv=False,parent_dv_item=False,parent_dv_formula=False,parent_forms=False,parent_form=False,parent_rule=False,extlst_index=None,ext_index=None)
     return faults,owners,event
 
 def _accepted(path:str):
