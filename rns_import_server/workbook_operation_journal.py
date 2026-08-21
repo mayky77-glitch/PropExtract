@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 
 from rns_import_server.excel_process_authority import ExcelProcessLease
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage
+from rns_import_server.workbook_finalization_snapshot import FinalizationSnapshotError, validate_payload, verify_snapshot
 
 
 PHASE_PLANNED = "planned"
@@ -109,6 +110,7 @@ class WorkbookOperationJournal:
         manifest_digest: str,
         operation_directory: str,
         canonical_rns: str | None = None,
+        workbook_contract_id: str | None = None,
     ) -> tuple[JournalOperation, bool]:
         """Atomically return an existing authority or create its nonce pair once."""
         required = {
@@ -125,14 +127,20 @@ class WorkbookOperationJournal:
             raise RegistryError("Неподдерживаемый тип workbook operation")
         if mutation_mode not in {"bootstrap_fill", "blank_fill", "middle_insert"}:
             raise RegistryError("Неподдерживаемый режим workbook mutation")
+        legacy_v1 = intent_version == "intent-v1"
         if operation_kind == "new_row" and not canonical_rns:
-            raise RegistryError("Операция новой строки требует canonical RNS")
+            raise RegistryError("workbook_contract_id_required")
+        if operation_kind == "new_row" and not legacy_v1 and (not isinstance(workbook_contract_id, str) or not workbook_contract_id.strip()):
+            raise RegistryError("workbook_contract_id_required")
+        if operation_kind == "new_row" and not legacy_v1 and consumer_id != operation_id:
+            raise RegistryError("consumer_action_identity_mismatch")
         immutable = {
             **required,
             "canonical_rns": canonical_rns,
             "operation_kind": operation_kind,
             "mutation_mode": mutation_mode,
             "expected_generation": expected_generation,
+            "workbook_contract_id": workbook_contract_id,
         }
         self.storage.connection.execute("PRAGMA synchronous=FULL")
         created = False
@@ -157,11 +165,11 @@ class WorkbookOperationJournal:
                 raise RegistryError("Journal nonce имеет неверный формат")
             connection.execute(
                 """INSERT INTO workbook_operation_journal(
-                   operation_id,idempotency_key,consumer_id,owner_id,pair_nonce,construction_id,canonical_rns,
+                   operation_id,idempotency_key,consumer_id,owner_id,pair_nonce,construction_id,canonical_rns,workbook_contract_id,
                    operation_kind,mutation_mode,target_identity,sheet_identity,template_version,expected_generation,
                    intent_version,intent_digest,manifest_version,manifest_digest,operation_directory,phase,created_at,updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""",
-                (operation_id, idempotency_key, consumer_id, owner_id, pair_nonce, construction_id, canonical_rns,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""",
+                (operation_id, idempotency_key, consumer_id, owner_id, pair_nonce, construction_id, canonical_rns, workbook_contract_id,
                  operation_kind, mutation_mode, target_identity, sheet_identity, template_version, expected_generation,
                  intent_version, intent_digest, manifest_version, manifest_digest, operation_directory, _now(), _now()),
             )
@@ -192,6 +200,7 @@ class WorkbookOperationJournal:
         manifest_digest: str,
         operation_directory: str,
         canonical_rns: str | None = None,
+        workbook_contract_id: str | None = None,
     ) -> JournalOperation:
         required = {
             "operation_id": operation_id, "idempotency_key": idempotency_key, "consumer_id": consumer_id,
@@ -207,12 +216,17 @@ class WorkbookOperationJournal:
             raise RegistryError("Неподдерживаемый тип workbook operation")
         if mutation_mode not in {"bootstrap_fill", "blank_fill", "middle_insert"}:
             raise RegistryError("Неподдерживаемый режим workbook mutation")
+        legacy_v1 = intent_version == "intent-v1"
         if operation_kind == "new_row" and not canonical_rns:
-            raise RegistryError("Операция новой строки требует canonical RNS")
+            raise RegistryError("workbook_contract_id_required")
+        if operation_kind == "new_row" and not legacy_v1 and (not isinstance(workbook_contract_id, str) or not workbook_contract_id.strip()):
+            raise RegistryError("workbook_contract_id_required")
+        if operation_kind == "new_row" and not legacy_v1 and consumer_id != operation_id:
+            raise RegistryError("consumer_action_identity_mismatch")
         immutable = {
             "operation_id": operation_id, "idempotency_key": idempotency_key, "consumer_id": consumer_id,
             "owner_id": owner_id, "pair_nonce": pair_nonce, "construction_id": construction_id,
-            "canonical_rns": canonical_rns, "operation_kind": operation_kind, "mutation_mode": mutation_mode,
+            "canonical_rns": canonical_rns, "workbook_contract_id": workbook_contract_id, "operation_kind": operation_kind, "mutation_mode": mutation_mode,
             "target_identity": target_identity, "sheet_identity": sheet_identity, "template_version": template_version,
             "expected_generation": expected_generation, "intent_version": intent_version, "intent_digest": intent_digest,
             "manifest_version": manifest_version, "manifest_digest": manifest_digest, "operation_directory": operation_directory,
@@ -232,11 +246,11 @@ class WorkbookOperationJournal:
             try:
                 connection.execute(
                     """INSERT INTO workbook_operation_journal(
-                       operation_id,idempotency_key,consumer_id,owner_id,pair_nonce,construction_id,canonical_rns,
+                       operation_id,idempotency_key,consumer_id,owner_id,pair_nonce,construction_id,canonical_rns,workbook_contract_id,
                        operation_kind,mutation_mode,target_identity,sheet_identity,template_version,expected_generation,
                        intent_version,intent_digest,manifest_version,manifest_digest,operation_directory,phase,created_at,updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""",
-                    (operation_id, idempotency_key, consumer_id, owner_id, pair_nonce, construction_id, canonical_rns,
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""",
+                    (operation_id, idempotency_key, consumer_id, owner_id, pair_nonce, construction_id, canonical_rns, workbook_contract_id,
                      operation_kind, mutation_mode, target_identity, sheet_identity, template_version, expected_generation,
                      intent_version, intent_digest, manifest_version, manifest_digest, operation_directory, _now(), _now()),
                 )
@@ -273,6 +287,15 @@ class WorkbookOperationJournal:
         if next_phase == PHASE_PUBLISHED:
             if hashes.get("post_hash") or not current["post_hash"]:
                 raise RegistryError("Published CAS использует только заранее durable post_hash")
+            snapshot = self.storage.connection.execute(
+                "SELECT snapshot_version, canonical_payload, digest FROM workbook_finalization_snapshots WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if snapshot is None:
+                raise RegistryError("finalization_snapshot_required")
+            if not verify_snapshot(operation_id=operation_id, snapshot_version=snapshot["snapshot_version"],
+                                   canonical_payload=snapshot["canonical_payload"], digest=snapshot["digest"]):
+                raise RegistryError("finalization_snapshot_invalid")
         if next_phase == PHASE_BACKUP_VERIFIED and not hashes.get("backup_hash"):
             raise RegistryError("До publication необходим verified backup hash")
         if next_phase == PHASE_VALIDATED and not hashes.get("validation_digest"):
@@ -393,18 +416,43 @@ class WorkbookOperationJournal:
             raise JournalStorageError("SQLite не сохранил repair anomaly") from error
 
     def record_post_hash(self, operation_id: str, *, expected_phase: str, post_hash: str) -> JournalOperation:
-        """Commit post-publication evidence before the caller may replace XLSX."""
-        if expected_phase != PHASE_BACKUP_VERIFIED or not isinstance(post_hash, str) or not post_hash:
-            raise RegistryError("post_hash допускается только после verified backup")
+        raise RegistryError("finalization_snapshot_required")
+
+    def record_finalization_authority(
+        self, operation_id: str, *, expected_phase: str, post_hash: str, payload: object,
+    ) -> JournalOperation:
+        """Atomically persist the only post-hash and its sanitised authority."""
+        if expected_phase != PHASE_BACKUP_VERIFIED:
+            raise RegistryError("finalization_authority_missing")
         self.storage.connection.execute("PRAGMA synchronous=FULL")
-        with self.storage.transaction() as connection:
-            updated = connection.execute(
-                "UPDATE workbook_operation_journal SET post_hash=?, updated_at=? "
-                "WHERE operation_id=? AND phase=? AND post_hash IS NULL",
-                (post_hash, _now(), operation_id, expected_phase),
-            ).rowcount
-            if updated != 1:
-                raise JournalTransitionError("post_hash уже записан или operation изменилась")
+        try:
+            with self.storage.transaction() as connection:
+                current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
+                if current is None or current["phase"] != expected_phase:
+                    raise JournalTransitionError("finalization_authority_journal_failed")
+                canonical, digest = validate_payload(operation_id=operation_id, consumer_id=current["consumer_id"], post_hash=post_hash, payload=payload)
+                existing = connection.execute(
+                    "SELECT snapshot_version, canonical_payload, digest FROM workbook_finalization_snapshots WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if existing is not None:
+                    if (existing["canonical_payload"], existing["digest"], current["post_hash"]) == (canonical, digest, post_hash):
+                        return JournalOperation(dict(current))
+                    raise RegistryConflictError("finalization_snapshot_conflict")
+                if current["post_hash"] is not None:
+                    raise RegistryConflictError("finalization_snapshot_conflict")
+                connection.execute(
+                    "INSERT INTO workbook_finalization_snapshots(operation_id,snapshot_version,canonical_payload,digest,created_at) VALUES(?,?,?,?,?)",
+                    (operation_id, 1, canonical, digest, _now()),
+                )
+                if connection.execute(
+                    "UPDATE workbook_operation_journal SET post_hash=?, updated_at=? WHERE operation_id=? AND phase=? AND post_hash IS NULL",
+                    (post_hash, _now(), operation_id, expected_phase),
+                ).rowcount != 1:
+                    raise JournalTransitionError("finalization_authority_journal_failed")
+        except FinalizationSnapshotError as error:
+            raise RegistryError(error.code) from error
+        except sqlite3.Error as error:
+            raise JournalStorageError("finalization_authority_journal_failed") from error
         return self.get(operation_id)  # type: ignore[return-value]
 
     def finalize_flag(self, operation_id: str, flag: str) -> JournalOperation:

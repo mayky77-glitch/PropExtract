@@ -50,6 +50,10 @@ class Journal:
         assert self.phase == expected_phase
         if self.operation is not None: self.operation["post_hash"] = post_hash
         self.calls.append(("post", post_hash)); return object()
+    def record_finalization_authority(self, operation_id, *, expected_phase, post_hash, payload):
+        assert self.phase == expected_phase
+        if self.operation is not None: self.operation["post_hash"] = post_hash
+        self.calls.append(("finalization_authority", payload)); return object()
     def record_repair_anomaly(self, operation_id, *, failure_code):
         assert self.phase in {"finalized", "manual_repair"}
         self.phase = "manual_repair"; self.calls.append(("repair_anomaly", failure_code)); return object()
@@ -99,15 +103,17 @@ def _context(plan, journal):
         lambda: nullcontext(), lambda current: current, journal, plan.registry_generation, plan.workbook_identity,
         operation_id="00000000-0000-4000-8000-000000000001",
         idempotency_key="group-row-idempotency-1",
-        consumer_id="construction-routing",
+        consumer_id="00000000-0000-4000-8000-000000000001",
         operation_kind="new_row",
+        workbook_contract_id="test-contract-v1",
+        finalization_snapshot_builder=lambda _operation, _row, post_hash: {"final_state": {"workbook_sha256": post_hash}},
     )
 
 
 def test_publication_context_has_no_caller_controlled_native_execution_seam() -> None:
     assert tuple(field.name for field in fields(PublicationContext)) == (
         "lock", "resolve", "journal", "generation", "target_identity", "template_version",
-        "operation_id", "idempotency_key", "consumer_id", "operation_kind",
+        "operation_id", "idempotency_key", "consumer_id", "operation_kind", "workbook_contract_id", "finalization_snapshot_builder",
     )
     with pytest.raises(TypeError):
         PublicationContext(lambda: nullcontext(), lambda current: current, Journal(), 1, "book", native_runner=lambda *_: {})
@@ -195,7 +201,7 @@ def test_v2_authority_and_evidence_are_stable_distinct_and_journaled(tmp_path: P
     created = next(values for name, values in journal.calls if name == "create")
     assert result["operation_id"] == "00000000-0000-4000-8000-000000000001"
     assert (created["operation_id"], created["idempotency_key"], created["consumer_id"], created["operation_kind"]) == (
-        "00000000-0000-4000-8000-000000000001", "group-row-idempotency-1", "construction-routing", "new_row",
+        "00000000-0000-4000-8000-000000000001", "group-row-idempotency-1", "00000000-0000-4000-8000-000000000001", "new_row",
     )
     assert (created["intent_version"], created["manifest_version"], created["intent_digest"], created["manifest_digest"]) == (
         "group-row-intent-v2", "group-row-manifest-v2", *baseline,
@@ -334,7 +340,9 @@ def test_middle_insert_no_excel_is_typed_prepublication_failure(tmp_path: Path, 
     journal = Journal(); context = PublicationContext(
         lambda: nullcontext(), lambda current: current, journal, 1, "book",
         operation_id="00000000-0000-4000-8000-000000000002",
-        idempotency_key="group-row-idempotency-2", consumer_id="construction-routing", operation_kind="new_row",
+        idempotency_key="group-row-idempotency-2", consumer_id="00000000-0000-4000-8000-000000000002", operation_kind="new_row",
+        workbook_contract_id="test-contract-v1",
+        finalization_snapshot_builder=lambda _operation, _row, post_hash: {"final_state": {"workbook_sha256": post_hash}},
     )
     monkeypatch.setattr(insertion, "native_excel_available", native_excel_available)
     with pytest.raises(GroupRowInsertionError, match="excel_required_for_middle_insert"):
@@ -547,12 +555,12 @@ def test_terminal_third_hash_uses_idempotent_repair_anomaly_journal_path(tmp_pat
 @pytest.mark.parametrize(
     ("plan_mode", "boundary", "expected_code", "expected_stage", "replace_count", "recovery"),
     [
-        ("existing_blank", "post_hash", "group_row_failed", "backup_verified", 0, "re_resolve_required"),
+        ("existing_blank", "post_hash", "finalization_authority_journal_failed", "finalization_authority", 0, "re_resolve_required"),
         ("existing_blank", "replace", "cutover_replace_failed", "cutover_replace", 0, "re_resolve_required"),
         ("existing_blank", "fsync", "cutover_target_fsync_failed", "cutover_target_fsync", 1, "finalization_pending"),
         ("existing_blank", "hash", "cutover_target_hash_failed", "cutover_target_hash", 1, "finalization_pending"),
         ("existing_blank", "published_cas", "published_journal_failed", "cutover_published", 1, "finalization_pending"),
-        ("insert_before_header", "post_hash", "group_row_failed", "backup_verified", 0, "re_resolve_required"),
+        ("insert_before_header", "post_hash", "finalization_authority_journal_failed", "finalization_authority", 0, "re_resolve_required"),
         ("insert_before_header", "replace", "cutover_replace_failed", "cutover_replace", 0, "re_resolve_required"),
         ("insert_before_header", "fsync", "cutover_target_fsync_failed", "cutover_target_fsync", 1, "finalization_pending"),
         ("insert_before_header", "hash", "cutover_target_hash_failed", "cutover_target_hash", 1, "finalization_pending"),
@@ -598,14 +606,14 @@ def test_real_journal_publish_crash_restart_recovers_without_repeat_mutation(
     monkeypatch.setattr(insertion, "run_native_insert", native)
     crashed = False
     if boundary == "post_hash":
-        record_post_hash = journal.record_post_hash
+        record_finalization_authority = journal.record_finalization_authority
         def crash_after_post_hash(*args, **kwargs):
             nonlocal crashed
-            result = record_post_hash(*args, **kwargs)
+            result = record_finalization_authority(*args, **kwargs)
             if not crashed:
                 crashed = True; raise RuntimeError("crash after durable post hash")
             return result
-        monkeypatch.setattr(journal, "record_post_hash", crash_after_post_hash)
+        monkeypatch.setattr(journal, "record_finalization_authority", crash_after_post_hash)
     elif boundary == "published_cas":
         transition = journal.transition
         def crash_published_cas(*args, **kwargs):

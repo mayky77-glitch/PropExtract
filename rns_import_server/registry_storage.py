@@ -27,8 +27,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 3
-SEED_REVISION = "construction-registry-v3"
+SCHEMA_VERSION = 4
+SEED_REVISION = "construction-registry-v4"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -89,6 +89,8 @@ _V2_JOURNAL_COLUMNS = frozenset({
     "capability_finalized_at", "binding_finalized_at", "history_finalized_at", "report_finalized_at",
 })
 _V3_JOURNAL_COLUMNS = frozenset({"excel_adapter_pid", "excel_adapter_started_at"})
+_V4_JOURNAL_COLUMNS = frozenset({"workbook_contract_id"})
+_V4_SNAPSHOT_COLUMNS = frozenset({"operation_id", "snapshot_version", "canonical_payload", "digest", "created_at"})
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 _LEGACY_LEASE_OWNERSHIP_FAILURE_CODE = "legacy_excel_lease_ownership_missing"
 
@@ -271,7 +273,7 @@ class RegistryStorage:
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, 2, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         self._validate_schema(version)
         if version < SCHEMA_VERSION:
@@ -296,8 +298,11 @@ class RegistryStorage:
         required = dict(_REQUIRED_SCHEMA_COLUMNS)
         if version == 2:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS
-        elif version == SCHEMA_VERSION:
+        elif version == 3:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS
+        elif version == SCHEMA_VERSION:
+            required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS
+            required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -415,6 +420,7 @@ class RegistryStorage:
                     pair_nonce TEXT NOT NULL,
                     construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE RESTRICT,
                     canonical_rns TEXT,
+                    workbook_contract_id TEXT,
                     operation_kind TEXT NOT NULL CHECK (operation_kind IN ('group_provision', 'new_row')),
                     mutation_mode TEXT NOT NULL CHECK (mutation_mode IN ('bootstrap_fill', 'blank_fill', 'middle_insert')),
                     target_identity TEXT NOT NULL,
@@ -457,6 +463,13 @@ class RegistryStorage:
                     published_at TEXT,
                     finalized_at TEXT
                 );
+                CREATE TABLE workbook_finalization_snapshots (
+                    operation_id TEXT PRIMARY KEY REFERENCES workbook_operation_journal(operation_id) ON DELETE RESTRICT,
+                    snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 1),
+                    canonical_payload TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX constructions_status_name_idx ON constructions(status, normalized_name);
                 CREATE INDEX construction_bindings_construction_idx ON construction_bindings(construction_id);
                 CREATE INDEX journal_phase_idx ON workbook_operation_journal(phase, updated_at);
@@ -472,7 +485,7 @@ class RegistryStorage:
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1, 2}:
+        if version not in {0, 1, 2, 3}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
@@ -496,6 +509,19 @@ class RegistryStorage:
         self.connection.execute("PRAGMA synchronous=FULL")
         with self.transaction() as connection:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(workbook_operation_journal)")}
+            if "workbook_contract_id" not in columns:
+                # Legacy rows are historical evidence.  v4 deliberately does
+                # not fabricate a contract for them.
+                connection.execute("ALTER TABLE workbook_operation_journal ADD COLUMN workbook_contract_id TEXT")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS workbook_finalization_snapshots (
+                    operation_id TEXT PRIMARY KEY REFERENCES workbook_operation_journal(operation_id) ON DELETE RESTRICT,
+                    snapshot_version INTEGER NOT NULL CHECK (snapshot_version = 1),
+                    canonical_payload TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
             for flag in ("capability", "binding", "history", "report"):
                 column = f"{flag}_finalized_at"
                 if column not in columns:

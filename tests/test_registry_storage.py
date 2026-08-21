@@ -33,12 +33,12 @@ def _journal_operation(storage: RegistryStorage, suffix: str) -> str:
     construction = storage.list_constructions()[0]
     return WorkbookOperationJournal(storage).create(
         operation_id=f"legacy-operation-{suffix}", idempotency_key=f"legacy-idempotency-{suffix}",
-        consumer_id=f"legacy-consumer-{suffix}", owner_id="legacy-owner", pair_nonce="legacy-nonce",
+        consumer_id=f"legacy-operation-{suffix}", owner_id="legacy-owner", pair_nonce="legacy-nonce",
         construction_id=construction.id, operation_kind="new_row", mutation_mode="middle_insert",
         target_identity="legacy-target", sheet_identity="legacy-sheet", template_version="legacy-template",
         expected_generation=storage.generation, intent_version="legacy-intent", intent_digest="legacy-intent-digest",
         manifest_version="legacy-manifest", manifest_digest="legacy-manifest-digest",
-        operation_directory="legacy-operation-directory", canonical_rns="RU-00000000-00-2026",
+        operation_directory="legacy-operation-directory", canonical_rns="RU-00000000-00-2026", workbook_contract_id="legacy-contract",
     ).operation_id
 
 
@@ -106,10 +106,28 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
     finally:
         migrated.close()
     newer = RegistryStorage(path)
-    newer.connection.execute("UPDATE registry_meta SET schema_version=4")
+    newer.connection.execute("UPDATE registry_meta SET schema_version=5")
     newer.close()
     with pytest.raises(RegistrySchemaError):
         RegistryStorage(path)
+
+
+def test_v3_to_v4_preserves_legacy_journal_without_inventing_contract(tmp_path: Path) -> None:
+    runtime = RegistryStorage.bootstrap(tmp_path)
+    path = runtime.path
+    operation_id = _journal_operation(runtime, "v3")
+    runtime.connection.execute("UPDATE workbook_operation_journal SET workbook_contract_id=NULL WHERE operation_id=?", (operation_id,))
+    runtime.connection.execute("DROP TABLE workbook_finalization_snapshots")
+    runtime.connection.execute("ALTER TABLE workbook_operation_journal DROP COLUMN workbook_contract_id")
+    runtime.connection.execute("UPDATE registry_meta SET schema_version=3")
+    runtime.close()
+    migrated = RegistryStorage(path)
+    try:
+        assert migrated.connection.execute("SELECT workbook_contract_id FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()[0] is None
+        assert migrated.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workbook_finalization_snapshots'").fetchone()
+        assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
+    finally:
+        migrated.close()
 
 
 @pytest.mark.parametrize("mode", ["middle_insert", "blank_fill"])

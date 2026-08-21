@@ -24,11 +24,11 @@ from rns_import_server.workbook_operation_journal import (
 def _operation(journal: WorkbookOperationJournal, storage: RegistryStorage) -> str:
     construction = storage.list_constructions()[0]
     return journal.create(
-        operation_id="operation-1", idempotency_key="idempotency-1", consumer_id="consumer-1", owner_id="owner-1",
+        operation_id="operation-1", idempotency_key="idempotency-1", consumer_id="operation-1", owner_id="owner-1",
         pair_nonce="nonce-1", construction_id=construction.id, operation_kind="new_row", mutation_mode="middle_insert",
         target_identity="target", sheet_identity="sheet", template_version="template-v1", expected_generation=storage.generation,
         intent_version="intent-v1", intent_digest="intent-digest", manifest_version="manifest-v1",
-        manifest_digest="manifest-digest", operation_directory="operation-dir", canonical_rns="RU-00000000-00-2026",
+        manifest_digest="manifest-digest", operation_directory="operation-dir", canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
     ).operation_id
 
 
@@ -37,6 +37,14 @@ def _lease(operation_id: str, *, owner: str = "owner-1", pair: str = "nonce-1") 
         operation_id=operation_id, owner_id=owner, pair_nonce=pair, adapter_type="com", adapter_image="powershell.exe",
         adapter_pid=10, adapter_started_at="2026-08-21T00:00:00Z", excel_image="EXCEL.EXE", excel_pid=11,
         excel_hwnd=12, excel_process_started_at="2026-08-21T00:00:01Z", excel_build="16.0.1",
+    )
+
+
+def _authority(journal: WorkbookOperationJournal, operation_id: str, post_hash: str) -> None:
+    post_hash = "a" * 64
+    journal.record_finalization_authority(
+        operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash=post_hash,
+        payload={"action_id": operation_id, "target_row": 2, "report_payload": {"final_state": {"workbook_sha256": post_hash}}},
     )
 
 
@@ -50,7 +58,7 @@ def _finalized_operation(journal: WorkbookOperationJournal, storage: RegistrySto
                        hashes={"validation_digest": "validation", "control_hash": "control"})
     journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED,
                        hashes={"backup_hash": "backup"})
-    journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="post")
+    _authority(journal, operation_id, "post")
     journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
     for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
         journal.finalize_flag(operation_id, flag)
@@ -68,12 +76,12 @@ def test_atomic_reservation_creates_nonce_pair_once_and_reuses_authority(tmp_pat
             calls.append(True)
             return "owner-1", "pair-1"
         values = dict(
-            operation_id="operation-reserved", idempotency_key="idempotency-reserved", consumer_id="consumer-reserved",
+            operation_id="operation-reserved", idempotency_key="idempotency-reserved", consumer_id="operation-reserved",
             construction_id=construction.id, operation_kind="new_row", mutation_mode="middle_insert",
             target_identity="target", sheet_identity="sheet", template_version="template-v1",
             expected_generation=storage.generation, intent_version="intent-v2", intent_digest="intent-digest",
             manifest_version="manifest-v2", manifest_digest="manifest-digest", operation_directory="operation-dir",
-            canonical_rns="RU-00000000-00-2026",
+            canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
         )
         first, first_created = journal.reserve(nonce_factory=nonce_factory, **values)
         second, second_created = journal.reserve(nonce_factory=nonce_factory, **values)
@@ -109,7 +117,7 @@ def test_journal_requires_legal_cas_phases_and_durable_hash_evidence(tmp_path: P
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
         with pytest.raises(RegistryError):
             journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED, hashes={"post_hash": "p"})
-        journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="p")
+        _authority(journal, operation_id, "p")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
         with pytest.raises(RegistryError):
             journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
@@ -131,28 +139,28 @@ def test_journal_idempotency_restart_and_independent_finalization(tmp_path: Path
         journal = WorkbookOperationJournal(storage)
         operation_id = _operation(journal, storage)
         assert journal.create(
-            operation_id=operation_id, idempotency_key="idempotency-1", consumer_id="consumer-1", owner_id="owner-1",
+            operation_id=operation_id, idempotency_key="idempotency-1", consumer_id=operation_id, owner_id="owner-1",
             pair_nonce="nonce-1", construction_id=storage.list_constructions()[0].id, operation_kind="new_row",
             mutation_mode="middle_insert", target_identity="target", sheet_identity="sheet", template_version="template-v1",
             expected_generation=storage.generation, intent_version="intent-v1", intent_digest="intent-digest",
             manifest_version="manifest-v1", manifest_digest="manifest-digest", operation_directory="operation-dir",
-            canonical_rns="RU-00000000-00-2026",
+            canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
         ).operation_id == operation_id
         with pytest.raises(RegistryConflictError):
             journal.create(
-                operation_id=operation_id, idempotency_key="idempotency-1", consumer_id="consumer-different", owner_id="owner-1",
+                operation_id=operation_id, idempotency_key="idempotency-1", consumer_id=operation_id, owner_id="changed-consumer",
                 pair_nonce="nonce-1", construction_id=storage.list_constructions()[0].id, operation_kind="new_row",
                 mutation_mode="middle_insert", target_identity="target", sheet_identity="sheet", template_version="template-v1",
                 expected_generation=storage.generation, intent_version="intent-v1", intent_digest="intent-digest",
                 manifest_version="manifest-v1", manifest_digest="manifest-digest", operation_directory="operation-dir",
-                canonical_rns="RU-00000000-00-2026",
+                canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
             )
         journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "staged"})
         journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease=_lease(operation_id))
         journal.transition(operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED,
                            hashes={"validation_digest": "v", "control_hash": "c"})
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
-        journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="post")
+        _authority(journal, operation_id, "post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
         journal.finalize_flag(operation_id, "history_finalized")
         storage.close()
@@ -183,22 +191,22 @@ def test_exact_idempotency_replay_precedes_generation_check_after_restart(tmp_pa
         restarted = RegistryStorage(storage.path)
         try:
             replayed = WorkbookOperationJournal(restarted).create(
-                operation_id=operation_id, idempotency_key="idempotency-1", consumer_id="consumer-1", owner_id="owner-1",
+                operation_id=operation_id, idempotency_key="idempotency-1", consumer_id=operation_id, owner_id="owner-1",
                 pair_nonce="nonce-1", construction_id=construction_id, operation_kind="new_row", mutation_mode="middle_insert",
                 target_identity="target", sheet_identity="sheet", template_version="template-v1",
                 expected_generation=expected_generation, intent_version="intent-v1", intent_digest="intent-digest",
                 manifest_version="manifest-v1", manifest_digest="manifest-digest", operation_directory="operation-dir",
-                canonical_rns="RU-00000000-00-2026",
+                canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
             )
             assert replayed.operation_id == operation_id
             with pytest.raises(RegistryConflictError):
                 WorkbookOperationJournal(restarted).create(
-                    operation_id=operation_id, idempotency_key="idempotency-1", consumer_id="consumer-1", owner_id="changed",
+                    operation_id=operation_id, idempotency_key="idempotency-1", consumer_id=operation_id, owner_id="changed",
                     pair_nonce="nonce-1", construction_id=construction_id, operation_kind="new_row", mutation_mode="middle_insert",
                     target_identity="target", sheet_identity="sheet", template_version="template-v1",
                     expected_generation=expected_generation, intent_version="intent-v1", intent_digest="intent-digest",
                     manifest_version="manifest-v1", manifest_digest="manifest-digest", operation_directory="operation-dir",
-                    canonical_rns="RU-00000000-00-2026",
+                    canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
                 )
         finally:
             restarted.close()
@@ -217,7 +225,7 @@ def test_finalization_flag_replay_after_finalized_restart_preserves_first_timest
         journal.transition(operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED,
                            hashes={"validation_digest": "v", "control_hash": "c"})
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
-        journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="post")
+        _authority(journal, operation_id, "post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
         for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"):
             journal.finalize_flag(operation_id, flag)
@@ -329,12 +337,12 @@ def test_journal_contract_has_no_pdf_text_cell_content_or_source_path_fields(tmp
         assert not {"pdf_text", "cell_content", "source_path", "secret"} & columns
         with pytest.raises(RegistryConflictError) as error:
             journal.create(
-                operation_id=operation_id, idempotency_key="idempotency-1", consumer_id="consumer-1", owner_id="/private/source.pdf",
+                operation_id=operation_id, idempotency_key="idempotency-1", consumer_id=operation_id, owner_id="/private/source.pdf",
                 pair_nonce="nonce-1", construction_id=storage.list_constructions()[0].id, operation_kind="new_row",
                 mutation_mode="middle_insert", target_identity="target", sheet_identity="sheet", template_version="template-v1",
                 expected_generation=storage.generation, intent_version="intent-v1", intent_digest="secret-pdf-text",
                 manifest_version="manifest-v1", manifest_digest="cell-content", operation_directory="operation-dir",
-                canonical_rns="RU-00000000-00-2026",
+                canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract-v1",
             )
         message = str(error.value)
         assert "/private/source.pdf" not in message

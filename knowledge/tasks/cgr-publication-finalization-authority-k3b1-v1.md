@@ -77,3 +77,11 @@ knowledge_paths:
 - Sanitizer compatibility plus strict JSON/type/size/privacy tests. Published without snapshot or with corrupted digest is blocked.
 - Group ordering/failure tests prove no replace or finalizer before durable authority. Restart reuses the exact snapshot; a terminal repair anomaly preserves snapshot and all timestamps.
 - Native Excel, finalizer execution, server/UI and full user journey are explicitly not claimed.
+
+## Implementation evidence
+
+- Schema v4 adds nullable legacy `workbook_contract_id` and `workbook_finalization_snapshots`; v3→v4 takes the verified pre-migration backup and leaves legacy contracts `NULL`.
+- New v2 new-row operations require a nonblank immutable contract and `consumer_id == action_id`. Explicit `intent-v1` rows remain legacy-compatible only; they cannot satisfy v2 publication authority.
+- `record_finalization_authority` inserts/verifies the canonical sanitized snapshot and records `post_hash` in one `BEGIN IMMEDIATE` transaction. `published` verifies the snapshot digest and fails closed when it is absent/corrupt.
+- Focused: `117 passed, 2 skipped` (snapshot, journal, storage, group insertion, report observability, native-contract compatibility); seed build/check and validator green; compileall/diff green.
+- Full: `1675 passed, 2 skipped`, with 12 pre-existing environment-only failures from the documented stale absolute XLSX path `/Users/x/Автоматизация РнС и ГРО/Реестр РНС Иркутск.xlsx`, plus one known OpenPyXL x14 warning. No source XLSX was copied, linked, or mutated.
