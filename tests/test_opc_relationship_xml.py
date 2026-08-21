@@ -165,6 +165,34 @@ def test_openpyxl_raw_space_hyperlinks_are_narrowly_accepted_and_preserved():
     assert parse_relationship_xml(PART, _document(_relationship(Target=escaped, TargetMode="External")))[0].target == escaped
 
 
+@pytest.mark.parametrize("literal", ("\t", "\n", "\r"))
+@pytest.mark.parametrize("encoding", (None, "utf-8", "utf-16"))
+def test_rejects_literal_xml_attribute_whitespace_before_elementtree_normalizes_it(literal: str, encoding: str | None):
+    target = f"file:///run/user/1000/РнС{literal}и ГРО/реестр.xlsx"
+    payload: bytes | str = _document(_relationship(
+        Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        Target=target,
+        TargetMode="External",
+    ))
+    if encoding is not None:
+        payload = payload.encode(encoding)
+    assert _error_tuple(payload) == ("invalid-relationship-target", PART, target)
+
+
+@pytest.mark.parametrize(
+    ("character_reference", "normalized_character"),
+    (("&#9;", "\t"), ("&#10;", "\n"), ("&#13;", "\r"), ("&#x9;", "\t"), ("&#xA;", "\n"), ("&#xD;", "\r")),
+)
+def test_character_reference_whitespace_keeps_elementtree_validation_path(character_reference: str, normalized_character: str):
+    lexical_target = f"file:///run/user/1000/РнС{character_reference}и ГРО/реестр.xlsx"
+    normalized_target = f"file:///run/user/1000/РнС{normalized_character}и ГРО/реестр.xlsx"
+    assert _error_tuple(_document(_relationship(
+        Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        Target=lexical_target,
+        TargetMode="External",
+    ))) == ("invalid-relationship-target", PART, normalized_target)
+
+
 @pytest.mark.parametrize(
     ("attributes", "target"),
     [

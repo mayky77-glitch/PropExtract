@@ -21,6 +21,10 @@ _ALLOWED_ATTRIBUTES: Final = _REQUIRED_ATTRIBUTES | {"TargetMode"}
 _TARGET_MODES: Final = frozenset({"Internal", "External"})
 _URI_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _PERCENT_ESCAPE: Final = re.compile(r"%[0-9A-Fa-f]{2}")
+_XML_DECLARATION_ENCODING: Final = re.compile(
+    br'^<\?xml[\t\r\n ]+[^?]*?encoding[\t\r\n ]*=[\t\r\n ]*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 _IPV_FUTURE: Final = re.compile(r"v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+", re.IGNORECASE)
 _IPV4_ADDRESS: Final = re.compile(
     r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
@@ -303,6 +307,118 @@ def _contains_doctype(payload: bytes | str) -> bool:
     return False
 
 
+def _decode_xml_lexical_source(payload: bytes | str) -> str | None:
+    """Decode only enough to inspect literal XML attribute characters.
+
+    ElementTree deliberately normalizes literal TAB/LF/CR in attributes. This
+    decoder keeps their lexical form while following the document's encoding
+    declaration or BOM. A decoding failure stays with ElementTree's existing
+    typed XML error path.
+    """
+    if isinstance(payload, str):
+        return payload
+    if payload.startswith((b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00")):
+        encoding = "utf-32"
+    elif payload.startswith((b"\xfe\xff", b"\xff\xfe")):
+        encoding = "utf-16"
+    elif payload.startswith(b"\xef\xbb\xbf"):
+        encoding = "utf-8-sig"
+    else:
+        match = _XML_DECLARATION_ENCODING.match(payload)
+        encoding = match.group(1).decode("ascii") if match is not None else "utf-8"
+    try:
+        return payload.decode(encoding)
+    except (LookupError, UnicodeError):
+        return None
+
+
+def _literal_relationship_target_whitespace(payload: bytes | str) -> str | None:
+    """Return a literal TAB/LF/CR in ``Relationship@Target``, if any.
+
+    This small lexer recognizes quoted attributes and skips XML comments,
+    processing instructions and CDATA. It intentionally does not decode entity
+    references, so ``&#x9;`` remains on the established ElementTree path.
+    """
+    source = _decode_xml_lexical_source(payload)
+    if source is None:
+        return None
+    position = 0
+    while position < len(source):
+        start = source.find("<", position)
+        if start < 0:
+            return None
+        if source.startswith("<!--", start):
+            position = source.find("-->", start + 4)
+            if position < 0:
+                return None
+            position += 3
+            continue
+        if source.startswith("<?", start):
+            position = source.find("?>", start + 2)
+            if position < 0:
+                return None
+            position += 2
+            continue
+        if source.startswith("<![CDATA[", start):
+            position = source.find("]]>", start + 9)
+            if position < 0:
+                return None
+            position += 3
+            continue
+        position = start + 1
+        if position >= len(source) or source[position] in "/!":
+            end = source.find(">", position)
+            if end < 0:
+                return None
+            position = end + 1
+            continue
+        name_start = position
+        while position < len(source) and source[position] not in "\t\r\n />":
+            position += 1
+        is_relationship = source[name_start:position].rsplit(":", 1)[-1] == "Relationship"
+        while position < len(source):
+            while position < len(source) and source[position] in "\t\r\n ":
+                position += 1
+            if position >= len(source) or source[position] in "/>":
+                end = source.find(">", position)
+                if end < 0:
+                    return None
+                position = end + 1
+                break
+            attribute_start = position
+            while position < len(source) and source[position] not in "\t\r\n =>/":
+                position += 1
+            attribute = source[attribute_start:position]
+            while position < len(source) and source[position] in "\t\r\n ":
+                position += 1
+            if position >= len(source) or source[position] != "=":
+                end = source.find(">", position)
+                if end < 0:
+                    return None
+                position = end + 1
+                break
+            position += 1
+            while position < len(source) and source[position] in "\t\r\n ":
+                position += 1
+            if position >= len(source) or source[position] not in "\"'":
+                end = source.find(">", position)
+                if end < 0:
+                    return None
+                position = end + 1
+                break
+            quote = source[position]
+            position += 1
+            value_start = position
+            position = source.find(quote, position)
+            if position < 0:
+                return None
+            value = source[value_start:position]
+            if is_relationship and attribute == "Target" and any(character in "\t\r\n" for character in value):
+                return value
+            position += 1
+    return None
+
+
 def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationship, ...]:
     """Parse one OPC ``.rels`` part or raise a typed validation error.
 
@@ -316,6 +432,9 @@ def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationshi
         _fail("invalid-xml-input", part, type(payload).__name__)
     if _contains_doctype(payload):
         _fail("forbidden-doctype", part, "doctype")
+    literal_target = _literal_relationship_target_whitespace(payload)
+    if literal_target is not None:
+        _fail("invalid-relationship-target", part, literal_target)
     try:
         root = ET.fromstring(payload)
     except (ET.ParseError, UnicodeError, ValueError):
