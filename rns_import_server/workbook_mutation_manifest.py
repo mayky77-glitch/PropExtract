@@ -1,6 +1,7 @@
 """Deterministic, read-only semantic manifests for paired Excel outputs."""
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -107,9 +108,18 @@ def _field_map(fields: Mapping[int, object]) -> dict[int, object]:
     return result
 
 
-def _style_semantics(cell: object) -> tuple[object, ...] | None:
-    style = getattr(cell, "_style", None)
-    return tuple(style) if style is not None else None
+def _style_semantics(cell: object) -> tuple[object, ...]:
+    """Resolve style-table IDs into cross-workbook semantic components."""
+    return (
+        copy(cell.font),
+        copy(cell.fill),
+        copy(cell.border),
+        copy(cell.alignment),
+        cell.number_format,
+        copy(cell.protection),
+        bool(cell.quotePrefix),
+        bool(cell.pivotButton),
+    )
 
 
 def _hyperlink_target(cell: object) -> str | None:
@@ -162,11 +172,19 @@ def validate_inserted_row(
                 _fail("inserted-row-style-mismatch", str(sheet_name), target_cell.coordinate)
             if column in _FORMULA_COLUMNS:
                 source_formula = source_cell.value
-                expected = (
-                    Translator(source_formula, origin=source_cell.coordinate).translate_formula(target_cell.coordinate)
-                    if isinstance(source_formula, str) and source_formula.startswith("=")
-                    else None
-                )
+                try:
+                    expected = (
+                        Translator(source_formula, origin=source_cell.coordinate).translate_formula(target_cell.coordinate)
+                        if isinstance(source_formula, str) and source_formula.startswith("=")
+                        else None
+                    )
+                except Exception as error:
+                    failure = MutationManifestError(
+                        "inserted-row-formula-translation-invalid",
+                        subject=str(sheet_name),
+                        field=source_cell.coordinate,
+                    )
+                    raise failure from error
                 if target_cell.value != expected:
                     _fail("inserted-row-formula-mismatch", str(sheet_name), target_cell.coordinate)
                 continue
@@ -288,9 +306,15 @@ def validate_dependent_registry_references(
         if before_keys != after_keys:
             _fail("dependent-formula-cell-set-mismatch", registry_sheet, "cells")
         for (sheet, coordinate, old), (_, _, new) in zip(before, after):
-            if old == new:
-                continue
-            expected = _expanded_registry_formula(old)
+            try:
+                expected = _expanded_registry_formula(old)
+            except Exception as error:
+                failure = MutationManifestError(
+                    "dependent-formula-tokenization-invalid",
+                    subject=sheet,
+                    field=coordinate,
+                )
+                raise failure from error
             if expected is None or new != expected:
                 _fail("dependent-formula-reference-mismatch", sheet, coordinate)
     finally:

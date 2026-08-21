@@ -170,12 +170,12 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             if not isinstance(lease, dict):
                 raise GroupRowInsertionError("excel_lease_missing", stage="lease")
             context.journal.transition(operation_id, expected_phase=phase, next_phase="native", excel_lease=lease); phase = "native"
-            original, control_manifest = manifest_for(request.source, request.sheet), manifest_for(control, request.sheet)
-            candidate_manifest = manifest_for(candidate, request.sheet, insertion_row=plan.target_row)
-            validate_control(original, control_manifest)
-            if mode == "middle_insert":
-                validate_insertion(control_manifest, candidate_manifest, plan.target_row)
-                try:
+            try:
+                original, control_manifest = manifest_for(request.source, request.sheet), manifest_for(control, request.sheet)
+                candidate_manifest = manifest_for(candidate, request.sheet, insertion_row=plan.target_row)
+                validate_control(original, control_manifest)
+                if mode == "middle_insert":
+                    validate_insertion(control_manifest, candidate_manifest, plan.target_row)
                     validate_inserted_row(
                         control,
                         candidate,
@@ -190,9 +190,6 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                         insertion_row=plan.target_row,
                         registry_sheet=request.sheet,
                     )
-                except MutationManifestError as error:
-                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
-                try:
                     validate_x14_cf_middle_insert(
                         control,
                         candidate,
@@ -200,26 +197,27 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                         insertion_row=plan.target_row,
                         format_source_row=plan.target_row - 1,
                     )
-                except OPCWorksheetX14CfInsertionOracleError as error:
-                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
-                try:
                     validate_filter_database_middle_insert(
                         control,
                         candidate,
                         sheet_name=request.sheet,
                         insertion_row=plan.target_row,
                     )
-                except OPCWorkbookFilterDatabaseInsertionOracleError as error:
-                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
-                try:
                     validate_worksheet_structure_middle_insert(
                         control,
                         candidate,
                         sheet_name=request.sheet,
                         insertion_row=plan.target_row,
                     )
-                except OPCWorksheetStructureInsertionOracleError as error:
-                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
+            except (
+                MutationManifestError,
+                OPCWorksheetX14CfInsertionOracleError,
+                OPCWorkbookFilterDatabaseInsertionOracleError,
+                OPCWorksheetStructureInsertionOracleError,
+            ) as error:
+                raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
+            except Exception as error:
+                raise GroupRowInsertionError("workbook_manifest_validation_failed", stage="validate", cause=error) from error
             if sha256(request.source) != plan.workbook_hash: raise GroupRowInsertionError("workbook_pre_hash_mismatch", stage="pre_replace")
             _fsync(candidate)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="validated", hashes={"control_hash": sha256(control), "validation_digest": candidate_manifest.digest}, excel_lease=lease); phase = "validated"

@@ -6,6 +6,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 import rns_import_server.group_row_insertion as insertion
+import rns_import_server.workbook_mutation_manifest as mutation_manifest
 from rns_import_server.audit import sha256
 from rns_import_server.group_row_insertion import GroupRowInsertionError, GroupRowRequest, PublicationContext, publish_group_row, recover_group_row
 from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import OPCWorksheetX14CfInsertionOracleError
@@ -129,6 +130,21 @@ def test_inserted_row_gate_failure_blocks_publication_before_x14_backup_and_repl
     with pytest.raises(GroupRowInsertionError) as captured:
         publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert (captured.value.code, captured.value.stage, captured.value.cause) == (failure.code, "validate", failure)
+    assert sha256(source) == source_hash and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
+    assert "published" not in [name for name, _ in journal.calls] and journal.calls[-1][0] == "manual_repair"
+
+
+def test_malformed_source_formula_is_typed_validate_failure_without_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    book = load_workbook(source); book["Реестр РНС"]["Y5"] = '="unterminated'; book.save(source); book.close()
+    source_hash = sha256(source)
+    plan = MutationPlan("insert_before_header", 6, "book", source_hash, 1, "construction", "RU-00000000-00-2026")
+    journal = Journal(); _patch_middle_insert_pre_oracle(monkeypatch)
+    monkeypatch.setattr(insertion, "validate_inserted_row", mutation_manifest.validate_inserted_row)
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage) == ("inserted-row-formula-translation-invalid", "validate")
+    assert isinstance(captured.value.cause, MutationManifestError) and captured.value.cause.__cause__ is not None
     assert sha256(source) == source_hash and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
     assert "published" not in [name for name, _ in journal.calls] and journal.calls[-1][0] == "manual_repair"
 

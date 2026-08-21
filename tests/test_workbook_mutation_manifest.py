@@ -7,6 +7,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.formula.translate import Translator
 from openpyxl.styles import Font, PatternFill
 
+import rns_import_server.workbook_mutation_manifest as mutation_manifest
 from rns_import_server.workbook_mutation_manifest import (
     MutationManifestError,
     manifest_for,
@@ -57,6 +58,7 @@ def _gate_books(path: Path, insertion_row: int) -> tuple[Path, Path, dict[int, o
     registry.cell(source_row, 26).value = f"=Y{source_row}+1"
     dashboard["B2"] = "=SUM('Реестр РНС'!F4:F1001)"
     dashboard["C2"] = "=INDEX('Реестр РНС'!C:C,1)"
+    dashboard["D2"] = "=SUM('Реестр РНС'!F4:F1001,'Реестр РНС'!R4:R1001)"
     book.save(control); book.close()
     book = load_workbook(control); registry, dashboard = book["Реестр РНС"], book["Дашборд"]
     registry.insert_rows(insertion_row)
@@ -69,6 +71,7 @@ def _gate_books(path: Path, insertion_row: int) -> tuple[Path, Path, dict[int, o
     for column, value in fields.items(): registry.cell(insertion_row, column).value = value
     registry.cell(insertion_row, 23).hyperlink = link
     dashboard["B2"] = "=SUM('Реестр РНС'!F4:F1002)"
+    dashboard["D2"] = "=SUM('Реестр РНС'!F4:F1002,'Реестр РНС'!R4:R1002)"
     book.save(candidate); book.close()
     return control, candidate, fields, link
 
@@ -85,7 +88,6 @@ def test_inserted_row_and_dashboard_formula_gate_accepts_exact_native_semantics(
     [
         (lambda book, row: setattr(book["Реестр РНС"].cell(row, 6), "value", "untrusted"), "inserted-row-value-mismatch"),
         (lambda book, row: setattr(book["Реестр РНС"].cell(row, 25), "value", "=A1"), "inserted-row-formula-mismatch"),
-        (lambda book, row: setattr(book["Реестр РНС"].cell(row, 1), "font", Font(name="Calibri")), "inserted-row-style-mismatch"),
         (lambda book, row: setattr(book["Реестр РНС"].row_dimensions[row], "height", 13), "inserted-row-height-mismatch"),
         (lambda book, row: setattr(book["Реестр РНС"].cell(row, 23), "hyperlink", "https://example.test/untrusted"), "inserted-row-hyperlink-mismatch"),
     ],
@@ -98,9 +100,41 @@ def test_inserted_row_gate_rejects_untrusted_persisted_semantics(tmp_path: Path,
     assert captured.value.code == code
 
 
+def test_inserted_row_gate_resolves_same_style_id_across_workbooks(tmp_path: Path) -> None:
+    control, candidate, fields, link = _gate_books(tmp_path, 6)
+    book = load_workbook(control); control_style_id = book["Реестр РНС"]["A5"].style_id; book.close()
+    book = load_workbook(candidate); cell = book["Реестр РНС"]["A6"]
+    assert cell.style_id == control_style_id
+    book._fonts[cell._style.fontId] = Font(name="Same ID, different resolved font")
+    book.save(candidate); book.close()
+    book = load_workbook(candidate); assert book["Реестр РНС"]["A6"].style_id == control_style_id; book.close()
+    with pytest.raises(MutationManifestError) as captured:
+        validate_inserted_row(control, candidate, sheet_name="Реестр РНС", insertion_row=6, fields=fields, hyperlink=link)
+    assert captured.value.code == "inserted-row-style-mismatch"
+
+
 def test_dependent_formula_gate_rejects_changed_registry_token(tmp_path: Path) -> None:
     control, candidate, _fields, _link = _gate_books(tmp_path, 6)
     book = load_workbook(candidate); book["Дашборд"]["C2"] = "=INDEX('Реестр РНС'!D:D,1)"; book.save(candidate); book.close()
     with pytest.raises(MutationManifestError) as captured:
         validate_dependent_registry_references(control, candidate, insertion_row=6)
     assert captured.value.code == "dependent-formula-reference-mismatch"
+
+
+def test_dependent_formula_gate_rejects_unchanged_multi_reference_1001(tmp_path: Path) -> None:
+    control, candidate, _fields, _link = _gate_books(tmp_path, 6)
+    book = load_workbook(candidate)
+    book["Дашборд"]["D2"] = "=SUM('Реестр РНС'!F4:F1001,'Реестр РНС'!R4:R1001)"
+    book.save(candidate); book.close()
+    with pytest.raises(MutationManifestError) as captured:
+        validate_dependent_registry_references(control, candidate, insertion_row=6)
+    assert captured.value.code == "dependent-formula-reference-mismatch"
+
+
+def test_dependent_formula_tokenization_failure_is_typed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    control, candidate, _fields, _link = _gate_books(tmp_path, 6)
+    monkeypatch.setattr(mutation_manifest, "_expanded_registry_formula", lambda _formula: (_ for _ in ()).throw(ValueError("invalid token")))
+    with pytest.raises(MutationManifestError) as captured:
+        validate_dependent_registry_references(control, candidate, insertion_row=6)
+    assert captured.value.code == "dependent-formula-tokenization-invalid"
+    assert isinstance(captured.value.__cause__, ValueError)
