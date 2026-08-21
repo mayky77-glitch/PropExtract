@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.etree import ElementTree as ET
 
@@ -13,6 +14,7 @@ from rns_import_server.opc_worksheet_structure_insertion_oracle import (
     validate_worksheet_structure_middle_insert,
 )
 from rns_import_server.opc_worksheet_structure_reader import read_worksheet_structure_semantics
+import rns_import_server.opc_worksheet_structure_insertion_oracle as oracle
 
 
 SHEET = "Реестр РНС"
@@ -121,3 +123,64 @@ def test_pathlike_is_accepted_and_source_is_not_saved(tmp_path: Path) -> None:
     assert evidence.worksheet.name == SHEET
     assert (control_path.calls, candidate_path.calls) == (1, 1)
     assert sha256(SOURCE.read_bytes()).hexdigest() == before
+
+
+def _range(first: int, last: int) -> object:
+    return oracle.A1Range(f"A{first}", f"C{last}", first, last, 1, 3)
+
+
+def _structure(*, dimension: object = _range(1, 10), auto: object = _range(3, 10), merges: tuple[object, ...] = (_range(2, 2), _range(6, 6)), identity: object | None = None, other_identity: object | None = None, unrelated: str = "same") -> object:
+    target = identity or SimpleNamespace(name="Target")
+    other = other_identity or SimpleNamespace(name="Other")
+    return SimpleNamespace(worksheets=(
+        SimpleNamespace(worksheet=target, dimension=dimension, auto_filter=SimpleNamespace(reference=auto) if auto else None, merges=merges, rows="target"),
+        SimpleNamespace(worksheet=other, dimension=_range(1, 2), auto_filter=None, merges=(), rows=unrelated),
+    ))
+
+
+@pytest.mark.parametrize(("case", "row", "expected"), (
+    ("first-error", 6, ("worksheet-structure-range-mismatch", "Target", "dimension", "geometry")),
+    ("bounds-zero", 0, ("invalid-worksheet-structure-insertion-row", "Target", "insertion_row", "0")),
+    ("bounds-bool", True, ("invalid-worksheet-structure-insertion-row", "Target", "insertion_row", "True")),
+    ("bounds-max-plus-one", 1_048_577, ("invalid-worksheet-structure-insertion-row", "Target", "insertion_row", "1048577")),
+    ("auto-filter", 6, ("worksheet-structure-presence-mismatch", "Target", "autoFilter", "missing-or-extra")),
+    ("merge-order", 6, ("worksheet-structure-range-mismatch", "Target", "mergeCells", "0")),
+    ("merge-count", 6, ("worksheet-structure-count-mismatch", "Target", "mergeCells", "count")),
+    ("identity-order", 6, ("worksheet-identity-order-mismatch", "Target", "worksheets", "identity-or-order")),
+    ("unrelated", 6, ("unrelated-worksheet-structure-mismatch", "Other", "structure", "changed")),
+))
+def test_first_error_and_structure_boundary_matrix(monkeypatch: pytest.MonkeyPatch, case: str, row: int, expected: tuple[str, str, str, str]) -> None:
+    target = SimpleNamespace(name="Target")
+    other = SimpleNamespace(name="Other")
+    control = _structure(identity=target, other_identity=other)
+    candidate = _structure(dimension=_range(1, 11), auto=_range(3, 11), merges=(_range(2, 2), _range(7, 7)), identity=target, other_identity=other)
+    if case == "first-error": candidate = _structure(dimension=_range(1, 10), auto=_range(3, 11), merges=(), identity=target, other_identity=other)
+    if case == "auto-filter": candidate = _structure(dimension=_range(1, 11), auto=None, merges=(_range(2, 2), _range(7, 7)), identity=target, other_identity=other)
+    if case == "merge-order": candidate = _structure(dimension=_range(1, 11), auto=_range(3, 11), merges=(_range(7, 7), _range(2, 2)), identity=target, other_identity=other)
+    if case == "merge-count": candidate = _structure(dimension=_range(1, 11), auto=_range(3, 11), merges=(_range(2, 2),), identity=target, other_identity=other)
+    if case == "identity-order": candidate = _structure(dimension=_range(1, 11), auto=_range(3, 11), merges=(_range(2, 2), _range(7, 7)), identity=SimpleNamespace(name="Target", changed=True), other_identity=other)
+    if case == "unrelated": candidate = _structure(dimension=_range(1, 11), auto=_range(3, 11), merges=(_range(2, 2), _range(7, 7)), identity=target, other_identity=other, unrelated="changed")
+    records = iter((control, candidate))
+    monkeypatch.setattr(oracle, "read_worksheet_structure_semantics", lambda _path: next(records))
+    with pytest.raises(OPCWorksheetStructureInsertionOracleError) as captured:
+        oracle.validate_worksheet_structure_middle_insert("control", "candidate", sheet_name="Target", insertion_row=row)
+    assert captured.value.as_tuple() == expected
+
+
+@pytest.mark.parametrize("row", (1, 1_048_576))
+def test_dimension_start_and_maximum_row_are_valid_or_fail_before_mapping(monkeypatch: pytest.MonkeyPatch, row: int) -> None:
+    target = SimpleNamespace(name="Target")
+    other = SimpleNamespace(name="Other")
+    if row == 1:
+        control = _structure(dimension=_range(1, 10), auto=None, merges=(), identity=target, other_identity=other)
+        candidate = _structure(dimension=_range(2, 11), auto=None, merges=(), identity=target, other_identity=other)
+        records = iter((control, candidate))
+        monkeypatch.setattr(oracle, "read_worksheet_structure_semantics", lambda _path: next(records))
+        assert oracle.validate_worksheet_structure_middle_insert("control", "candidate", sheet_name="Target", insertion_row=row).insertion_row == 1
+        return
+    control = _structure(dimension=_range(1, 1_048_576), auto=None, merges=(), identity=target, other_identity=other)
+    records = iter((control, control))
+    monkeypatch.setattr(oracle, "read_worksheet_structure_semantics", lambda _path: next(records))
+    with pytest.raises(OPCWorksheetStructureInsertionOracleError) as captured:
+        oracle.validate_worksheet_structure_middle_insert("control", "candidate", sheet_name="Target", insertion_row=row)
+    assert captured.value.as_tuple() == ("invalid-worksheet-structure-insertion-row", "Target", "insertion_row", "1048576")

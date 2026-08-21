@@ -68,16 +68,33 @@ def _patch_middle_insert_pre_oracle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(insertion, "validate_worksheet_structure_middle_insert", lambda *_args, **_kwargs: None)
 
 
-def test_middle_insert_calls_x14_oracle_after_generic_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_middle_insert_validators_precede_fsync_backup_and_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("insert_before_header", 6, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal = Journal(); _patch_middle_insert_pre_oracle(monkeypatch)
     calls = []
-    monkeypatch.setattr(insertion, "validate_x14_cf_middle_insert", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(insertion, "validate_control", lambda *_: calls.append("generic-control"))
+    monkeypatch.setattr(insertion, "validate_insertion", lambda *_: calls.append("generic-insertion"))
+    x14_call = []
+    monkeypatch.setattr(insertion, "validate_x14_cf_middle_insert", lambda *args, **kwargs: (calls.append("x14"), x14_call.append((args, kwargs))))
+    monkeypatch.setattr(insertion, "validate_filter_database_middle_insert", lambda *_args, **_kwargs: calls.append("filter"))
+    monkeypatch.setattr(insertion, "validate_worksheet_structure_middle_insert", lambda *_args, **_kwargs: calls.append("structure"))
+    fsync = insertion._fsync
+    def spy_fsync(path):
+        if path.name == "candidate.xlsx": calls.append("fsync")
+        if path.name == "backup.xlsx": calls.append("backup")
+        fsync(path)
+    monkeypatch.setattr(insertion, "_fsync", spy_fsync)
+    replace = insertion.os.replace
+    def spy_replace(source, destination):
+        calls.append("replace")
+        replace(source, destination)
+    monkeypatch.setattr(insertion.os, "replace", spy_replace)
     result = publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert result["published"] is True and output.exists()
-    assert len(calls) == 1
-    (control, candidate), kwargs = calls[0]
+    assert calls[calls.index("generic-control"):] == ["generic-control", "generic-insertion", "x14", "filter", "structure", "fsync", "backup", "replace"]
+    assert len(x14_call) == 1
+    (control, candidate), kwargs = x14_call[0]
     assert (control.name, candidate.name, control.parent == candidate.parent) == ("control.xlsx", "candidate.xlsx", True)
     assert kwargs == {"sheet_name": "Реестр РНС", "insertion_row": 6, "format_source_row": 5}
 

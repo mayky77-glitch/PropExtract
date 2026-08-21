@@ -14,6 +14,9 @@ from .opc_worksheet_structure_reader import (
 )
 
 
+_MAX_ROW = 1_048_576
+
+
 __all__ = (
     "OPCWorksheetStructureInsertionOracleError",
     "WorksheetStructureMiddleInsertEvidence",
@@ -89,6 +92,10 @@ def _geometry(reference: A1Range) -> tuple[int, int, int, int]:
     return (reference.min_row, reference.min_column, reference.max_row, reference.max_column)
 
 
+def _would_overflow(reference: A1Range, insertion_row: int) -> bool:
+    return reference.max_row >= insertion_row and reference.max_row == _MAX_ROW
+
+
 def _same_workbook_structure(
     control: WorkbookWorksheetStructureSemantics,
     candidate: WorkbookWorksheetStructureSemantics,
@@ -126,8 +133,8 @@ def validate_worksheet_structure_middle_insert(
     Package access is delegated exclusively to the accepted immutable worksheet
     structure reader; this oracle neither mutates nor saves either package.
     """
-    if isinstance(insertion_row, bool) or not isinstance(insertion_row, int) or not 2 <= insertion_row <= 1_048_576:
-        _fail("invalid-worksheet-structure-insertion-row", str(sheet_name), "insertion_row", type(insertion_row).__name__)
+    if isinstance(insertion_row, bool) or not isinstance(insertion_row, int) or not 1 <= insertion_row <= _MAX_ROW:
+        _fail("invalid-worksheet-structure-insertion-row", str(sheet_name), "insertion_row", str(insertion_row))
     before_all = _semantics(control, sheet_name=sheet_name, role="control")
     after_all = _semantics(candidate, sheet_name=sheet_name, role="candidate")
     _same_workbook_structure(before_all, after_all, sheet_name=sheet_name)
@@ -137,7 +144,12 @@ def validate_worksheet_structure_middle_insert(
         _fail("worksheet-identity-order-mismatch", sheet_name, "worksheet", "identity")
     if before.dimension is None or after.dimension is None:
         _fail("worksheet-structure-presence-mismatch", sheet_name, "dimension", "missing-or-extra")
-    if not before.dimension.min_row < insertion_row <= before.dimension.max_row:
+    if not before.dimension.min_row <= insertion_row <= before.dimension.max_row:
+        _fail("invalid-worksheet-structure-insertion-row", sheet_name, "insertion_row", str(insertion_row))
+    references = (before.dimension, *before.merges)
+    if before.auto_filter is not None:
+        references += (before.auto_filter.reference,)
+    if any(_would_overflow(reference, insertion_row) for reference in references):
         _fail("invalid-worksheet-structure-insertion-row", sheet_name, "insertion_row", str(insertion_row))
     _mapped_optional(before.dimension, after.dimension, sheet_name=sheet_name, field="dimension", insertion_row=insertion_row)
     _mapped_optional(

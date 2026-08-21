@@ -52,3 +52,4 @@ No native Excel mutation, LibreOffice publication, UI or end-to-end success clai
 - Added the immutable, read-only `validate_worksheet_structure_middle_insert` oracle and wired it after generic, X14 and `_FilterDatabase` validation, before `fsync` and every publication side effect.
 - The acceptance tests prove real-source 6/10/104 geometry, five row-6 merge shifts, typed mismatch/bounds errors, `PathLike` handling, source SHA preservation, and publication ordering/no-output/no-backup on failure.
 - The source workbook was read only; its SHA-256 remained `2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`.
+- P6 remediation permits an insertion at the first dimension row, rejects row-overflow before geometry comparison, and records compact first-error plus validator-to-publication ordering evidence.
