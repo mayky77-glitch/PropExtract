@@ -142,14 +142,14 @@ def test_ancestor_symlink_and_post_open_final_path_replacement_fail_closed(monke
     root = tmp_path / "PropExtract"
     outside = tmp_path / "outside.jsonl"
     outside.write_text("outside", encoding="utf-8")
-    original_write = operation_log._write_with_rollback
+    original_replace = operation_log._atomic_replace
 
-    def replace_after_write(descriptor: int, prior_size: int, line: bytes) -> None:
-        original_write(descriptor, prior_size, line)
+    def replace_after_write(descriptor: int, filename: str, data: bytes) -> None:
+        original_replace(descriptor, filename, data)
         log_path(root).unlink()
         log_path(root).symlink_to(outside)
 
-    monkeypatch.setattr(operation_log, "_write_with_rollback", replace_after_write)
+    monkeypatch.setattr(operation_log, "_atomic_replace", replace_after_write)
     assert append(root).as_dict() == {"operation_id": OPERATION_ID, "log_saved": False, "error": "technical_log_unavailable"}
     assert outside.read_text(encoding="utf-8") == "outside"
 
@@ -168,7 +168,7 @@ def test_partial_write_rolls_back_and_retry_keeps_jsonl_valid(monkeypatch, tmp_p
 
     monkeypatch.setattr(operation_log.os, "write", partial_then_fail)
     assert append(root).log_saved is False
-    assert log_path(root).read_bytes() == b""
+    assert not log_path(root).exists()
     monkeypatch.setattr(operation_log.os, "write", original_write)
     assert append(root).log_saved is True
     assert json.loads(log_path(root).read_text(encoding="utf-8"))["schema"] == "operation-private-log-v1"
@@ -182,6 +182,77 @@ def test_preexisting_partial_jsonl_line_fails_without_modifying_it(tmp_path: Pat
     os.chmod(target, 0o600)
     assert append(root).log_saved is False
     assert target.read_bytes() == b'{"schema":"operation-private-log-v1"'
+
+
+@pytest.mark.parametrize("timestamp", ["2026-08-22T00:00:00+00:00", "2026-08-22 00:00:00Z", "2026-8-22T00:00:00Z", "2026-08-22T00:00:00.000Z", "password=secret"])
+def test_noncanonical_or_sensitive_timestamps_reject_before_write(tmp_path: Path, timestamp: str):
+    root = tmp_path / "PropExtract"
+    receipt = operation_log.append_operation_log(root, OPERATION_ID, event(), recorded_at=timestamp, sequence=1)
+    assert receipt.as_dict() == {"operation_id": OPERATION_ID, "log_saved": False, "error": "technical_log_unavailable"}
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("payload", [
+    b'{"secret":"password","value":NaN}\n',
+    b'{"ocr_text":"raw ocr","report":{"payload":"private"}}\n',
+])
+def test_existing_nonfinite_or_arbitrary_json_mapping_fails_without_append(tmp_path: Path, payload: bytes):
+    root = tmp_path / "PropExtract"
+    target = log_path(root)
+    target.parent.mkdir(parents=True, mode=0o700)
+    target.write_bytes(payload)
+    os.chmod(target, 0o600)
+    assert append(root).log_saved is False
+    assert target.read_bytes() == payload
+
+
+def test_missing_hardening_capabilities_return_typed_receipt(monkeypatch, tmp_path: Path):
+    monkeypatch.delattr(operation_log.os, "O_DIRECTORY", raising=False)
+    assert append(tmp_path / "no-directory").error == "technical_log_unavailable"
+    monkeypatch.undo()
+    monkeypatch.delattr(operation_log.os, "O_NOFOLLOW", raising=False)
+    assert append(tmp_path / "no-follow").error == "technical_log_unavailable"
+    monkeypatch.undo()
+    monkeypatch.setattr(operation_log, "fcntl", None)
+    assert append(tmp_path / "no-lock").error == "technical_log_unavailable"
+
+
+def test_created_data_root_parent_fsync_failure_is_typed(monkeypatch, tmp_path: Path):
+    root = tmp_path / "PropExtract"
+    original_fsync = operation_log.os.fsync
+    calls = 0
+
+    def fail_after_file_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise OSError("data-root parent fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(operation_log.os, "fsync", fail_after_file_fsync)
+    assert append(root).as_dict() == {"operation_id": OPERATION_ID, "log_saved": False, "error": "technical_log_unavailable"}
+    assert calls >= 3
+
+
+def test_atomic_replace_leaves_old_complete_jsonl_on_partial_write_and_cleanup_failure(monkeypatch, tmp_path: Path):
+    root = tmp_path / "PropExtract"
+    assert append(root).log_saved is True
+    before = log_path(root).read_bytes()
+    original_write = operation_log.os.write
+    calls = 0
+
+    def partial_then_fail(descriptor: int, data: bytes) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_write(descriptor, data[:10])
+        raise OSError("partial temp write")
+
+    monkeypatch.setattr(operation_log.os, "write", partial_then_fail)
+    monkeypatch.setattr(operation_log.os, "unlink", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("cleanup failure")))
+    assert append(root).log_saved is False
+    assert log_path(root).read_bytes() == before
+    assert json.loads(before.decode("utf-8"))["schema"] == "operation-private-log-v1"
 
 
 def test_secure_write_and_parent_fsync_failures_return_only_typed_receipt(monkeypatch, tmp_path: Path):
