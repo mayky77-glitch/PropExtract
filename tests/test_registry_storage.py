@@ -106,7 +106,7 @@ def test_v0_migration_keeps_recoverable_backup_and_newer_schema_fails_closed(tmp
     finally:
         migrated.close()
     newer = RegistryStorage(path)
-    newer.connection.execute("UPDATE registry_meta SET schema_version=5")
+    newer.connection.execute("UPDATE registry_meta SET schema_version=6")
     newer.close()
     with pytest.raises(RegistrySchemaError):
         RegistryStorage(path)
@@ -125,6 +125,30 @@ def test_v3_to_v4_preserves_legacy_journal_without_inventing_contract(tmp_path: 
     try:
         assert migrated.connection.execute("SELECT workbook_contract_id FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()[0] is None
         assert migrated.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workbook_finalization_snapshots'").fetchone()
+        assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
+    finally:
+        migrated.close()
+
+
+def test_v4_to_v5_adds_action_schema_without_inventing_authority_or_receipts(tmp_path: Path) -> None:
+    runtime = RegistryStorage.bootstrap(tmp_path)
+    path = runtime.path
+    operation_id = _journal_operation(runtime, "v4")
+    runtime.connection.execute("DROP TRIGGER new_row_action_history_immutable_update")
+    runtime.connection.execute("DROP TRIGGER new_row_action_history_immutable_delete")
+    runtime.connection.execute("DROP TABLE new_row_action_history")
+    runtime.connection.execute("DROP TABLE new_row_pending_actions")
+    runtime.connection.execute("ALTER TABLE workbook_operation_journal DROP COLUMN report_snapshot_digest")
+    runtime.connection.execute("UPDATE registry_meta SET schema_version=4")
+    runtime.close()
+    migrated = RegistryStorage(path)
+    try:
+        journal = migrated.connection.execute(
+            "SELECT history_finalized, report_snapshot_digest FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        assert journal is not None and tuple(journal) == (0, None)
+        assert migrated.connection.execute("SELECT COUNT(*) FROM new_row_pending_actions").fetchone()[0] == 0
+        assert migrated.connection.execute("SELECT COUNT(*) FROM new_row_action_history").fetchone()[0] == 0
         assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
     finally:
         migrated.close()
