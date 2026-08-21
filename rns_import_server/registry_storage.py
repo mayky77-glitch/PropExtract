@@ -27,8 +27,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 4
-SEED_REVISION = "construction-registry-v4"
+SCHEMA_VERSION = 5
+SEED_REVISION = "construction-registry-v5"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -91,6 +91,14 @@ _V2_JOURNAL_COLUMNS = frozenset({
 _V3_JOURNAL_COLUMNS = frozenset({"excel_adapter_pid", "excel_adapter_started_at"})
 _V4_JOURNAL_COLUMNS = frozenset({"workbook_contract_id"})
 _V4_SNAPSHOT_COLUMNS = frozenset({"operation_id", "snapshot_version", "canonical_payload", "digest", "created_at"})
+_V5_JOURNAL_COLUMNS = frozenset({"report_snapshot_digest"})
+_V5_PENDING_ACTION_COLUMNS = frozenset({
+    "action_id", "job_id", "construction_id", "workbook_contract_id", "target_identity", "target_path",
+    "capability_digest", "state", "created_at", "updated_at",
+})
+_V5_ACTION_HISTORY_COLUMNS = frozenset({
+    "action_id", "event_version", "event_type", "status", "target_row", "post_hash", "digest", "created_at",
+})
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 _LEGACY_LEASE_OWNERSHIP_FAILURE_CODE = "legacy_excel_lease_ownership_missing"
 
@@ -273,7 +281,7 @@ class RegistryStorage:
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, 4, SCHEMA_VERSION}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         self._validate_schema(version)
         if version < SCHEMA_VERSION:
@@ -300,9 +308,14 @@ class RegistryStorage:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS
         elif version == 3:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS
-        elif version == SCHEMA_VERSION:
+        elif version == 4:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS
             required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
+        elif version == SCHEMA_VERSION:
+            required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS | _V5_JOURNAL_COLUMNS
+            required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
+            required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
+            required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -455,6 +468,7 @@ class RegistryStorage:
                     history_finalized_at TEXT,
                     report_finalized INTEGER NOT NULL DEFAULT 0 CHECK (report_finalized IN (0, 1)),
                     report_finalized_at TEXT,
+                    report_snapshot_digest TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     staged_at TEXT,
@@ -470,6 +484,32 @@ class RegistryStorage:
                     digest TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE new_row_pending_actions (
+                    action_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE RESTRICT,
+                    workbook_contract_id TEXT NOT NULL,
+                    target_identity TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    capability_digest TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'publishing', 'consumed')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE new_row_action_history (
+                    action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
+                    event_version INTEGER NOT NULL CHECK (event_version = 1),
+                    event_type TEXT NOT NULL CHECK (event_type = 'new_row'),
+                    status TEXT NOT NULL CHECK (status = 'published'),
+                    target_row INTEGER NOT NULL CHECK (target_row >= 2),
+                    post_hash TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TRIGGER new_row_action_history_immutable_update
+                BEFORE UPDATE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END;
+                CREATE TRIGGER new_row_action_history_immutable_delete
+                BEFORE DELETE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END;
                 CREATE INDEX constructions_status_name_idx ON constructions(status, normalized_name);
                 CREATE INDEX construction_bindings_construction_idx ON construction_bindings(construction_id);
                 CREATE INDEX journal_phase_idx ON workbook_operation_journal(phase, updated_at);
@@ -485,7 +525,7 @@ class RegistryStorage:
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1, 2, 3}:
+        if version not in {0, 1, 2, 3, 4}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
@@ -513,6 +553,10 @@ class RegistryStorage:
                 # Legacy rows are historical evidence.  v4 deliberately does
                 # not fabricate a contract for them.
                 connection.execute("ALTER TABLE workbook_operation_journal ADD COLUMN workbook_contract_id TEXT")
+            if "report_snapshot_digest" not in columns:
+                # v5 reserves report authority without creating any report
+                # receipt or guessing a digest for legacy evidence.
+                connection.execute("ALTER TABLE workbook_operation_journal ADD COLUMN report_snapshot_digest TEXT")
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS workbook_finalization_snapshots (
                     operation_id TEXT PRIMARY KEY REFERENCES workbook_operation_journal(operation_id) ON DELETE RESTRICT,
@@ -521,6 +565,40 @@ class RegistryStorage:
                     digest TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS new_row_pending_actions (
+                    action_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE RESTRICT,
+                    workbook_contract_id TEXT NOT NULL,
+                    target_identity TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    capability_digest TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'publishing', 'consumed')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS new_row_action_history (
+                    action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
+                    event_version INTEGER NOT NULL CHECK (event_version = 1),
+                    event_type TEXT NOT NULL CHECK (event_type = 'new_row'),
+                    status TEXT NOT NULL CHECK (status = 'published'),
+                    target_row INTEGER NOT NULL CHECK (target_row >= 2),
+                    post_hash TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS new_row_action_history_immutable_update "
+                "BEFORE UPDATE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS new_row_action_history_immutable_delete "
+                "BEFORE DELETE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END"
             )
             for flag in ("capability", "binding", "history", "report"):
                 column = f"{flag}_finalized_at"
