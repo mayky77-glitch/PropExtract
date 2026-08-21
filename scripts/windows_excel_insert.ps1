@@ -7,26 +7,60 @@ if ($data.mutation_mode -cnotin @('middle_insert', 'blank_fill')) {
     [Console]::Error.WriteLine('native_mutation_mode_invalid')
     exit 1
 }
+
+function Write-DurableUtf8NoBom([string]$Path, [string]$Content) {
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        $bytes = $encoding.GetBytes($Content)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally { $stream.Dispose() }
+}
+
 $excel = $null
 $control = $null
 $candidate = $null
+$success = $false
 try {
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.EnableEvents = $false
     $excel.AskToUpdateLinks = $false
-    # Lease precedes Workbooks.Open. The Python parent validates this exact
-    # nonce/PID/HWND record and creates the ACK; no workbook is open yet.
-    $lease = @{ operation_id=$data.operation_id; owner_nonce=$data.owner_nonce; pair_nonce=$data.pair_nonce; excel_adapter='com'; excel_pid=$PID; excel_hwnd=[int64]$excel.Hwnd; excel_process_started_at=(Get-Date).ToUniversalTime().ToString('o'); excel_build=[string]$excel.Build }
+
+    # Complete, exact-key, BOM-free and durable lease before any Workbooks.Open.
+    $adapter = Get-Process -Id $PID -ErrorAction Stop
+    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class LeaseWindow { [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid); }' -ErrorAction Stop
+    [uint32]$excelPid = 0
+    [LeaseWindow]::GetWindowThreadProcessId([IntPtr]$excel.Hwnd, [ref]$excelPid) | Out-Null
+    if ($excelPid -le 0) { throw 'excel_lease_hwnd_pid_missing' }
+    $excelProcess = Get-Process -Id $excelPid -ErrorAction Stop
+    $lease = [ordered]@{
+        operation_id = [string]$data.operation_id
+        owner_id = [string]$data.owner_nonce
+        pair_nonce = [string]$data.pair_nonce
+        adapter_type = 'com'
+        adapter_image = ([string]$adapter.ProcessName + '.exe')
+        adapter_pid = [int]$PID
+        adapter_started_at = $adapter.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        excel_image = 'EXCEL.EXE'
+        excel_pid = [int]$excelPid
+        excel_hwnd = [int64]$excel.Hwnd
+        excel_process_started_at = $excelProcess.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        excel_build = [string]$excel.Build
+    }
     $temporary = "$($data.lease_file).tmp.$PID"
-    $lease | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 -LiteralPath $temporary
-    Move-Item -Force -LiteralPath $temporary -Destination $data.lease_file
-    $deadline = (Get-Date).AddSeconds(20)
-    do { Start-Sleep -Milliseconds 50 } until ((Test-Path -LiteralPath $data.ack_file) -or (Get-Date) -gt $deadline)
-    if (-not (Test-Path -LiteralPath $data.ack_file)) { throw 'excel_lease_ack_missing' }
-    $ack = Get-Content -Raw -LiteralPath $data.ack_file | ConvertFrom-Json
-    if ($ack.operation_id -ne $data.operation_id -or $ack.owner_nonce -ne $data.owner_nonce -or $ack.pair_nonce -ne $data.pair_nonce) { throw 'excel_lease_ack_mismatch' }
+    Write-DurableUtf8NoBom $temporary ($lease | ConvertTo-Json -Compress)
+    [System.IO.File]::Move($temporary, [string]$data.lease_file)
+
+    # The only permission is one parent stdin message. ACK is audit-only and
+    # intentionally never read or polled by this helper.
+    $permission = [Console]::In.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($permission)) { throw 'excel_open_permission_missing' }
+    $command = $permission | ConvertFrom-Json
+    if ($command.command -cne 'open') { throw 'excel_open_not_granted' }
+
     $control = $excel.Workbooks.Open($data.control, 0, $false)
     $excel.CalculateFullRebuild()
     $control.Save()
@@ -43,14 +77,17 @@ try {
     $candidate.Save()
     $candidate.Close($true)
     $candidate = $null
-    @{ status = 'ok'; excel_build = [string]$excel.Build } | ConvertTo-Json -Compress
+    $success = $true
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     exit 1
 }
 finally {
-    if ($control) { $control.Close($false) }
-    if ($candidate) { $candidate.Close($false) }
-    if ($excel) { $excel.Quit() }
+    if ($control) { $control.Close($false); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($control) }
+    if ($candidate) { $candidate.Close($false); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($candidate) }
+    if ($excel) { $excel.Quit(); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($excel) }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
 }
+if ($success) { @{ status = 'ok' } | ConvertTo-Json -Compress }

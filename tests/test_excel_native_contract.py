@@ -6,11 +6,16 @@ import pytest
 from rns_import_server.excel_native import NativeExcelError, NativeInsertRequest, native_excel_available, run_native_insert
 
 
+class Journal:
+    def transition(self, *args, **kwargs):
+        raise AssertionError("safe negative path must not use journal")
+
+
 def test_hosted_non_windows_is_a_typed_safe_negative_path(tmp_path: Path) -> None:
     request = NativeInsertRequest("op", "owner", "pair", tmp_path / "control.xlsx", tmp_path / "candidate.xlsx", 6, tmp_path / "lease.json", tmp_path / "ack.json", "Реестр РНС", {}, None, "middle_insert")
     if not native_excel_available():
         with pytest.raises(NativeExcelError, match="excel_required_for_middle_insert"):
-            run_native_insert(request, script=tmp_path / "helper.ps1")
+            run_native_insert(request, tmp_path / "helper.ps1", Journal())
 
 
 def test_native_request_carries_pair_and_lease_paths(tmp_path: Path) -> None:
@@ -23,7 +28,7 @@ def test_native_request_carries_pair_and_lease_paths(tmp_path: Path) -> None:
 def test_invalid_native_mutation_mode_fails_before_request_file_or_helper_launch(tmp_path: Path) -> None:
     request = NativeInsertRequest("op", "owner", "pair", tmp_path / "control.xlsx", tmp_path / "candidate.xlsx", 10, tmp_path / "ops" / "lease.json", tmp_path / "ops" / "ack.json", "Реестр РНС", {}, None, "wrong")
     with pytest.raises(NativeExcelError) as captured:
-        run_native_insert(request, script=tmp_path / "helper.ps1")
+        run_native_insert(request, tmp_path / "helper.ps1", Journal())
     assert (captured.value.code, captured.value.stage) == ("native_mutation_mode_invalid", "pre_open")
     assert not (tmp_path / "ops").exists()
 
@@ -36,3 +41,20 @@ def test_powershell_rejects_noncanonical_mode_before_com_and_has_one_middle_inse
     assert script.index(guard) < script.index("New-Object -ComObject Excel.Application")
     assert "if ($data.mutation_mode -ceq 'middle_insert')" in script
     assert script.count(".Insert(-4121, 0)") == 1
+
+
+def test_helper_lease_precedes_open_and_uses_stdin_not_ack_polling() -> None:
+    script = (Path(__file__).parents[1] / "scripts" / "windows_excel_insert.ps1").read_text(encoding="utf-8")
+    assert script.index("Write-DurableUtf8NoBom $temporary") < script.index("$control = $excel.Workbooks.Open")
+    assert "[Console]::In.ReadLine()" in script
+    assert "ack_file" not in script and "Task.Run" not in script and "taskkill /T" not in script
+    assert script.index("$excel.Quit()") < script.index("if ($success)")
+
+
+def test_adapter_contains_ordered_native_permission_and_bounded_private_logs() -> None:
+    adapter = (Path(__file__).parents[1] / "rns_import_server" / "excel_native.py").read_text(encoding="utf-8")
+    assert adapter.index("snapshot = _snapshot_excel_pids()") < adapter.index("subprocess.Popen(")
+    start = adapter.index("lease = _read_lease")
+    assert start < adapter.index("verify_excel_process_lease", start) < adapter.index("journal.transition", start) < adapter.index("_audit_ack", start) < adapter.index('_send(process, "open")', start)
+    assert "_LOG_LIMIT = 64 * 1024" in adapter and "threading.Thread(target=_drain" in adapter
+    assert "cleanup_excel_process" in adapter and "durable_phase" in adapter
