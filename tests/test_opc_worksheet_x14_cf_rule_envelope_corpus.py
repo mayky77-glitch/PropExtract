@@ -261,6 +261,40 @@ def test_sqref_before_and_between_rules_is_ignored_without_changing_projection(t
     ]
 
 
+@pytest.mark.parametrize("before, between", [
+    ("", ""),
+    ('<xm:sqref bad="x">malformed</xm:sqref>', ""),
+    ("", '<xm:sqref/><xm:sqref>duplicate</xm:sqref>'),
+    ('<xm:sqref/>', '<xm:sqref bad="x">misplaced</xm:sqref>'),
+])
+def test_sqref_positions_preserve_earliest_invalid_rule_error(tmp_path, before, between):
+    missing_id = rule(priority="2").replace(' id="' + GUID + '"', "")
+    baseline = '<x14:conditionalFormatting>' + rule(priority="0") + missing_id + '</x14:conditionalFormatting>'
+    actual = '<x14:conditionalFormatting>' + before + rule(priority="0") + between + missing_id + '</x14:conditionalFormatting>'
+    expected = error(corpus(tmp_path / "sqref-invalid-baseline.xlsx", first=extension(baseline)))
+    assert expected == ("invalid-x14-cf-priority", PART, "priority", "0")
+    assert error(corpus(tmp_path / "sqref-invalid-actual.xlsx", first=extension(actual))) == expected
+
+
+def test_sqref_between_rules_preserves_earlier_missing_attribute_error(tmp_path):
+    missing_id = rule(priority="1").replace(' id="' + GUID + '"', "")
+    baseline = '<x14:conditionalFormatting>' + missing_id + rule(priority="0") + '</x14:conditionalFormatting>'
+    actual = ('<x14:conditionalFormatting><xm:sqref/><xm:sqref bad="x">reordered</xm:sqref>'
+              + missing_id + '<xm:sqref>between</xm:sqref>' + rule(priority="0")
+              + '</x14:conditionalFormatting>')
+    expected = error(corpus(tmp_path / "sqref-missing-baseline.xlsx", first=extension(baseline)))
+    assert expected == ("invalid-x14-cf-cardinality", PART, "attribute", "id")
+    assert error(corpus(tmp_path / "sqref-missing-actual.xlsx", first=extension(actual))) == expected
+
+
+def test_foreign_direct_child_precedes_combined_x2a_rule_faults(tmp_path):
+    combined = ('<x14:conditionalFormatting><x14:cfRule type="expression" priority="0">'
+                '<xm:f>A1</xm:f><x14:dxf/><foreign/></x14:cfRule></x14:conditionalFormatting>')
+    assert error(corpus(tmp_path / "x1-x2a-precedence.xlsx", first=extension(combined))) == (
+        "unknown-x14-cf-child", PART, "tag", "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}foreign"
+    )
+
+
 def test_x1_failure_precedes_x2a_and_second_sheet_failure_is_atomic(tmp_path):
     x1_first = '<x14:conditionalFormatting><x14:cfRule/></x14:conditionalFormatting>'
     assert error(corpus(tmp_path / "x1-first.xlsx", first=extension(x1_first))) == (
