@@ -383,11 +383,12 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 raise GroupRowInsertionError("group_row_structure_unsafe", stage="preflight")
             native = NativeInsertRequest(operation_id, owner, pair, control, candidate, plan.target_row,
                 directory / "excel-lease.json", directory / "lease-ack.json", request.sheet, request.fields, request.hyperlink, mode)
-            result = run_native_insert(native, script=native_script)
-            lease = result.get("lease")
-            if not isinstance(lease, dict):
-                raise GroupRowInsertionError("excel_lease_missing", stage="lease")
-            context.journal.transition(operation_id, expected_phase=phase, next_phase="native", excel_lease=lease); phase = "native"
+            # Adapter owns the one durable staged -> native CAS.  Calling it a
+            # second time here would manufacture authority after COM begins.
+            result = run_native_insert(native, native_script, context.journal)
+            if result.get("durable_phase") != "native":
+                raise GroupRowInsertionError("excel_native_phase_invalid", stage="native")
+            phase = "native"
             try:
                 original, control_manifest = manifest_for(request.source, request.sheet), manifest_for(control, request.sheet)
                 candidate_manifest = manifest_for(candidate, request.sheet, insertion_row=plan.target_row)
@@ -446,7 +447,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 raise GroupRowInsertionError("workbook_manifest_validation_failed", stage="validate", cause=error) from error
             if sha256(request.source) != plan.workbook_hash: raise GroupRowInsertionError("workbook_pre_hash_mismatch", stage="pre_replace")
             _fsync(candidate)
-            context.journal.transition(operation_id, expected_phase=phase, next_phase="validated", hashes={"control_hash": sha256(control), "validation_digest": candidate_manifest.digest}, excel_lease=lease); phase = "validated"
+            context.journal.transition(operation_id, expected_phase=phase, next_phase="validated", hashes={"control_hash": sha256(control), "validation_digest": candidate_manifest.digest}); phase = "validated"
             backup = directory / "backup.xlsx"; backup_hash = _copy_verified(request.source, backup)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="backup_verified", hashes={"backup_hash": backup_hash}); phase = "backup_verified"
             context.journal.record_post_hash(operation_id, expected_phase=phase, post_hash=sha256(candidate))
@@ -460,8 +461,9 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         raise
     except NativeExcelError as error:
         code = "excel_required_for_group_publication" if mode == "blank_fill" and error.code == "excel_required_for_middle_insert" else error.code
-        if created_operation: _manual_repair(context, operation_id, phase, code)
-        raise GroupRowInsertionError(code, stage=error.stage, cause=error) from error
+        durable_phase = error.durable_phase if error.durable_phase in {"staged", "native"} else phase
+        if created_operation: _manual_repair(context, operation_id, durable_phase, code)
+        raise GroupRowInsertionError(code, stage=error.stage, cause=error, cleanup=error.cleanup) from error
     except Exception as error:
         if created_operation: _manual_repair(context, operation_id, phase, "group_row_failed")
         raise GroupRowInsertionError("group_row_failed", stage=phase, cause=error) from error
