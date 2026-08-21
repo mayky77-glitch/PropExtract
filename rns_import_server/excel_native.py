@@ -259,7 +259,7 @@ def run_native_insert(request: NativeInsertRequest, script: Path, journal: _Jour
         lease = _read_lease(request, timeout); inspector = _WindowsInspector(snapshot)
         try: verify_excel_process_lease(lease, launched_adapter_pid=process.pid, inspector=inspector)
         except ExcelProcessAuthorityError as error: raise NativeExcelError(error.code, stage="lease", cause=error) from error
-        try: journal.transition(request.operation_id, expected_phase="staged", next_phase="native", excel_lease=lease.journal_fields())
+        try: journal.transition(request.operation_id, expected_phase="staged", next_phase="native", excel_lease=lease)
         except Exception as error: raise NativeExcelError("excel_native_journal_cas_failed", stage="journal", cause=error) from error
         native_committed = True
         _audit_ack(request); _send(process, "open")
