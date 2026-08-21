@@ -32,9 +32,8 @@ acceptance_commands:
   - python3 -m compileall -q rns_import_server/workbook_operation_journal.py tests/test_workbook_operation_journal.py
   - git diff --check
 knowledge_paths:
-  - knowledge/INDEX.md
   - knowledge/tasks/cgr-publication-repair-anomaly-journal-k3a0-v1.md
-  - knowledge/tasks/cgr-publication-cutover-recovery-k3a-v1.md
+  - knowledge/tasks/orda-middle-row-insertion-plan.md
 ---
 
 # Publication repair-anomaly journal K3a0
