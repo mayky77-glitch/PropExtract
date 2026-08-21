@@ -156,13 +156,37 @@ def test_sqref_is_not_projected_or_validated(tmp_path, sqref):
     assert result.worksheets[0].containers[0].rules[0].priority == 4
 
 
-def test_priority_is_worksheet_global_and_atomic(tmp_path):
+def test_repeated_priorities_across_owners_preserve_document_order(tmp_path):
     first = extension(owner(rule(priority="01")) + owner(rule(priority="+1")))
-    assert error(corpus(tmp_path / "duplicate.xlsx", first=first)) == (
-        "duplicate-x14-cf-priority", PART, "priority", "1")
+    result = read_worksheet_x14_cf_rule_envelope(corpus(tmp_path / "repeated-across-owners.xlsx", first=first))
+    assert [(item.priority, item.document_order) for group in result.worksheets[0].containers for item in group.rules] == [(1, 1), (1, 2)]
+
+
+def test_repeated_priorities_inside_owner_are_preserved(tmp_path):
+    first = extension(owner(rule(priority="1"), rule(priority="1")))
+    result = read_worksheet_x14_cf_rule_envelope(corpus(tmp_path / "repeated-inside-owner.xlsx", first=first))
+    assert [(item.priority, item.document_order) for item in result.worksheets[0].containers[0].rules] == [(1, 1), (1, 2)]
+
+
+def test_repeated_priorities_across_sheets_reset_document_order(tmp_path):
     first = extension(owner(rule(priority="1")))
     second = extension(owner(rule(priority="1")))
-    assert isinstance(read_worksheet_x14_cf_rule_envelope(corpus(tmp_path / "per-sheet.xlsx", first=first, second=second)), WorkbookX14CfRuleEnvelope)
+    result = read_worksheet_x14_cf_rule_envelope(corpus(tmp_path / "repeated-across-sheets.xlsx", first=first, second=second))
+    assert [(sheet.containers[0].rules[0].priority, sheet.containers[0].rules[0].document_order) for sheet in result.worksheets] == [(1, 1), (1, 1)]
+
+
+@pytest.mark.parametrize(("replacement", "expected"), [
+    ('id="not-a-guid"', ("invalid-x14-cf-id", "id", "not-a-guid")),
+    ('<xm:f/><x14:dxf/>', ("invalid-x14-cf-formula", "f", "text")),
+])
+def test_repeated_priority_never_masks_later_rule_fault(tmp_path, replacement, expected):
+    later = rule(priority="1")
+    if replacement.startswith("id"):
+        later = later.replace('id="{00112233-4455-6677-8899-AABBCCDDEEFF}"', replacement)
+    else:
+        later = rule(priority="1", children=replacement)
+    assert error(corpus(tmp_path / "repeated-before-fault.xlsx", first=extension(owner(rule(priority="1")) + owner(later)))) == (
+        expected[0], PART, expected[1], expected[2])
 
 
 class _CountedPath:

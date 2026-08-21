@@ -214,7 +214,7 @@ def _priority(value:str,part:CanonicalPartURI)->int:
         _rule_fail("invalid-x14-cf-priority",part,"priority",value)
     return result
 
-def _rule(rule:ET.Element,part:CanonicalPartURI,owner:X14CfContainerOwner,document_order:int,path_index:int,priorities:set[int])->X14CfRuleEnvelope:
+def _rule(rule:ET.Element,part:CanonicalPartURI,owner:X14CfContainerOwner,document_order:int,path_index:int)->X14CfRuleEnvelope:
     allowed={"type","priority","stopIfTrue","id"}
     unknown=sorted(set(rule.attrib)-allowed)
     if unknown:_rule_fail("unknown-x14-cf-attribute",part,"attribute",unknown[0])
@@ -223,7 +223,6 @@ def _rule(rule:ET.Element,part:CanonicalPartURI,owner:X14CfContainerOwner,docume
     kind=rule.attrib["type"]
     if kind!="expression":_rule_fail("unsupported-x14-cf-rule-type",part,"type",kind)
     priority=_priority(rule.attrib["priority"],part)
-    if priority in priorities:_rule_fail("duplicate-x14-cf-priority",part,"priority",str(priority))
     stop=rule.attrib.get("stopIfTrue")
     if stop is None: stop_value=None
     elif stop in {"0","false"}: stop_value=False
@@ -250,19 +249,18 @@ def _rule(rule:ET.Element,part:CanonicalPartURI,owner:X14CfContainerOwner,docume
             if _nonwhite(dxf.tail):_rule_fail("invalid-x14-cf-dxf",part,"dxf","tail")
     if formula is None:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","f")
     if dxf is None:_rule_fail("invalid-x14-cf-cardinality",part,"cfRule","dxf")
-    priorities.add(priority)
     return X14CfRuleEnvelope(f"{owner.owner_path}/cfRule[{path_index}]",document_order,kind,priority,stop_value,rule_id,formula.text,True)
 
 def read_worksheet_x14_cf_rule_envelope(package_path:os.PathLike[str]|str)->WorkbookX14CfRuleEnvelope:
     """Project X2a rule envelopes after the shared, complete X1 owner gate."""
     accepted=_accepted(_path(package_path)); worksheets=[]
     for sheet,part,owners in accepted:
-        priorities:set[int]=set(); rule_order=0; projected=[]
+        rule_order=0; projected=[]
         for owner,node in owners:
             rules=[]
             for path_index,child in enumerate((item for item in node if item.tag==_RULE),1):
                 if child.tag==_RULE:
-                    rule_order+=1; rules.append(_rule(child,part,owner,rule_order,path_index,priorities))
+                    rule_order+=1; rules.append(_rule(child,part,owner,rule_order,path_index))
             projected.append(X14CfOwnerRuleEnvelope(owner,tuple(rules)))
         worksheets.append(WorksheetX14CfRuleEnvelope(sheet,tuple(projected)))
     return WorkbookX14CfRuleEnvelope(tuple(worksheets))

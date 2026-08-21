@@ -205,13 +205,9 @@ def test_opposite_direction_combined_child_faults_keep_event_precedence(tmp_path
     ("2147483648", ("invalid-x14-cf-priority", "priority", "2147483648")),
     ("10000000000", ("invalid-x14-cf-priority", "priority", "10000000000")),
 ])
-def test_priority_semantics_and_numeric_uniqueness(tmp_path, priority, expected):
+def test_priority_semantics(tmp_path, priority, expected):
     assert error(corpus(tmp_path / "priority.xlsx", first=extension(owner(rule(priority=priority))))) == (
         expected[0], PART, expected[1], expected[2]
-    )
-    duplicate = extension(owner(rule(priority="01")) + owner(rule(priority="+1")))
-    assert error(corpus(tmp_path / "duplicate.xlsx", first=duplicate)) == (
-        "duplicate-x14-cf-priority", PART, "priority", "1"
     )
 
 
