@@ -1,6 +1,6 @@
 ---
 type: task
-status: in_progress
+status: awaiting_review
 work_id: cgr-workbook-inserted-row-dependent-oracle-v1
 tags: [task/implementation, feature/construction-routing, status/in_progress]
 last_verified: 2026-08-21
@@ -53,3 +53,10 @@ Real immutable evidence, SHA-256 `2a1786d5836e4c3144107704f281bc9513fcd8de979374
 Keep tests compact: one parametrized 6/10/104 inserted-row success, exact value/formula/style/height/hyperlink negatives, one dashboard bounded/whole-column success plus one changed-token failure, and one publication-order/no-side-effect regression. Run direct manifest/group tests, relevant structural/X14/filter focused tests, full pytest once, compile/diff/scope/ancestry/identity/clean, then independent P6.
 
 This Gate compares persisted semantics only. It does not perform insertion, calculate formulas, save with OpenPyXL/LibreOffice, or qualify charts/pivots/queries/native Excel/UI.
+
+## Implementation evidence
+
+- Added read-only `validate_inserted_row` and `validate_dependent_registry_references`; both fail through a stable `MutationManifestError`, wrapped by publication as `GroupRowInsertionError(stage="validate")` before X14/FilterDatabase/structure, fsync, backup or replace.
+- Direct gate tests cover all real insertion rows 6/10/104, exact Y:Z translation/style/height/request field/W-link semantics, Dashboard bounded `1001→1002` plus unchanged whole-column references, and a changed-token rejection.
+- P6 remediation makes every control formula compute its expected projection before equality, resolves styles across workbook-local ID tables into font/fill/border/alignment/number-format/protection/flags, and normalizes translation/tokenization plus all manifest validation failures at stage `validate`. Repros cover unchanged multi-reference `1001`, equal style IDs with different resolved fonts, and malformed Y formula with no fsync/backup/replace.
+- 2026-08-21: direct 25 and focused 65 passed; compile/diff green. Full suite: 1,543 passed and exactly 10 sandbox loopback-bind failures; no product failure. Real read-only projection recognized 616 formulas outside the Registry, 65 changed formula cells and exactly 108 expanded endpoints. Immutable source SHA remained `2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`.
