@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage
 
@@ -81,6 +81,88 @@ class WorkbookOperationJournal:
             "SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
         ).fetchone()
         return JournalOperation(dict(row)) if row else None
+
+    def reserve(
+        self,
+        *,
+        nonce_factory: Callable[[], tuple[str, str]],
+        operation_id: str,
+        idempotency_key: str,
+        consumer_id: str,
+        construction_id: str,
+        operation_kind: str,
+        mutation_mode: str,
+        target_identity: str,
+        sheet_identity: str,
+        template_version: str,
+        expected_generation: int,
+        intent_version: str,
+        intent_digest: str,
+        manifest_version: str,
+        manifest_digest: str,
+        operation_directory: str,
+        canonical_rns: str | None = None,
+    ) -> tuple[JournalOperation, bool]:
+        """Atomically return an existing authority or create its nonce pair once."""
+        required = {
+            "operation_id": operation_id, "idempotency_key": idempotency_key, "consumer_id": consumer_id,
+            "construction_id": construction_id, "target_identity": target_identity,
+            "sheet_identity": sheet_identity, "template_version": template_version,
+            "intent_version": intent_version, "intent_digest": intent_digest,
+            "manifest_version": manifest_version, "manifest_digest": manifest_digest,
+            "operation_directory": operation_directory,
+        }
+        if any(not isinstance(value, str) or not value for value in required.values()):
+            raise RegistryError("Journal operation требует все стабильные идентификаторы и digest")
+        if operation_kind not in {"group_provision", "new_row"}:
+            raise RegistryError("Неподдерживаемый тип workbook operation")
+        if mutation_mode not in {"bootstrap_fill", "blank_fill", "middle_insert"}:
+            raise RegistryError("Неподдерживаемый режим workbook mutation")
+        if operation_kind == "new_row" and not canonical_rns:
+            raise RegistryError("Операция новой строки требует canonical RNS")
+        immutable = {
+            **required,
+            "canonical_rns": canonical_rns,
+            "operation_kind": operation_kind,
+            "mutation_mode": mutation_mode,
+            "expected_generation": expected_generation,
+        }
+        self.storage.connection.execute("PRAGMA synchronous=FULL")
+        created = False
+        with self.storage.transaction() as connection:
+            collisions = connection.execute(
+                "SELECT * FROM workbook_operation_journal "
+                "WHERE operation_id=? OR idempotency_key=? OR consumer_id=?",
+                (operation_id, idempotency_key, consumer_id),
+            ).fetchall()
+            if collisions:
+                if (
+                    len(collisions) == 1
+                    and all(collisions[0][key] == value for key, value in immutable.items())
+                    and all(isinstance(collisions[0][key], str) and collisions[0][key] for key in ("owner_id", "pair_nonce"))
+                ):
+                    return JournalOperation(dict(collisions[0])), False
+                raise RegistryConflictError("Повтор journal operation не совпадает с исходным immutable intent")
+            if expected_generation != self.storage.generation:
+                raise RegistryConflictError("Справочник изменился до планирования операции")
+            owner_id, pair_nonce = nonce_factory()
+            if any(not isinstance(value, str) or not value for value in (owner_id, pair_nonce)):
+                raise RegistryError("Journal nonce имеет неверный формат")
+            connection.execute(
+                """INSERT INTO workbook_operation_journal(
+                   operation_id,idempotency_key,consumer_id,owner_id,pair_nonce,construction_id,canonical_rns,
+                   operation_kind,mutation_mode,target_identity,sheet_identity,template_version,expected_generation,
+                   intent_version,intent_digest,manifest_version,manifest_digest,operation_directory,phase,created_at,updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""",
+                (operation_id, idempotency_key, consumer_id, owner_id, pair_nonce, construction_id, canonical_rns,
+                 operation_kind, mutation_mode, target_identity, sheet_identity, template_version, expected_generation,
+                 intent_version, intent_digest, manifest_version, manifest_digest, operation_directory, _now(), _now()),
+            )
+            created = True
+        operation = self.get(operation_id)
+        if operation is None:
+            raise RegistryError("Journal operation не найдена после durable reservation")
+        return operation, created
 
     def create(
         self,

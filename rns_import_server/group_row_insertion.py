@@ -52,6 +52,7 @@ class GroupRowInsertionError(RuntimeError):
 
 class Journal(Protocol):
     def get(self, operation_id: str) -> object | None: ...
+    def reserve(self, *, nonce_factory: Callable[[], tuple[str, str]], **kwargs: object) -> tuple[object, bool]: ...
     def create(self, **kwargs: object) -> object: ...
     def transition(self, operation_id: str, *, expected_phase: str, next_phase: str, **kwargs: object) -> object: ...
     def record_post_hash(self, operation_id: str, *, expected_phase: str, post_hash: str) -> object: ...
@@ -261,7 +262,7 @@ def _classify_existing(
     }
 
 
-def _create(
+def _reserve(
     context: PublicationContext,
     plan: MutationPlan,
     directory: Path,
@@ -273,15 +274,16 @@ def _create(
     sheet_identity: str,
     intent_digest: str,
     manifest_digest: str,
-) -> tuple[str, str]:
-    owner, pair = str(uuid4()), str(uuid4())
-    context.journal.create(operation_id=operation_id, idempotency_key=idempotency_key, consumer_id=consumer_id, owner_id=owner,
-        pair_nonce=pair, construction_id=plan.construction_id, operation_kind="new_row", mutation_mode=mode,
+) -> tuple[object, bool]:
+    return context.journal.reserve(
+        nonce_factory=lambda: (str(uuid4()), str(uuid4())),
+        operation_id=operation_id, idempotency_key=idempotency_key, consumer_id=consumer_id,
+        construction_id=plan.construction_id, operation_kind="new_row", mutation_mode=mode,
         target_identity=context.target_identity, sheet_identity=sheet_identity, template_version=context.template_version,
         expected_generation=context.generation, intent_version=_INTENT_VERSION, intent_digest=intent_digest,
         manifest_version=_MANIFEST_VERSION, manifest_digest=manifest_digest,
-        operation_directory=str(directory), canonical_rns=plan.canonical_rns)
-    return owner, pair
+        operation_directory=str(directory), canonical_rns=plan.canonical_rns,
+    )
 
 
 def _recheck(context: PublicationContext, plan: MutationPlan, source: Path) -> MutationPlan:
@@ -349,7 +351,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 raise GroupRowInsertionError("registry_generation_stale", stage="authorize")
             plan = _recheck(context, plan, request.source)
             try:
-                owner, pair = _create(
+                stored, created_operation = _reserve(
                     context, plan, directory, mode,
                     operation_id=operation_id,
                     idempotency_key=idempotency_key,
@@ -363,13 +365,12 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 if stored is None:
                     raise GroupRowInsertionError("publication_intent_conflict", stage="recovery", cause=error) from error
                 return _classify_existing(context, stored, expected=expected, source=request.source)
-            stored = context.journal.get(operation_id)
-            if stored is None:
-                raise GroupRowInsertionError("publication_intent_conflict", stage="recovery")
-            stored_values = _operation_values(stored)
-            if stored_values.get("owner_id") != owner or stored_values.get("pair_nonce") != pair:
+            if not created_operation:
                 return _classify_existing(context, stored, expected=expected, source=request.source)
-            created_operation = True
+            stored_values = _operation_values(stored)
+            owner, pair = stored_values.get("owner_id"), stored_values.get("pair_nonce")
+            if not isinstance(owner, str) or not owner or not isinstance(pair, str) or not pair:
+                raise GroupRowInsertionError("legacy_publication_authority_invalid", stage="recovery")
             directory.mkdir(parents=True, exist_ok=False)
             control, candidate = directory / "control.xlsx", directory / "candidate.xlsx"
             staged_hash = _copy_verified(request.source, control); _copy_verified(request.source, candidate)

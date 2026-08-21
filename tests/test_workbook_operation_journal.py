@@ -28,6 +28,33 @@ def _operation(journal: WorkbookOperationJournal, storage: RegistryStorage) -> s
     ).operation_id
 
 
+def test_atomic_reservation_creates_nonce_pair_once_and_reuses_authority(tmp_path: Path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        construction = storage.list_constructions()[0]
+        calls = []
+        def nonce_factory() -> tuple[str, str]:
+            calls.append(True)
+            return "owner-1", "pair-1"
+        values = dict(
+            operation_id="operation-reserved", idempotency_key="idempotency-reserved", consumer_id="consumer-reserved",
+            construction_id=construction.id, operation_kind="new_row", mutation_mode="middle_insert",
+            target_identity="target", sheet_identity="sheet", template_version="template-v1",
+            expected_generation=storage.generation, intent_version="intent-v2", intent_digest="intent-digest",
+            manifest_version="manifest-v2", manifest_digest="manifest-digest", operation_directory="operation-dir",
+            canonical_rns="RU-00000000-00-2026",
+        )
+        first, first_created = journal.reserve(nonce_factory=nonce_factory, **values)
+        second, second_created = journal.reserve(nonce_factory=nonce_factory, **values)
+        assert (first_created, second_created, calls) == (True, False, [True])
+        assert (first["owner_id"], first["pair_nonce"], second["owner_id"], second["pair_nonce"]) == (
+            "owner-1", "pair-1", "owner-1", "pair-1",
+        )
+    finally:
+        storage.close()
+
+
 def test_journal_requires_legal_cas_phases_and_durable_hash_evidence(tmp_path: Path) -> None:
     storage = RegistryStorage.bootstrap(tmp_path)
     try:

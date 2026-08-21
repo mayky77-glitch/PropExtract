@@ -27,6 +27,13 @@ class Journal:
         return None
     def create(self, **kwargs):
         self.operation = {**kwargs, "phase": "planned"}; self.calls.append(("create", kwargs)); return object()
+    def reserve(self, *, nonce_factory, **kwargs):
+        existing = self.get(kwargs["operation_id"])
+        if existing is not None:
+            return existing, False
+        owner_id, pair_nonce = nonce_factory()
+        self.create(owner_id=owner_id, pair_nonce=pair_nonce, **kwargs)
+        return self.get(kwargs["operation_id"]), True
     def transition(self, operation_id, *, expected_phase, next_phase, **kwargs):
         assert self.phase == expected_phase; self.phase = next_phase
         if self.operation is not None:
@@ -46,13 +53,15 @@ class RacingJournal(Journal):
     def __init__(self):
         super().__init__(); self._create_lock = threading.Lock(); self._create_barrier = threading.Barrier(2); self.create_attempts = 0
 
-    def create(self, **kwargs):
+    def reserve(self, *, nonce_factory, **kwargs):
         self._create_barrier.wait(timeout=3)
         with self._create_lock:
             self.create_attempts += 1
             if self.operation is not None:
-                raise RegistryConflictError("duplicate operation")
-            return super().create(**kwargs)
+                return self.get(kwargs["operation_id"]), False
+            owner_id, pair_nonce = nonce_factory()
+            super().create(owner_id=owner_id, pair_nonce=pair_nonce, **kwargs)
+            return self.get(kwargs["operation_id"]), True
 
 
 def _book(path: Path) -> None:
@@ -155,10 +164,16 @@ def test_exact_replay_uses_planned_generation_after_independent_registry_bump(tm
     assert (replay["published"], replay["recovery"], calls, journal.operation["expected_generation"]) == (False, "re_resolve_required", ["00000000-0000-4000-8000-000000000001"], 1)
 
 
-def test_concurrent_create_loser_reloads_authority_without_native_or_manual_repair(tmp_path: Path) -> None:
+def test_concurrent_create_loser_reloads_authority_without_native_or_manual_repair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
     journal, native_started, release, calls = RacingJournal(), threading.Event(), threading.Event(), []
+    generated = []
+    def counted_uuid4():
+        value = insertion.UUID(int=len(generated) + 1)
+        generated.append(str(value))
+        return value
+    monkeypatch.setattr(insertion, "uuid4", counted_uuid4)
     def first_native(request, _script):
         calls.append((request.operation_id, request.owner_nonce, request.pair_nonce)); native_started.set()
         assert release.wait(timeout=3)
@@ -182,6 +197,7 @@ def test_concurrent_create_loser_reloads_authority_without_native_or_manual_repa
     assert [value["recovery"] for value in outcomes.values() if value["published"] is False] == ["in_progress"]
     assert len(calls) == 1 and len(tuple((tmp_path / "ops").iterdir())) == 1
     assert journal.create_attempts == 2
+    assert len(generated) == 2
     assert journal.operation["owner_id"] == calls[0][1] and journal.operation["pair_nonce"] == calls[0][2]
     assert "manual_repair" not in [name for name, _ in journal.calls]
 
