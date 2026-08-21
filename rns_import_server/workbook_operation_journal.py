@@ -268,6 +268,12 @@ class WorkbookOperationJournal:
         hashes: Mapping[str, str] | None = None,
         excel_lease: ExcelProcessLease | None = None,
     ) -> JournalOperation:
+        if next_phase == PHASE_FINALIZED:
+            # Finalization is a compound external/durable protocol.  A
+            # generic phase switch can neither prove the report bytes nor the
+            # consumed action capability, so only workbook_finalization owns
+            # this terminal CAS.
+            raise RegistryError("finalization_receipt_required")
         if next_phase not in LEGAL_TRANSITIONS.get(expected_phase, set()):
             raise JournalTransitionError(f"Недопустимый переход journal: {expected_phase} → {next_phase}")
         hashes = hashes or {}
@@ -461,7 +467,7 @@ class WorkbookOperationJournal:
         # durable construction/workbook tuple exists in the same transaction
         # as this receipt.  Keeping that proof outside the generic flag API
         # prevents an older caller from claiming the side effect happened.
-        if flag in {"binding_finalized", "history_finalized"}:
+        if flag in {"binding_finalized", "history_finalized", "report_finalized", "capability_finalized"}:
             raise RegistryError("finalization_receipt_required")
         with self.storage.transaction() as connection:
             current = connection.execute(
