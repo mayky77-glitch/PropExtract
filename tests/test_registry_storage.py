@@ -154,6 +154,25 @@ def test_v4_to_v5_adds_action_schema_without_inventing_authority_or_receipts(tmp
         migrated.close()
 
 
+def test_v6_to_v7_adds_empty_immutable_refresh_receipts_without_backfill(tmp_path: Path) -> None:
+    runtime = RegistryStorage.bootstrap(tmp_path)
+    path = runtime.path
+    runtime.connection.execute("DROP TRIGGER workbook_authority_refresh_receipts_immutable_update")
+    runtime.connection.execute("DROP TRIGGER workbook_authority_refresh_receipts_immutable_delete")
+    runtime.connection.execute("DROP TABLE workbook_authority_refresh_receipts")
+    runtime.connection.execute("UPDATE registry_meta SET schema_version=6")
+    runtime.close()
+    migrated = RegistryStorage(path)
+    try:
+        assert migrated.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 0
+        assert migrated.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'workbook_authority_refresh_receipts_immutable_%'"
+        ).fetchone()[0] == 2
+        assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
+    finally:
+        migrated.close()
+
+
 @pytest.mark.parametrize("mode", ["middle_insert", "blank_fill"])
 @pytest.mark.parametrize("phase,expected_phase", [
     ("staged", "manual_repair"), ("native", "manual_repair"), ("validated", "manual_repair"),
