@@ -62,8 +62,15 @@ def _finalized_operation(journal: WorkbookOperationJournal, storage: RegistrySto
     _authority(journal, operation_id, "post")
     journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
     finalize_published_binding(storage, operation_id)
-    for flag in ("capability_finalized", "history_finalized", "report_finalized"):
-        journal.finalize_flag(operation_id, flag)
+    # The v5 history receipt is owned by its action finalizer, never by the
+    # generic marker API.  This fixture constructs later-stage evidence only
+    # for testing the pre-existing repair-anomaly boundary.
+    now = "2026-08-22T00:00:00Z"
+    storage.connection.execute(
+        "UPDATE workbook_operation_journal SET capability_finalized=1, capability_finalized_at=?, "
+        "history_finalized=1, history_finalized_at=?, report_finalized=1, report_finalized_at=? WHERE operation_id=?",
+        (now, now, now, operation_id),
+    )
     journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
     return operation_id
 
@@ -124,14 +131,9 @@ def test_journal_requires_legal_cas_phases_and_durable_hash_evidence(tmp_path: P
         with pytest.raises(RegistryError):
             journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
         finalize_published_binding(storage, operation_id)
-        for flag in ("capability_finalized", "history_finalized", "report_finalized"):
-            journal.finalize_flag(operation_id, flag)
-        finished = journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
-        assert finished.phase == PHASE_FINALIZED
-        first_history_at = finished["history_finalized_at"]
-        replayed = journal.finalize_flag(operation_id, "history_finalized")
-        assert replayed["history_finalized_at"] == first_history_at
-        assert journal.incomplete() == []
+        with pytest.raises(RegistryError, match="finalization_receipt_required"):
+            journal.finalize_flag(operation_id, "history_finalized")
+        assert journal.get(operation_id).phase == PHASE_PUBLISHED  # type: ignore[union-attr]
     finally:
         storage.close()
 
@@ -165,13 +167,14 @@ def test_journal_idempotency_restart_and_independent_finalization(tmp_path: Path
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
         _authority(journal, operation_id, "post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
-        journal.finalize_flag(operation_id, "history_finalized")
+        with pytest.raises(RegistryError, match="finalization_receipt_required"):
+            journal.finalize_flag(operation_id, "history_finalized")
         storage.close()
         restarted = RegistryStorage(storage.path)
         try:
             restored = WorkbookOperationJournal(restarted).get(operation_id)
-            assert restored and restored["history_finalized"] == 1
-            assert restored["history_finalized_at"]
+            assert restored and restored["history_finalized"] == 0
+            assert restored["history_finalized_at"] is None
             assert [item.operation_id for item in WorkbookOperationJournal(restarted).incomplete()] == [operation_id]
         finally:
             restarted.close()
@@ -231,18 +234,8 @@ def test_finalization_flag_replay_after_finalized_restart_preserves_first_timest
         _authority(journal, operation_id, "post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
         finalize_published_binding(storage, operation_id)
-        for flag in ("capability_finalized", "history_finalized", "report_finalized"):
-            journal.finalize_flag(operation_id, flag)
-        original_at = journal.get(operation_id)["report_finalized_at"]  # type: ignore[index]
-        journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
-        storage.close()
-        restarted = RegistryStorage(storage.path)
-        try:
-            replayed = WorkbookOperationJournal(restarted).finalize_flag(operation_id, "report_finalized")
-            assert replayed["report_finalized_at"] == original_at
-            assert replayed.phase == PHASE_FINALIZED
-        finally:
-            restarted.close()
+        with pytest.raises(RegistryError, match="finalization_receipt_required"):
+            journal.finalize_flag(operation_id, "history_finalized")
     finally:
         if storage.connection:
             pass

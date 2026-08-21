@@ -461,7 +461,7 @@ class WorkbookOperationJournal:
         # durable construction/workbook tuple exists in the same transaction
         # as this receipt.  Keeping that proof outside the generic flag API
         # prevents an older caller from claiming the side effect happened.
-        if flag == "binding_finalized":
+        if flag in {"binding_finalized", "history_finalized"}:
             raise RegistryError("finalization_receipt_required")
         with self.storage.transaction() as connection:
             current = connection.execute(
