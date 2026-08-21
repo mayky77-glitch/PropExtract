@@ -288,7 +288,7 @@ def read_worksheet_x14_cf_rule_envelope(package_path:os.PathLike[str]|str)->Work
         worksheets.append(WorksheetX14CfRuleEnvelope(sheet,tuple(projected)))
     return WorkbookX14CfRuleEnvelope(tuple(worksheets))
 
-_A1_CELL=re.compile(r"^\$?([A-Za-z]{1,3})\$?([0-9]+)$")
+_A1_CELL=re.compile(r"^\$?([A-Za-z]{1,3})\$?([0-9]{1,7})$")
 _A1_MAX_COLUMN=16384
 _A1_MAX_ROW=1048576
 

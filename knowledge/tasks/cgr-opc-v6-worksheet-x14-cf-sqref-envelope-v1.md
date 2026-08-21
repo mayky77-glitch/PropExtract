@@ -81,7 +81,9 @@ Verify exact ancestry, four-path scope, frozen blobs, human identity and clean t
 ## Implementation handoff evidence — 2026-08-21
 
 - Implemented only the four frozen owned paths. The reader reuses `_accepted` and `_rule`; no native reader, source XML mutation, fallback, publication or Excel claim was added.
-- Direct contract: `python3 -m pytest -q tests/test_opc_worksheet_x14_cf_sqref_envelope.py` — `37 passed`.
-- Exact focused regression command: `652 passed`.
-- Compile and whitespace checks passed. Full `python3 -m pytest -q` reached `1394 passed, 10 failed`; every failure is an existing HTTP test attempting `socket.bind(("127.0.0.1", 0))`, denied by this managed sandbox with `PermissionError: [Errno 1] Operation not permitted`.
+- P6 remediation bounds numeric A1 rows lexically to ASCII one-to-seven digits before `int`, then checks the Excel maximum. The corpus includes a 5,000-digit numeric row and verifies the exact reader error rather than a raw `ValueError`.
+- Direct contract: `python3 -m pytest -q tests/test_opc_worksheet_x14_cf_sqref_envelope.py` — `47 passed`.
+- Exact focused regression command: `661 passed`.
+- Compile and whitespace checks passed. Full `python3 -m pytest -q` reached `1403 passed, 10 failed`; every failure is an existing HTTP test attempting `socket.bind(("127.0.0.1", 0))`, denied by this managed sandbox with `PermissionError: [Errno 1] Operation not permitted`.
+- The P6 corpus also asserts public native-CF geometry parity, containment, DV before/after, invalid-first-token precedence, topology-sentinel identity/single call, and atomic second-sheet failure.
 - No designated real target workbook was supplied in this recovery worktree. The sole `.xlsx` is `rns_import_server/data/construction_group_template.v1.xlsx`, not identified by this card as the target for the frozen 1,558-rule qualification; it was not opened or modified.
