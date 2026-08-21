@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -8,6 +9,7 @@ from openpyxl.styles import PatternFill
 
 from rns_import_server.workbook_projection import (
     TemplateCellEvidence,
+    GroupOwnershipEvidence,
     WorkbookProjectionAdapter,
     WorkbookProjectionAuthority,
     WorkbookProjectionCode,
@@ -43,6 +45,7 @@ def _authority(path: Path, **changes: object) -> WorkbookProjectionAuthority:
         "template_version": "template-v1",
         "registry_generation": 7,
         "template_cells": (TemplateCellEvidence(1, 4, "Стройка"),),
+        "group_ownership": tuple(GroupOwnershipEvidence(row, row == 3) for row in range(1, 5)),
     }
     values.update(changes)
     return WorkbookProjectionAuthority.verified(**values)  # type: ignore[arg-type]
@@ -99,3 +102,58 @@ def test_adapter_requires_injected_authority_port(tmp_path: Path) -> None:
             return _authority(path)
 
     assert WorkbookProjectionAdapter(Port()).read().code is WorkbookProjectionCode.OK
+
+
+def test_rejects_path_replacement_after_hash_even_with_equal_size_and_mtime(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "book.xlsx"
+    replacement = tmp_path / "replacement.xlsx"
+    _make_book(path)
+    _make_book(replacement)
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Реестр РНС"
+    sheet["D1"] = "Стройка"
+    sheet["C2"] = "123-1234567.9999"
+    sheet["D2"] = "Объект"
+    fill = PatternFill(fill_type="solid", fgColor="FFFF00")
+    for row in (3, 4):
+        for column in tuple(range(1, 25)) + (27,):
+            sheet.cell(row, column).fill = fill
+    book.save(replacement)
+    book.close()
+    padding = path.stat().st_size - replacement.stat().st_size
+    assert padding >= 0
+    if padding:
+        replacement.write_bytes(replacement.read_bytes() + b"\0" * padding)
+    assert replacement.stat().st_size == path.stat().st_size
+    original_stat = path.stat()
+    import rns_import_server.workbook_projection as projection_module
+    original_load = projection_module.load_workbook
+
+    def replace_then_load(*args, **kwargs):
+        path.write_bytes(replacement.read_bytes())
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(projection_module, "load_workbook", replace_then_load)
+    result = project_workbook(_authority(path))
+    assert result.code is WorkbookProjectionCode.SOURCE_UNSTABLE and result.snapshot is None
+
+
+def test_explicit_last_group_ownership_allows_blank_plan_and_missing_malformed_conflict_fail(tmp_path: Path) -> None:
+    path = tmp_path / "book.xlsx"
+    _make_book(path)
+    result = project_workbook(_authority(path))
+    assert result.snapshot is not None
+    from rns_import_server.workbook_groups import WorkbookGroupCode, resolve_workbook_group
+    resolution = resolve_workbook_group(
+        result.snapshot.sheet, construction_id="construction", official_name="Стройка", code_prefix="123-1234567",
+        rns="RU-12345678-09-2026", official_names=("Стройка",),
+    )
+    assert resolution.code is WorkbookGroupCode.BLANK_ROW_PLANNED
+    missing = _authority(path, group_ownership=(GroupOwnershipEvidence(1, False),))
+    malformed = _authority(path, group_ownership=(GroupOwnershipEvidence(1, 1),))
+    conflict = _authority(path, group_ownership=(GroupOwnershipEvidence(1, False), GroupOwnershipEvidence(1, True)))
+    assert project_workbook(missing).code is WorkbookProjectionCode.GROUP_OWNERSHIP_MISSING
+    assert project_workbook(malformed).code is WorkbookProjectionCode.INVALID_AUTHORITY
+    assert project_workbook(conflict).code is WorkbookProjectionCode.GROUP_OWNERSHIP_CONFLICT

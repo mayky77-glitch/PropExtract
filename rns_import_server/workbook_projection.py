@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from enum import StrEnum
 import hashlib
+from io import BytesIO
 import os
 from pathlib import Path
+import stat
 from types import MappingProxyType
 from typing import Protocol
 from xml.etree.ElementTree import ParseError
@@ -37,6 +39,8 @@ class WorkbookProjectionCode(StrEnum):
     SHEET_MISMATCH = "sheet_mismatch"
     TEMPLATE_MISMATCH = "template_mismatch"
     UNSUPPORTED_CELL = "unsupported_cell"
+    GROUP_OWNERSHIP_MISSING = "group_ownership_missing"
+    GROUP_OWNERSHIP_CONFLICT = "group_ownership_conflict"
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,14 @@ class TemplateCellEvidence:
     row: int
     column: int
     value: object
+
+
+@dataclass(frozen=True)
+class GroupOwnershipEvidence:
+    """Exact per-row ownership proof; projection never guesses this fact."""
+
+    row: int
+    owned: bool
 
 
 @dataclass(frozen=True, repr=False)
@@ -62,6 +74,7 @@ class WorkbookProjectionAuthority:
     template_version: str
     registry_generation: int
     template_cells: tuple[TemplateCellEvidence, ...]
+    group_ownership: tuple[GroupOwnershipEvidence, ...]
     _target_path: str
 
     @classmethod
@@ -75,6 +88,7 @@ class WorkbookProjectionAuthority:
         template_version: str,
         registry_generation: int,
         template_cells: tuple[TemplateCellEvidence, ...],
+        group_ownership: tuple[GroupOwnershipEvidence, ...],
     ) -> "WorkbookProjectionAuthority":
         return cls(
             target_identity=target_identity,
@@ -83,6 +97,7 @@ class WorkbookProjectionAuthority:
             template_version=template_version,
             registry_generation=registry_generation,
             template_cells=template_cells,
+            group_ownership=group_ownership,
             _target_path=target_path,
         )
 
@@ -97,6 +112,7 @@ class SourceObservation:
     inode: int
     size: int
     mtime_ns: int
+    ctime_ns: int
 
 
 @dataclass(frozen=True)
@@ -122,9 +138,9 @@ def _valid_scalar(value: object) -> bool:
     return type(value) in _SUPPORTED_CELL_TYPES
 
 
-def _authority_is_well_formed(authority: object) -> bool:
+def _authority_code(authority: object) -> WorkbookProjectionCode | None:
     if type(authority) is not WorkbookProjectionAuthority:
-        return False
+        return WorkbookProjectionCode.INVALID_AUTHORITY
     strings = (
         authority.target_identity,
         authority.workbook_contract_id,
@@ -133,24 +149,35 @@ def _authority_is_well_formed(authority: object) -> bool:
         authority._target_path,
     )
     if any(type(value) is not str or not value for value in strings):
-        return False
+        return WorkbookProjectionCode.INVALID_AUTHORITY
     if type(authority.registry_generation) is not int or authority.registry_generation < 0:
-        return False
+        return WorkbookProjectionCode.INVALID_AUTHORITY
     if type(authority.template_cells) is not tuple or not authority.template_cells:
-        return False
+        return WorkbookProjectionCode.INVALID_AUTHORITY
+    if type(authority.group_ownership) is not tuple or not authority.group_ownership:
+        return WorkbookProjectionCode.GROUP_OWNERSHIP_MISSING
     seen: set[tuple[int, int]] = set()
     for evidence in authority.template_cells:
         if type(evidence) is not TemplateCellEvidence:
-            return False
+            return WorkbookProjectionCode.INVALID_AUTHORITY
         if type(evidence.row) is not int or type(evidence.column) is not int:
-            return False
+            return WorkbookProjectionCode.INVALID_AUTHORITY
         if evidence.row < 1 or evidence.column < 1 or not _valid_scalar(evidence.value):
-            return False
+            return WorkbookProjectionCode.INVALID_AUTHORITY
         key = (evidence.row, evidence.column)
         if key in seen:
-            return False
+            return WorkbookProjectionCode.INVALID_AUTHORITY
         seen.add(key)
-    return True
+    owned_rows: set[int] = set()
+    for evidence in authority.group_ownership:
+        if type(evidence) is not GroupOwnershipEvidence or type(evidence.row) is not int or type(evidence.owned) is not bool:
+            return WorkbookProjectionCode.INVALID_AUTHORITY
+        if evidence.row < 1:
+            return WorkbookProjectionCode.INVALID_AUTHORITY
+        if evidence.row in owned_rows:
+            return WorkbookProjectionCode.GROUP_OWNERSHIP_CONFLICT
+        owned_rows.add(evidence.row)
+    return None
 
 
 def _canonical_regular_path(path: str) -> Path | None:
@@ -168,22 +195,46 @@ def _canonical_regular_path(path: str) -> Path | None:
     return candidate
 
 
-def _observe(path: Path) -> SourceObservation | None:
+def _observation(stat_result: os.stat_result) -> SourceObservation:
+    return SourceObservation(
+        stat_result.st_dev, stat_result.st_ino, stat_result.st_size, stat_result.st_mtime_ns, stat_result.st_ctime_ns
+    )
+
+
+def _read_bound_bytes(path: Path) -> tuple[SourceObservation, bytes] | None:
+    """Bind one regular source descriptor, then hash and parse precisely its bytes."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        stat = path.stat(follow_symlinks=False)
+        descriptor = os.open(path, flags)
     except OSError:
         return None
-    if not os.path.isfile(path):
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        if os.fstat(descriptor) != before:
+            return None
+        return _observation(before), b"".join(chunks)
+    except OSError:
         return None
-    return SourceObservation(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    finally:
+        os.close(descriptor)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _path_matches(path: Path, observed: SourceObservation) -> bool:
+    verified = _canonical_regular_path(str(path))
+    if verified is None:
+        return False
+    try:
+        return _observation(os.lstat(verified)) == observed
+    except OSError:
+        return False
 
 
 def _same_scalar(left: object, right: object) -> bool:
@@ -197,7 +248,9 @@ def _cell_value(cell: object) -> object:
     return value
 
 
-def _project_rows(worksheet: object) -> tuple[tuple[SheetRow, ...], tuple[ProvisioningRow, ...]]:
+def _project_rows(
+    worksheet: object, group_ownership: dict[int, bool]
+) -> tuple[tuple[SheetRow, ...], tuple[ProvisioningRow, ...]]:
     sheet_rows: list[SheetRow] = []
     provisioning_rows: list[ProvisioningRow] = []
     max_row = worksheet.max_row  # type: ignore[attr-defined]
@@ -208,7 +261,12 @@ def _project_rows(worksheet: object) -> tuple[tuple[SheetRow, ...], tuple[Provis
         has_business = any(value not in (None, "") for value in values.values())
         preformatted = all(bool(getattr(cell, "has_style", False)) for cell in cells.values())
         is_business_row = has_business or preformatted
-        sheet_rows.append(SheetRow(number, *a_to_f, is_business_row=is_business_row, is_preformatted=preformatted))
+        sheet_rows.append(
+            SheetRow(
+                number, *a_to_f, is_business_row=is_business_row, is_preformatted=preformatted,
+                group_ownership_proven=group_ownership[number],
+            )
+        )
         provisioning_rows.append(
             ProvisioningRow(number, MappingProxyType(values), is_business_row=is_business_row, is_preformatted=preformatted)
         )
@@ -217,31 +275,34 @@ def _project_rows(worksheet: object) -> tuple[tuple[SheetRow, ...], tuple[Provis
 
 def project_workbook(authority: WorkbookProjectionAuthority) -> WorkbookProjectionResult:
     """Read one verified workbook snapshot and produce both planning projections."""
-    if not _authority_is_well_formed(authority):
-        return WorkbookProjectionResult(WorkbookProjectionCode.INVALID_AUTHORITY)
+    authority_code = _authority_code(authority)
+    if authority_code is not None:
+        return WorkbookProjectionResult(authority_code)
     path = _canonical_regular_path(authority._target_path)
     if path is None:
         return WorkbookProjectionResult(WorkbookProjectionCode.UNSAFE_TARGET)
-    before = _observe(path)
-    if before is None:
+    bound = _read_bound_bytes(path)
+    if bound is None:
         return WorkbookProjectionResult(WorkbookProjectionCode.SOURCE_UNREADABLE)
-    try:
-        pre_hash = _sha256(path)
-    except OSError:
-        return WorkbookProjectionResult(WorkbookProjectionCode.SOURCE_UNREADABLE)
-    if _observe(path) != before:
+    before, source_bytes = bound
+    if not _path_matches(path, before):
         return WorkbookProjectionResult(WorkbookProjectionCode.SOURCE_UNSTABLE)
+    pre_hash = hashlib.sha256(source_bytes).hexdigest()
 
     book = None
     try:
-        book = load_workbook(path, read_only=True, data_only=False)
+        book = load_workbook(BytesIO(source_bytes), read_only=True, data_only=False)
         if authority.sheet_identity not in book.sheetnames:
             return WorkbookProjectionResult(WorkbookProjectionCode.SHEET_MISMATCH)
         worksheet = book[authority.sheet_identity]
         for evidence in authority.template_cells:
             if not _same_scalar(_cell_value(worksheet.cell(evidence.row, evidence.column)), evidence.value):
                 return WorkbookProjectionResult(WorkbookProjectionCode.TEMPLATE_MISMATCH)
-        sheet_rows, provisioning_rows = _project_rows(worksheet)
+        ownership = {item.row: item.owned for item in authority.group_ownership}
+        worksheet_rows = set(range(1, worksheet.max_row + 1))
+        if set(ownership) != worksheet_rows:
+            return WorkbookProjectionResult(WorkbookProjectionCode.GROUP_OWNERSHIP_MISSING)
+        sheet_rows, provisioning_rows = _project_rows(worksheet, ownership)
     except TypeError:
         return WorkbookProjectionResult(WorkbookProjectionCode.UNSUPPORTED_CELL)
     except (OSError, ValueError, KeyError, RuntimeError, AttributeError, BadZipFile, InvalidFileException, ParseError):
@@ -249,7 +310,7 @@ def project_workbook(authority: WorkbookProjectionAuthority) -> WorkbookProjecti
     finally:
         if book is not None:
             book.close()
-    if _observe(path) != before:
+    if not _path_matches(path, before):
         return WorkbookProjectionResult(WorkbookProjectionCode.SOURCE_UNSTABLE)
 
     sheet = SheetProjection.from_rows(
