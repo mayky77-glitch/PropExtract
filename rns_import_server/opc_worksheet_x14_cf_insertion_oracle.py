@@ -43,6 +43,7 @@ def _semantic_xml(element: object) -> object:
         element.tag,
         tuple(sorted(element.attrib.items())),
         (element.text or "").strip(),
+        (element.tail or "").strip(),
         tuple(_semantic_xml(child) for child in element),
     )
 

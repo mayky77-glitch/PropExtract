@@ -76,6 +76,10 @@ def test_semantic_dxf_detects_change_but_ignores_prefix_and_attribute_order(tmp_
     _, candidate = _package(tmp_path / "dxf-changed.xlsx", dxf=original, candidate_dxf=equivalent.replace('z="2"', 'z="3"'))
     with pytest.raises(OPCWorksheetX14CfInsertionOracleError, match="x14-cf-dxf-mismatch"):
         validate_x14_cf_middle_insert(control, candidate, sheet_name=SHEET, insertion_row=6, format_source_row=5)
+    control, candidate = _package(tmp_path / "dxf-child-tail.xlsx", dxf=original,
+                                  candidate_dxf=original.replace("/></x14:dxf>", "></x14:font>changed</x14:dxf>"))
+    with pytest.raises(OPCWorksheetX14CfInsertionOracleError, match="x14-cf-dxf-mismatch"):
+        validate_x14_cf_middle_insert(control, candidate, sheet_name=SHEET, insertion_row=6, format_source_row=5)
 
 
 def test_unsupported_formula_and_malformed_candidate_block_without_writes(monkeypatch, tmp_path: Path) -> None:
