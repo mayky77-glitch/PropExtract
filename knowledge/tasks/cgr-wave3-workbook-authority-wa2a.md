@@ -1,6 +1,6 @@
 ---
 card_id: cgr-wave3-workbook-authority-wa2a
-status: frozen
+status: done
 version: 2
 supersedes: cgr-wave3-workbook-authority-wa2
 work_id: cgr-wave3-workbook-authority-wa2a
@@ -90,3 +90,10 @@ knowledge_paths:
 ## Gate
 
 - One P4 implementation attempt, at most one localized remediation, then independent P6. Reject after that blocks WA2a. No integration before P6 acceptance.
+
+## Accepted evidence
+
+- Feature `c5d531ab06d8115042194534a47dae8c55ed037e`; exact task no-ff merge `05ab0e2d6593970872ce73e95c8e495558402c75`; accepted common no-ff merge `6621148ed2c1ea532eca74f1750121c3c515b53d`.
+- Terminal P6 accepted the exact row-4 predecessor, forged/contradictory replay-context and ancestor-directory symlink-swap regressions. All fail closed with zero authority/receipt writes; the path race reads no attacker bytes and closes every descriptor.
+- Focused common suite: 52 passed. Seed check/validator report schema 7, revision `construction-registry-v7`, 4 entries; compileall and diff-check pass. The private source SHA remains `2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`.
+- WA1 authority, projection and finalizer Git blobs remain byte-exact. WA2b finalizer ordering is intentionally unresolved and outside this card.
