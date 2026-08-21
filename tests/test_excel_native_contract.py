@@ -76,12 +76,13 @@ def test_verified_lease_commits_real_sqlite_journal_before_ack_and_open(tmp_path
         journal = WorkbookOperationJournal(storage)
         operation_id = "00000000-0000-4000-8000-000000000001"
         journal.create(
-            operation_id=operation_id, idempotency_key="native-idempotency", consumer_id="native-consumer",
+            operation_id=operation_id, idempotency_key="native-idempotency", consumer_id=operation_id,
             owner_id="owner", pair_nonce="pair", construction_id=storage.list_constructions()[0].id,
             operation_kind="new_row", mutation_mode="middle_insert", target_identity="target", sheet_identity="sheet",
             template_version="template-v1", expected_generation=storage.generation, intent_version="intent-v1",
             intent_digest="intent-digest", manifest_version="manifest-v1", manifest_digest="manifest-digest",
             operation_directory="operation-dir", canonical_rns="RU-00000000-00-2026",
+            workbook_contract_id="native-contract-v1",
         )
         journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "staged"})
         request = _request(tmp_path, operation_id=operation_id)
