@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import hashlib
 import os
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile
@@ -69,6 +70,72 @@ def test_preserves_xml_order_and_external_uri_references(tmp_path: Path) -> None
     graph = build_opc_package_graph(write_package(tmp_path, tuple(package_members)))
     assert [item.id for item in graph.relationships] == ["root", "two", "one", "three", "four"]
     assert all(item.resolved_target is None for item in graph.relationships[1:])
+
+
+def test_external_hyperlink_is_never_dereferenced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hyperlink = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+    package_members = list(members())
+    package_members[3] = (
+        "xl/_rels/workbook.xml.rels",
+        rels(("link", hyperlink, "file:///must not be opened/реестр.xlsx", "External")),
+    )
+
+    def fail_if_target_is_opened(*args, **kwargs):
+        raise AssertionError("external target dereference")
+
+    monkeypatch.setattr(Path, "exists", fail_if_target_is_opened)
+    graph = build_opc_package_graph(write_package(tmp_path, tuple(package_members)))
+    assert graph.relationships[-1].target == "file:///must not be opened/реестр.xlsx"
+    assert graph.relationships[-1].resolved_target is None
+
+
+def test_resolves_one_leading_slash_internal_targets_from_package_root(tmp_path: Path) -> None:
+    package_members = list(members(root_target="/xl/workbook.xml", workbook_target="/xl/worksheets/sheet1.xml"))
+    graph = build_opc_package_graph(write_package(tmp_path, tuple(package_members)))
+    assert [item.resolved_target.value if item.resolved_target else None for item in graph.relationships] == [
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+    ]
+    assert [item.target for item in graph.relationships] == ["/xl/workbook.xml", "/xl/worksheets/sheet1.xml"]
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_code"),
+    [
+        ("/missing.xml", "missing-internal-target"),
+        ("/_rels/.rels", "forbidden-internal-target"),
+        ("/%5BContent_Types%5D.xml", "forbidden-internal-target"),
+        ("/../escape.xml", "invalid-relationship-target"),
+        ("/%2e%2e/escape.xml", "invalid-relationship-target"),
+        ("//host/target.xml", "internal-target-not-relative"),
+        ("/xl/workbook.xml?query", "internal-target-not-relative"),
+        ("/xl/workbook.xml#fragment", "internal-target-not-relative"),
+    ],
+)
+def test_rooted_internal_target_rejections_keep_typed_graph_contract(tmp_path: Path, target: str, expected_code: str) -> None:
+    assert error(write_package(tmp_path, members(root_target=target)))[0] == expected_code
+
+
+def test_openpyxl_relationship_corpus_is_read_only_and_exactly_resolved() -> None:
+    corpus = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    expected_hash = "2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1"
+    assert hashlib.sha256(corpus.read_bytes()).hexdigest() == expected_hash
+
+    graph = build_opc_package_graph(corpus)
+
+    assert len(graph.parts) == 9
+    assert len(graph.relationships) == 218
+    external = [item for item in graph.relationships if item.target_mode == "External"]
+    assert len(external) == 209
+    assert all(item.resolved_target is None for item in external)
+    assert sum(item.target.lower().startswith("file:") for item in external) == 208
+    assert sum(" " in item.target for item in external) == 205
+    rooted = [item for item in graph.relationships if item.target in {f"/xl/worksheets/sheet{number}.xml" for number in range(1, 5)}]
+    assert [(item.target, item.resolved_target.value if item.resolved_target else None) for item in rooted] == [
+        (f"/xl/worksheets/sheet{number}.xml", f"xl/worksheets/sheet{number}.xml")
+        for number in range(1, 5)
+    ]
+    assert hashlib.sha256(corpus.read_bytes()).hexdigest() == expected_hash
 
 
 @pytest.mark.parametrize(

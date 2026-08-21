@@ -212,6 +212,13 @@ def _is_content_types_target(name: CanonicalPartURI) -> bool:
         return False
 
 
+def _resolve_internal_target(source: CanonicalPartURI | None, target: str) -> CanonicalPartURI:
+    """Resolve approved rooted targets from package root, all others by source."""
+    if target.startswith("/"):
+        return resolve_relative_part_uri(None, target[1:])
+    return resolve_relative_part_uri(source, target)
+
+
 def build_opc_package_graph(package_path: os.PathLike[str] | str) -> OPCPackageGraph:
     """Return a fully validated graph, or one stable typed failure."""
     path = _coerce_package_path(package_path)
@@ -278,7 +285,7 @@ def build_opc_package_graph(package_path: os.PathLike[str] | str) -> OPCPackageG
                 resolved: CanonicalPartURI | None = None
                 if relationship.target_mode == "Internal":
                     try:
-                        resolved = resolve_relative_part_uri(source, relationship.target)
+                        resolved = _resolve_internal_target(source, relationship.target)
                     except OPCPartURIError:
                         _fail("invalid-relationship-target", source.value if source else relationship_part.value, "Target", relationship.target)
                     if _is_content_types_target(resolved) or resolved.value in relationship_names:

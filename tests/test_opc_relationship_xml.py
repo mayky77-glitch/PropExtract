@@ -144,11 +144,52 @@ def test_target_mode_uri_semantics_are_exact_and_mode_aware():
     assert _error_tuple(_document(_relationship(Target="https://example.test/workbook.xml"))) == (
         "internal-target-not-relative", PART, "https://example.test/workbook.xml"
     )
-    assert _error_tuple(_document(_relationship(Target="/workbook.xml", TargetMode="Internal"))) == (
-        "internal-target-not-relative", PART, "/workbook.xml"
-    )
+    assert parse_relationship_xml(PART, _document(_relationship(Target="/workbook.xml", TargetMode="Internal")))[0].target == "/workbook.xml"
     for target in ("../x", "/x", "//host/x", "urn:example:workbook#sheet"):
         assert parse_relationship_xml(PART, _document(_relationship(Target=target, TargetMode="External")))[0].target == target
+
+
+def test_openpyxl_raw_space_hyperlinks_are_narrowly_accepted_and_preserved():
+    hyperlink = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+    file_target = "file:///run/user/1000/РнС и ГРО/реестр.xlsx"
+    relative_target = "../РнС и ГРО/реестр.xlsx"
+    for target in (file_target, relative_target):
+        relationship = parse_relationship_xml(
+            PART,
+            _document(_relationship(Type=hyperlink, Target=target, TargetMode="External")),
+        )[0]
+        assert relationship.target == target
+        assert relationship.target_mode == "External"
+
+    escaped = "file:///run/user/1000/РнС%20и%20ГРО/реестр.xlsx"
+    assert parse_relationship_xml(PART, _document(_relationship(Target=escaped, TargetMode="External")))[0].target == escaped
+
+
+@pytest.mark.parametrize(
+    ("attributes", "target"),
+    [
+        ({"TargetMode": "External"}, "file:///a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"}, "file:///a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "Internal"}, "a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "https://example.test/a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "urn:example:a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file://host/a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///a b?query"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///a b#fragment"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, " file:///a b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///a b "),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///a b\\c"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///a b\x7f"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///cafe\u0301 b"),
+        ({"Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", "TargetMode": "External"}, "file:///a b%zz"),
+    ],
+)
+def test_openpyxl_raw_space_compatibility_rejects_every_broader_form(attributes: dict[str, str], target: str):
+    assert _error_tuple(_document(_relationship(Target=target, **attributes))) == (
+        "invalid-relationship-target",
+        PART,
+        target,
+    )
 
 
 @pytest.mark.parametrize(

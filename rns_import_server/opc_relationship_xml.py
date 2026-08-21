@@ -28,6 +28,9 @@ _IPV4_ADDRESS: Final = re.compile(
 )
 _UNRESERVED: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _SUB_DELIMS: Final = frozenset("!$&'()*+,;=")
+_TRANSITIONAL_HYPERLINK_RELATIONSHIP: Final = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
 
 
 @dataclass(frozen=True)
@@ -215,6 +218,55 @@ def _is_relative_uri_reference(value: str) -> bool:
     return parsed is not None and parsed[0] is None and not parsed[1].startswith("/")
 
 
+def _is_package_root_internal_reference(value: str) -> bool:
+    """Accept one rooted, package-local Internal target and no URI extras."""
+    parsed = _split_uri_reference(value)
+    return (
+        parsed is not None
+        and parsed[0] is None
+        and parsed[1].startswith("/")
+        and not parsed[1].startswith("//")
+        and len(parsed[1]) > 1
+        and parsed[2] is None
+        and parsed[3] is None
+    )
+
+
+def _is_raw_space_hyperlink_target(value: str, type_uri: str, target_mode: str) -> bool:
+    """Validate the one Openpyxl-compatible raw-space hyperlink form.
+
+    The source string remains the returned target. Its percent-escaped view is
+    validation-only and never becomes a resolved or rewritten URI.
+    """
+    if (
+        " " not in value
+        or value.startswith(" ")
+        or value.endswith(" ")
+        or type_uri != _TRANSITIONAL_HYPERLINK_RELATIONSHIP
+        or target_mode != "External"
+    ):
+        return False
+    validation_view = value.replace(" ", "%20")
+    scheme_match = _URI_SCHEME.match(validation_view)
+    if scheme_match is not None and scheme_match.group()[:-1].lower() == "file":
+        remainder = validation_view[scheme_match.end() :]
+        # ``file:///absolute/path`` has an explicitly empty authority. The
+        # strict general URI parser rejects it; permit it only here after
+        # applying the same path-component validation to the escaped view.
+        if remainder.startswith("///"):
+            return not remainder.startswith("////") and _is_valid_path(remainder[2:])
+    parsed = _split_uri_reference(validation_view)
+    if parsed is not None:
+        scheme, path, query, fragment = parsed
+        return (
+            query is None
+            and fragment is None
+            and not path.startswith("//")
+            and (scheme is None or scheme.lower() == "file")
+        )
+    return False
+
+
 def _require_attributes(part: str, attributes: dict[str, str]) -> None:
     unknown = sorted(set(attributes) - _ALLOWED_ATTRIBUTES)
     if unknown:
@@ -297,9 +349,11 @@ def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationshi
         if target_mode not in _TARGET_MODES:
             _fail("invalid-target-mode", part, target_mode)
         target = child.attrib["Target"]
-        if _split_uri_reference(target) is None:
+        if _split_uri_reference(target) is None and not _is_raw_space_hyperlink_target(target, type_uri, target_mode):
             _fail("invalid-relationship-target", part, target)
-        if target_mode == "Internal" and not _is_relative_uri_reference(target):
+        if target_mode == "Internal" and not (
+            _is_relative_uri_reference(target) or _is_package_root_internal_reference(target)
+        ):
             _fail("internal-target-not-relative", part, target)
         seen_ids.add(relationship_id)
         records.append(Relationship(relationship_id, type_uri, target, target_mode))

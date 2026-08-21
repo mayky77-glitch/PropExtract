@@ -1,6 +1,6 @@
 ---
 type: task
-status: frozen
+status: implementation-complete-pending-p6
 work_id: cgr-opc-v6-openpyxl-relationship-interop-v1
 tags: [task/implementation, feature/opc-relationships, status/frozen]
 last_verified: 2026-08-21
@@ -44,3 +44,7 @@ The next X14 read may still stop on another typed error. Record it exactly; do n
 Tests must cover raw-space `file:` and relative Cyrillic hyperlink targets with raw preservation; already escaped `%20`; all wrong type/mode/scheme/authority/query/fragment/edge-space/backslash/control/non-NFC/bad-percent negatives; rooted Internal success/missing/forbidden/traversal; no external dereference; exact real-corpus counts/hash.
 
 Run focused relationship/graph/part-URI/corpus tests, full `python3 -m pytest -q`, compile the two production modules, and `git diff --check`. Verify exact five-path scope, ancestry, human identity and clean tree. Independent P6 must reproduce the real target read-only. No fallback or standards-wide relaxation.
+
+## P4 implementation evidence
+
+Implemented on the frozen base: raw U+0020 is accepted only in the specified Transitional External hyperlink form, while output preserves the decoded XML target and leaves `resolved_target` as `None`. Exactly one Internal leading slash is resolved from package root; all other target checks keep their existing typed boundary. Focused relationship/graph/part-URI tests: 148 passed. Full suite: 1382 passed, 10 sandbox-only loopback `socket.bind` denials, 1 known Openpyxl warning; zero product-test failures. Compile and diff checks passed. Pending independent P6.
