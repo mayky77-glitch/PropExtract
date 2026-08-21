@@ -1,7 +1,8 @@
 ---
 card_id: cgr-wave3-workbook-authority-wa1
 status: frozen
-version: 1
+version: 2
+supersedes: null
 work_id: cgr-wave3-workbook-authority-wa1
 task_id: workbook-authority-wa1
 purpose: "Add explicit durable workbook authority enrollment and a projection authority producer without inference or runtime wiring."
