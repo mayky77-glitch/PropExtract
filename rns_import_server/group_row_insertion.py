@@ -456,8 +456,9 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         if created_operation: _manual_repair(context, operation_id, phase, error.code)
         raise
     except NativeExcelError as error:
-        if created_operation: _manual_repair(context, operation_id, phase, error.code)
-        raise GroupRowInsertionError(error.code, stage=error.stage, cause=error) from error
+        code = "excel_required_for_group_publication" if mode == "blank_fill" and error.code == "excel_required_for_middle_insert" else error.code
+        if created_operation: _manual_repair(context, operation_id, phase, code)
+        raise GroupRowInsertionError(code, stage=error.stage, cause=error) from error
     except Exception as error:
         if created_operation: _manual_repair(context, operation_id, phase, "group_row_failed")
         raise GroupRowInsertionError("group_row_failed", stage=phase, cause=error) from error

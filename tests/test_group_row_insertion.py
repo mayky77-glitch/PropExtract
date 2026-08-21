@@ -109,6 +109,17 @@ def test_blank_fill_requires_context() -> None:
         publish_group_row(GroupRowRequest(plan, Path("source"), Path("out"), "Реестр РНС", {}), native_script=Path("x"), operation_directory=Path("ops"))
 
 
+def test_blank_fill_native_unavailable_keeps_group_publication_failure_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    def unavailable(request, *, script):
+        raise insertion.NativeExcelError("excel_required_for_middle_insert", stage="pre_open")
+    monkeypatch.setattr(insertion, "run_native_insert", unavailable)
+    with pytest.raises(GroupRowInsertionError) as error:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {}, context=_context(plan, Journal())), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (error.value.code, error.value.stage) == ("excel_required_for_group_publication", "pre_open")
+
+
 def test_mocked_blank_lifecycle_is_locked_journaled_and_published(tmp_path: Path) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
