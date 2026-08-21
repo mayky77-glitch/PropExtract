@@ -52,3 +52,9 @@ knowledge_paths:
 - Without the environment variable, the helper fails with one stable diagnostic; it never searches the filesystem.
 - The focused six-file suite changes from exactly 12 stale-path failures to green with the exact corpus path.
 - The full suite runs with the same explicit variable and has no corpus-path failures. Source SHA remains exact before and after.
+
+## Implementation evidence
+
+- `tests/real_rns_corpus.py` accepts only the literal `RNS_REAL_CORPUS_PATH` environment variable, an absolute existing regular non-symlink file, and SHA-256 `2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1`; it has no path search, default, copy, skip, or fallback.
+- A compact negative test covers unset, relative, missing, directory, symlink, and hash-mismatched values with stable diagnostics. The six prior stale locators now call this one helper; their source-hash assertions remain unchanged.
+- With the explicit private corpus path: focused six-file suite `229 passed`; full suite `1682 passed, 2 skipped, 1 warning`; `compileall` and `git diff --check` pass. Source SHA was exact before and after both runs.

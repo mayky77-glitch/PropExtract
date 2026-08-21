@@ -11,6 +11,7 @@ import pytest
 from opc_package_v6_corpus import FIXTURES, write_fixture
 from rns_import_server.opc_package_graph import CONTENT_TYPES_NAMESPACE, OPCPackageGraphError, build_opc_package_graph
 from rns_import_server.opc_part_uri import CanonicalPartURI
+from tests.real_rns_corpus import RNS_REAL_CORPUS_PATH, real_rns_corpus_path
 
 
 CONTENT_TYPES = f'<Types xmlns="{CONTENT_TYPES_NAMESPACE}"/>'.encode()
@@ -117,10 +118,9 @@ def test_rooted_internal_target_rejections_keep_typed_graph_contract(tmp_path: P
 
 
 def test_openpyxl_relationship_corpus_is_read_only_and_exactly_resolved() -> None:
-    corpus = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    corpus = real_rns_corpus_path()
     expected_hash = "2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1"
     assert hashlib.sha256(corpus.read_bytes()).hexdigest() == expected_hash
-
     graph = build_opc_package_graph(corpus)
 
     assert len(graph.parts) == 9
@@ -136,6 +136,30 @@ def test_openpyxl_relationship_corpus_is_read_only_and_exactly_resolved() -> Non
         for number in range(1, 5)
     ]
     assert hashlib.sha256(corpus.read_bytes()).hexdigest() == expected_hash
+
+
+def test_real_corpus_locator_requires_an_explicit_existing_hash_bound_regular_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(RNS_REAL_CORPUS_PATH, raising=False)
+    with pytest.raises(RuntimeError, match="^RNS_REAL_CORPUS_PATH is required for the real RNS corpus$"):
+        real_rns_corpus_path()
+    for value, diagnostic in (
+        ("relative.xlsx", "RNS_REAL_CORPUS_PATH must be an absolute regular file"),
+        (str(tmp_path / "missing.xlsx"), "RNS_REAL_CORPUS_PATH must name an existing regular file"),
+        (str(tmp_path), "RNS_REAL_CORPUS_PATH must name an existing regular file"),
+    ):
+        monkeypatch.setenv(RNS_REAL_CORPUS_PATH, value)
+        with pytest.raises(RuntimeError, match=f"^{diagnostic}$"):
+            real_rns_corpus_path()
+    wrong = tmp_path / "wrong.xlsx"
+    wrong.write_bytes(b"not the real corpus")
+    monkeypatch.setenv(RNS_REAL_CORPUS_PATH, str(wrong))
+    with pytest.raises(RuntimeError, match="^RNS_REAL_CORPUS_PATH SHA-256 does not match the real RNS corpus$"):
+        real_rns_corpus_path()
+    symlink = tmp_path / "corpus-link.xlsx"
+    symlink.symlink_to(wrong)
+    monkeypatch.setenv(RNS_REAL_CORPUS_PATH, str(symlink))
+    with pytest.raises(RuntimeError, match="^RNS_REAL_CORPUS_PATH must not be a symlink$"):
+        real_rns_corpus_path()
 
 
 @pytest.mark.parametrize(

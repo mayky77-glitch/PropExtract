@@ -15,10 +15,11 @@ from rns_import_server.opc_worksheet_structure_insertion_oracle import (
 )
 from rns_import_server.opc_worksheet_structure_reader import read_worksheet_structure_semantics
 import rns_import_server.opc_worksheet_structure_insertion_oracle as oracle
+from tests.real_rns_corpus import real_rns_corpus_path
 
 
 SHEET = "Реестр РНС"
-SOURCE = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+SOURCE = real_rns_corpus_path()
 SML = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
