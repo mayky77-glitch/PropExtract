@@ -18,21 +18,78 @@ function Write-DurableUtf8NoBom([string]$Path, [string]$Content) {
     } finally { $stream.Dispose() }
 }
 
-function Test-NativeCancel {
-    # PowerShell 5.1 consumes this on the owning COM thread; no background job.
-    # queued cancel at every post-open mutation checkpoint.
-    while ([Console]::In.Peek() -ge 0) {
-        $line = [Console]::In.ReadLine()
-        if (-not [string]::IsNullOrWhiteSpace($line)) {
-            $message = $line | ConvertFrom-Json
-            if ($message.command -ceq 'cancel') { throw 'excel_operation_cancelled' }
-        }
+Add-Type -ReferencedAssemblies 'System.Runtime.Serialization.dll' -TypeDefinition @'
+using System;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+[DataContract]
+public sealed class NativeCancelCommand {
+    [DataMember(Name = "command")]
+    public string Command { get; set; }
+}
+
+public sealed class NativeCancelListener : IDisposable {
+    private readonly ManualResetEvent permission = new ManualResetEvent(false);
+    private Task<string> pending;
+    private volatile bool cancelled;
+    private volatile bool failed;
+    private volatile bool opened;
+
+    public NativeCancelListener() { }
+
+    public bool IsCancellationRequested { get { return cancelled; } }
+    public bool Failed { get { return failed; } }
+    public void Start() { pending = Console.In.ReadLineAsync(); }
+    public bool WaitForOpen(int milliseconds) {
+        int deadline = Environment.TickCount + milliseconds;
+        do {
+            Poll();
+            if (opened || cancelled || failed) break;
+            Thread.Sleep(10);
+        } while (unchecked(Environment.TickCount - deadline) < 0);
+        return opened && !cancelled && !failed;
     }
+    public void Dispose() { }
+
+    public void Poll() {
+        try {
+            if (pending == null || !pending.IsCompleted) return;
+            string line = pending.Result;
+            if (line == null) { failed = true; permission.Set(); return; }
+            var serializer = new DataContractJsonSerializer(typeof(NativeCancelCommand));
+            NativeCancelCommand message;
+            using (var bytes = new System.IO.MemoryStream(Encoding.UTF8.GetBytes(line))) {
+                message = serializer.ReadObject(bytes) as NativeCancelCommand;
+            }
+            if (message != null && String.Equals(message.Command, "open", StringComparison.Ordinal)) {
+                opened = true;
+                permission.Set();
+            } else if (message != null && String.Equals(message.Command, "cancel", StringComparison.Ordinal)) {
+                cancelled = true;
+                permission.Set();
+            }
+            pending = Console.In.ReadLineAsync();
+        } catch { failed = true; }
+    }
+}
+'@
+
+function Test-NativeCancel($Listener) {
+    # ReadLineAsync is started once per line; checkpoints only poll completed
+    # state and therefore never block on an open parent stdin pipe.
+    $Listener.Poll()
+    if ($Listener.Failed) { throw 'excel_cancel_listener_failed' }
+    if ($Listener.IsCancellationRequested) { throw 'excel_operation_cancelled' }
 }
 
 $excel = $null
 $control = $null
 $candidate = $null
+$cancelListener = $null
 $success = $false
 try {
     $excel = New-Object -ComObject Excel.Application
@@ -68,32 +125,34 @@ try {
 
     # The only permission is one parent stdin message. ACK is audit-only and
     # intentionally never read or polled by this helper.
-    $permission = [Console]::In.ReadLine()
-    if ([string]::IsNullOrWhiteSpace($permission)) { throw 'excel_open_permission_missing' }
-    $command = $permission | ConvertFrom-Json
-    if ($command.command -cne 'open') { throw 'excel_open_not_granted' }
+    $cancelListener = New-Object NativeCancelListener
+    $cancelListener.Start()
+    if (-not $cancelListener.WaitForOpen(20000)) {
+        Test-NativeCancel $cancelListener
+        throw 'excel_open_permission_missing'
+    }
 
     $control = $excel.Workbooks.Open($data.control, 0, $false)
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $excel.CalculateFullRebuild()
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $control.Save()
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $control.Close($true)
     $control = $null
     $candidate = $excel.Workbooks.Open($data.candidate, 0, $false)
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $sheet = $candidate.Worksheets.Item([string]$data.sheet)
     if ($data.mutation_mode -ceq 'middle_insert') {
         $sheet.Rows.Item([int]$data.insertion_row).Insert(-4121, 0)
     }
     foreach ($property in $data.fields.psobject.Properties) { $sheet.Cells.Item([int]$data.insertion_row, [int]$property.Name).Value2 = $property.Value }
     if ($data.hyperlink) { $sheet.Hyperlinks.Add($sheet.Cells.Item([int]$data.insertion_row, 23), $data.hyperlink) | Out-Null }
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $excel.CalculateFullRebuild()
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $candidate.Save()
-    Test-NativeCancel
+    Test-NativeCancel $cancelListener
     $candidate.Close($true)
     $candidate = $null
     $success = $true
@@ -103,6 +162,7 @@ catch {
     exit 1
 }
 finally {
+    if ($cancelListener) { $cancelListener.Dispose() }
     if ($control) { $control.Close($false); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($control) }
     if ($candidate) { $candidate.Close($false); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($candidate) }
     if ($excel) { $excel.Quit(); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($excel) }

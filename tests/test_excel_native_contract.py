@@ -1,6 +1,11 @@
 from pathlib import Path
 import io
 import math
+import subprocess
+import shutil
+import queue
+import threading
+import time
 
 import pytest
 
@@ -49,11 +54,66 @@ def test_powershell_rejects_noncanonical_mode_before_com_and_has_one_middle_inse
 def test_helper_lease_precedes_open_and_uses_stdin_not_ack_polling() -> None:
     script = (Path(__file__).parents[1] / "scripts" / "windows_excel_insert.ps1").read_text(encoding="utf-8")
     assert script.index("Write-DurableUtf8NoBom $temporary") < script.index("$control = $excel.Workbooks.Open")
-    assert "[Console]::In.ReadLine()" in script
-    assert "ack_file" not in script and "Task.Run" not in script and "taskkill /T" not in script
+    assert "Console.In.ReadLineAsync()" in script and "$cancelListener.WaitForOpen(20000)" in script
+    assert "ack_file" not in script and "Task.Run" not in script and "taskkill /T" not in script and "Console.In.Peek" not in script
     assert script.index("$excel.Quit()") < script.index("if ($success)")
     assert script.count("Test-NativeCancel") >= 7
     assert script.index("$control = $excel.Workbooks.Open") < script.index("Test-NativeCancel", script.index("$control = $excel.Workbooks.Open"))
+    assert "ReadLineAsync is started once per line" in script and "if (pending == null || !pending.IsCompleted) return;" in script
+    assert script.index("$cancelListener.Start()") < script.index("$control = $excel.Workbooks.Open")
+
+
+def _exact_listener_source() -> str:
+    script = (Path(__file__).parents[1] / "scripts" / "windows_excel_insert.ps1").read_text(encoding="utf-8")
+    start = script.index("using System;\n", script.index("Add-Type -ReferencedAssemblies"))
+    end = script.index("\n'@\n\nfunction Test-NativeCancel", start)
+    return script[start:end]
+
+
+def _read_line_bounded(process: subprocess.Popen[str]) -> str:
+    assert process.stdout is not None
+    lines: queue.Queue[str] = queue.Queue()
+    thread = threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True)
+    thread.start()
+    try:
+        return lines.get(timeout=5.0).strip()
+    except queue.Empty as error:
+        if process.poll() is None: process.terminate(); process.wait(timeout=0.5)
+        assert process.stderr is not None
+        raise AssertionError(process.stderr.read()) from error
+
+
+def _exact_listener_pipe_probe(tmp_path: Path, *, cancel: bool) -> tuple[int, str]:
+    host_path = shutil.which("powershell") or shutil.which("pwsh")
+    if host_path is None: pytest.skip("no installed native PowerShell/.NET C# host for exact listener runtime proof")
+    host = [host_path]
+    probe = tmp_path / "listener-probe.ps1"
+    probe.write_text(
+        "Add-Type -ReferencedAssemblies 'System.Runtime.Serialization.dll' -TypeDefinition @'\n" + _exact_listener_source() +
+        "\n'@\n$l=New-Object NativeCancelListener;$l.Start();if(-not $l.WaitForOpen(500)){exit 6};[Console]::Out.WriteLine('ready');" +
+        ("for($i=0;$i -lt 300;$i++){" if cancel else "for($i=0;$i -lt 30;$i++){") + "$l.Poll();if($l.Failed){exit 5};if($l.IsCancellationRequested){[Console]::Out.WriteLine('cancelled');exit 4};Start-Sleep -Milliseconds 10};[Console]::Out.WriteLine('complete');exit 0\n",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen([*host, "-NoProfile", "-NonInteractive", "-File", str(probe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        if process.stdin is not None:
+            process.stdin.write('{"command":"open"}\n'); process.stdin.flush()
+        assert _read_line_bounded(process) == "ready"
+        if cancel:
+            process.stdin.write('{"command":"cancel"}\n'); process.stdin.flush()
+        code = process.wait(timeout=3.5 if cancel else 1.0)
+        assert process.stdout is not None
+        return code, process.stdout.read().strip()
+    finally:
+        if process.poll() is None: process.terminate(); process.wait(timeout=0.5)
+
+
+def test_exact_listener_redirected_pipe_no_cancel_checkpoints_never_block(tmp_path: Path) -> None:
+    assert _exact_listener_pipe_probe(tmp_path, cancel=False) == (0, "complete")
+
+
+def test_exact_listener_redirected_pipe_consumes_post_open_cancel_within_grace(tmp_path: Path) -> None:
+    assert _exact_listener_pipe_probe(tmp_path, cancel=True) == (4, "cancelled")
 
 
 def test_adapter_contains_ordered_native_permission_and_bounded_private_logs() -> None:
