@@ -16,9 +16,11 @@ def real_rns_corpus_path() -> Path:
     value = os.environ.get(RNS_REAL_CORPUS_PATH)
     if value is None:
         raise RuntimeError("RNS_REAL_CORPUS_PATH is required for the real RNS corpus")
+    if type(value) is not str or not value:
+        raise RuntimeError("RNS_REAL_CORPUS_PATH must be a non-empty string")
     try:
         path = Path(value)
-    except (TypeError, ValueError) as error:
+    except ValueError as error:
         raise RuntimeError("RNS_REAL_CORPUS_PATH must be an absolute regular file") from error
     if not path.is_absolute():
         raise RuntimeError("RNS_REAL_CORPUS_PATH must be an absolute regular file")

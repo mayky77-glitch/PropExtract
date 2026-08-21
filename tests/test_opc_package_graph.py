@@ -139,9 +139,19 @@ def test_openpyxl_relationship_corpus_is_read_only_and_exactly_resolved() -> Non
 
 
 def test_real_corpus_locator_requires_an_explicit_existing_hash_bound_regular_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class PathProxy:
+        def __fspath__(self) -> str:
+            return str(tmp_path / "proxy.xlsx")
+
+    environ = os.environ
     monkeypatch.delenv(RNS_REAL_CORPUS_PATH, raising=False)
     with pytest.raises(RuntimeError, match="^RNS_REAL_CORPUS_PATH is required for the real RNS corpus$"):
         real_rns_corpus_path()
+    for value in ("", PathProxy(), Path(tmp_path / "path-proxy.xlsx")):
+        monkeypatch.setattr(os, "environ", {RNS_REAL_CORPUS_PATH: value})
+        with pytest.raises(RuntimeError, match="^RNS_REAL_CORPUS_PATH must be a non-empty string$"):
+            real_rns_corpus_path()
+    monkeypatch.setattr(os, "environ", environ)
     for value, diagnostic in (
         ("relative.xlsx", "RNS_REAL_CORPUS_PATH must be an absolute regular file"),
         (str(tmp_path / "missing.xlsx"), "RNS_REAL_CORPUS_PATH must name an existing regular file"),
