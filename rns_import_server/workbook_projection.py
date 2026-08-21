@@ -1,8 +1,7 @@
 """Fail-closed, read-only workbook projections for the Wave3 planning ports.
 
-This module deliberately has no durable-path producer.  A later gate must
-inject :class:`WorkbookProjectionAuthority` only after it has proved the
-target, workbook contract, sheet and template evidence together.
+This module receives durable authority from an injected producer and reads
+only the descriptor-bound workbook bytes named by that authority.
 """
 from __future__ import annotations
 
@@ -36,6 +35,7 @@ class WorkbookProjectionCode(StrEnum):
     UNSAFE_TARGET = "unsafe_target"
     SOURCE_UNSTABLE = "source_unstable"
     SOURCE_UNREADABLE = "source_unreadable"
+    SOURCE_HASH_MISMATCH = "source_hash_mismatch"
     SHEET_MISMATCH = "sheet_mismatch"
     TEMPLATE_MISMATCH = "template_mismatch"
     UNSUPPORTED_CELL = "unsupported_cell"
@@ -72,6 +72,7 @@ class WorkbookProjectionAuthority:
     workbook_contract_id: str
     sheet_identity: str
     template_version: str
+    expected_source_sha256: str
     registry_generation: int
     template_cells: tuple[TemplateCellEvidence, ...]
     group_ownership: tuple[GroupOwnershipEvidence, ...]
@@ -87,6 +88,7 @@ class WorkbookProjectionAuthority:
         sheet_identity: str,
         template_version: str,
         registry_generation: int,
+        expected_source_sha256: str,
         template_cells: tuple[TemplateCellEvidence, ...],
         group_ownership: tuple[GroupOwnershipEvidence, ...],
     ) -> "WorkbookProjectionAuthority":
@@ -95,6 +97,7 @@ class WorkbookProjectionAuthority:
             workbook_contract_id=workbook_contract_id,
             sheet_identity=sheet_identity,
             template_version=template_version,
+            expected_source_sha256=expected_source_sha256,
             registry_generation=registry_generation,
             template_cells=template_cells,
             group_ownership=group_ownership,
@@ -146,11 +149,15 @@ def _authority_code(authority: object) -> WorkbookProjectionCode | None:
         authority.workbook_contract_id,
         authority.sheet_identity,
         authority.template_version,
+        authority.expected_source_sha256,
         authority._target_path,
     )
     if any(type(value) is not str or not value for value in strings):
         return WorkbookProjectionCode.INVALID_AUTHORITY
     if type(authority.registry_generation) is not int or authority.registry_generation < 0:
+        return WorkbookProjectionCode.INVALID_AUTHORITY
+    if (type(authority.expected_source_sha256) is not str or len(authority.expected_source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in authority.expected_source_sha256)):
         return WorkbookProjectionCode.INVALID_AUTHORITY
     if type(authority.template_cells) is not tuple or not authority.template_cells:
         return WorkbookProjectionCode.INVALID_AUTHORITY
@@ -288,6 +295,8 @@ def project_workbook(authority: WorkbookProjectionAuthority) -> WorkbookProjecti
     if not _path_matches(path, before):
         return WorkbookProjectionResult(WorkbookProjectionCode.SOURCE_UNSTABLE)
     pre_hash = hashlib.sha256(source_bytes).hexdigest()
+    if pre_hash != authority.expected_source_sha256:
+        return WorkbookProjectionResult(WorkbookProjectionCode.SOURCE_HASH_MISMATCH)
 
     book = None
     try:

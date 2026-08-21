@@ -27,8 +27,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 5
-SEED_REVISION = "construction-registry-v5"
+SCHEMA_VERSION = 6
+SEED_REVISION = "construction-registry-v6"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -98,6 +98,12 @@ _V5_PENDING_ACTION_COLUMNS = frozenset({
 })
 _V5_ACTION_HISTORY_COLUMNS = frozenset({
     "action_id", "event_version", "event_type", "status", "target_row", "post_hash", "digest", "created_at",
+})
+_V6_WORKBOOK_AUTHORITY_COLUMNS = frozenset({
+    "action_id", "construction_id", "workbook_contract_id", "target_identity", "target_path",
+    "sheet_identity", "template_version", "source_sha256", "template_evidence", "template_digest",
+    "template_count", "ownership_evidence", "ownership_digest", "ownership_count", "max_row",
+    "registry_generation", "created_at",
 })
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 _LEGACY_LEASE_OWNERSHIP_FAILURE_CODE = "legacy_excel_lease_ownership_missing"
@@ -281,7 +287,7 @@ class RegistryStorage:
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, 2, 3, 4, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, 4, 5, SCHEMA_VERSION}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         self._validate_schema(version)
         if version < SCHEMA_VERSION:
@@ -311,11 +317,17 @@ class RegistryStorage:
         elif version == 4:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS
             required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
+        elif version == 5:
+            required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS | _V5_JOURNAL_COLUMNS
+            required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
+            required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
+            required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
         elif version == SCHEMA_VERSION:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS | _V5_JOURNAL_COLUMNS
             required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
             required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
             required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
+            required["workbook_authorities"] = _V6_WORKBOOK_AUTHORITY_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -506,6 +518,25 @@ class RegistryStorage:
                     digest TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE workbook_authorities (
+                    action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
+                    construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE RESTRICT,
+                    workbook_contract_id TEXT NOT NULL,
+                    target_identity TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    sheet_identity TEXT NOT NULL,
+                    template_version TEXT NOT NULL,
+                    source_sha256 TEXT NOT NULL,
+                    template_evidence TEXT NOT NULL,
+                    template_digest TEXT NOT NULL,
+                    template_count INTEGER NOT NULL CHECK (template_count = 24),
+                    ownership_evidence TEXT NOT NULL,
+                    ownership_digest TEXT NOT NULL,
+                    ownership_count INTEGER NOT NULL CHECK (ownership_count >= 1),
+                    max_row INTEGER NOT NULL CHECK (max_row >= 1),
+                    registry_generation INTEGER NOT NULL CHECK (registry_generation >= 0),
+                    created_at TEXT NOT NULL
+                );
                 CREATE TRIGGER new_row_action_history_immutable_update
                 BEFORE UPDATE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END;
                 CREATE TRIGGER new_row_action_history_immutable_delete
@@ -525,7 +556,7 @@ class RegistryStorage:
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1, 2, 3, 4}:
+        if version not in {0, 1, 2, 3, 4, 5}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
@@ -599,6 +630,22 @@ class RegistryStorage:
             connection.execute(
                 "CREATE TRIGGER IF NOT EXISTS new_row_action_history_immutable_delete "
                 "BEFORE DELETE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END"
+            )
+            # v6 creates an empty authority ledger.  Legacy records are never
+            # promoted from paths, bindings, workbook contents, or guesses.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS workbook_authorities (
+                    action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
+                    construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE RESTRICT,
+                    workbook_contract_id TEXT NOT NULL, target_identity TEXT NOT NULL, target_path TEXT NOT NULL,
+                    sheet_identity TEXT NOT NULL, template_version TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+                    template_evidence TEXT NOT NULL, template_digest TEXT NOT NULL,
+                    template_count INTEGER NOT NULL CHECK (template_count = 24),
+                    ownership_evidence TEXT NOT NULL, ownership_digest TEXT NOT NULL,
+                    ownership_count INTEGER NOT NULL CHECK (ownership_count >= 1),
+                    max_row INTEGER NOT NULL CHECK (max_row >= 1),
+                    registry_generation INTEGER NOT NULL CHECK (registry_generation >= 0), created_at TEXT NOT NULL
+                )"""
             )
             for flag in ("capability", "binding", "history", "report"):
                 column = f"{flag}_finalized_at"
