@@ -237,6 +237,111 @@ def test_history_finalizer_requires_binding_and_writes_one_canonical_event(tmp_p
     finally:
         storage.close()
 
+
+def _history_ready(storage: RegistryStorage, target) -> str:
+    operation_id = _published(storage)
+    construction = storage.list_constructions()[0]
+    actions = NewRowActionStore(storage)
+    actions.register(action_id=operation_id, job_id="job", construction_id=construction.id, workbook_contract_id="contract",
+                     target_identity="target", target_path=str(target), capability="cap")
+    assert actions.reserve_pending_to_publishing(operation_id, job_authorization="cap")
+    assert finalize_published_binding(storage, operation_id).completed_stage == "binding"
+    return operation_id
+
+
+def test_history_event_and_receipt_rollback_together_on_fault(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "runtime")
+    target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        def fail_receipt(*_args: object, **_kwargs: object) -> bool:
+            raise __import__("sqlite3").OperationalError("injected receipt failure")
+        monkeypatch.setattr(finalization, "_write_history_receipt", fail_receipt)
+        result = finalize_published_history(storage, operation_id)
+        operation = WorkbookOperationJournal(storage).get(operation_id)
+        assert result.error_code == "finalization_history_storage_failed"
+        assert operation is not None and (operation.phase, operation["history_finalized"], operation["history_finalized_at"]) == ("published", 0, None)
+        assert storage.connection.execute("SELECT COUNT(*) FROM new_row_action_history").fetchone()[0] == 0
+    finally:
+        storage.close()
+
+
+def test_two_connections_converge_and_history_replay_is_zero_write(tmp_path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "runtime")
+    target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
+    operation_id = _history_ready(storage, target)
+    path = storage.path; storage.close()
+    barrier = Barrier(2)
+    def finalize() -> object:
+        connection = RegistryStorage(path)
+        try:
+            barrier.wait()
+            return finalize_published_history(connection, operation_id)
+        finally:
+            connection.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: finalize(), range(2)))
+    verifier = RegistryStorage(path)
+    try:
+        assert all(result.completed_stage == "history" and result.error_code is None for result in results)
+        before = verifier.connection.total_changes
+        replay = finalize_published_history(verifier, operation_id)
+        assert replay.completed_stage == "history" and verifier.connection.total_changes == before
+        assert verifier.connection.execute("SELECT COUNT(*) FROM new_row_action_history").fetchone()[0] == 1
+    finally:
+        verifier.close()
+
+
+def test_history_rejects_pending_tuple_and_event_conflicts(tmp_path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "runtime")
+    target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        storage.connection.execute("UPDATE new_row_pending_actions SET target_identity='other' WHERE action_id=?", (operation_id,))
+        assert finalize_published_history(storage, operation_id).error_code == "finalization_action_conflict"
+    finally:
+        storage.close()
+
+    storage = RegistryStorage.bootstrap(tmp_path / "event")
+    target = tmp_path / "event.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        storage.connection.execute(
+            "INSERT INTO new_row_action_history VALUES(?,1,'new_row','published',99,?,?,'2026-08-22T00:00:00Z')",
+            (operation_id, "a" * 64, "b" * 64),
+        )
+        assert finalize_published_history(storage, operation_id).error_code == "finalization_history_conflict"
+    finally:
+        storage.close()
+
+
+def test_consumed_action_is_replay_only_and_contradictory_receipts_repair(tmp_path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "consumed")
+    target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        assert finalize_published_history(storage, operation_id).completed_stage == "history"
+        storage.connection.execute("UPDATE new_row_pending_actions SET state='consumed' WHERE action_id=?", (operation_id,))
+        assert finalize_published_history(storage, operation_id).completed_stage == "history"
+    finally:
+        storage.close()
+
+    storage = RegistryStorage.bootstrap(tmp_path / "contradiction")
+    target = tmp_path / "contradiction.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        storage.connection.execute(
+            "UPDATE workbook_operation_journal SET history_finalized_at='2026-08-22T00:00:00Z', "
+            "report_finalized_at='2026-08-22T00:00:00Z', capability_finalized_at='2026-08-22T00:00:00Z', "
+            "report_snapshot_digest='a' WHERE operation_id=?", (operation_id,)
+        )
+        result = finalize_published_history(storage, operation_id)
+        assert result.error_code == "finalization_history_order_invalid"
+        operation = WorkbookOperationJournal(storage).get(operation_id)
+        assert operation is not None and operation["history_finalized_at"] == "2026-08-22T00:00:00Z"
+    finally:
+        storage.close()
+
     storage = RegistryStorage.bootstrap(tmp_path / "ok")
     target = tmp_path / "registry-ok.xlsx"; target.write_bytes(b"xlsx")
     try:

@@ -10,20 +10,30 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 from pathlib import Path
+import re
 import sqlite3
 
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage, utc_now
 
 
 _CAPABILITY_DOMAIN = b"PropExtract/new-row-capability/v1\x00"
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}", flags=re.ASCII)
 
 
 class NewRowActionError(RegistryError):
     """Stable, payload-free failure at the pending-action authority boundary."""
 
 
+def _is_nonempty_ascii(value: object) -> bool:
+    return type(value) is str and bool(value) and value.isascii()
+
+
+def _is_capability_digest(value: object) -> bool:
+    return type(value) is str and bool(_DIGEST_RE.fullmatch(value))
+
+
 def capability_digest(*, action_id: str, capability: str) -> str:
-    if type(action_id) is not str or not action_id or type(capability) is not str or not capability:
+    if type(action_id) is not str or not action_id or not _is_nonempty_ascii(capability):
         raise NewRowActionError("new_row_action_authority_invalid")
     return hashlib.sha256(_CAPABILITY_DOMAIN + action_id.encode("utf-8") + b"\x00" + capability.encode("utf-8")).hexdigest()
 
@@ -100,7 +110,8 @@ class NewRowActionStore:
                 else:
                     expected = (job_id, construction_id, workbook_contract_id, target_identity, canonical_path)
                     actual = tuple(existing[name] for name in ("job_id", "construction_id", "workbook_contract_id", "target_identity", "target_path"))
-                    if actual != expected or not hmac.compare_digest(str(existing["capability_digest"]), digest):
+                    if (actual != expected or not _is_capability_digest(existing["capability_digest"])
+                            or not hmac.compare_digest(existing["capability_digest"], digest)):
                         raise RegistryConflictError("new_row_action_conflict")
                     row = existing
                 assert row is not None
@@ -125,13 +136,15 @@ class NewRowActionStore:
         )
 
     def _authorized(self, connection: sqlite3.Connection, action_id: str, capability: str) -> sqlite3.Row | None:
-        if type(action_id) is not str or not action_id or type(capability) is not str or not capability:
+        if type(action_id) is not str or not action_id or not _is_nonempty_ascii(capability):
             return None
         row = connection.execute("SELECT * FROM new_row_pending_actions WHERE action_id=?", (action_id,)).fetchone()
         if row is None:
             return None
+        if not _is_capability_digest(row["capability_digest"]):
+            return None
         expected = capability_digest(action_id=action_id, capability=capability)
-        if not hmac.compare_digest(str(row["capability_digest"]), expected):
+        if not hmac.compare_digest(row["capability_digest"], expected):
             return None
         return row
 

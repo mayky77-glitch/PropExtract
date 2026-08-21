@@ -276,6 +276,15 @@ def _valid_history_row(row: sqlite3.Row, *, operation_id: str, target_row: int, 
     )
 
 
+def _write_history_receipt(connection: sqlite3.Connection, operation_id: str, now: str) -> bool:
+    """Write only the first history receipt; never repair a partial marker."""
+    return connection.execute(
+        "UPDATE workbook_operation_journal SET history_finalized=1, history_finalized_at=?, updated_at=? "
+        "WHERE operation_id=? AND phase=? AND history_finalized=0 AND history_finalized_at IS NULL",
+        (now, now, operation_id, PHASE_PUBLISHED),
+    ).rowcount == 1
+
+
 def _valid_history_action(operation: sqlite3.Row, action: sqlite3.Row) -> str | None:
     if action["action_id"] != operation["operation_id"]:
         return "finalization_action_conflict"
@@ -328,7 +337,12 @@ def finalize_published_history(storage: RegistryStorage, operation_id: str) -> F
             bindings = connection.execute("SELECT * FROM construction_bindings WHERE construction_id=? ORDER BY id", (values[0],)).fetchall()
             if len(bindings) != 1 or not _valid_exact_binding(bindings[0], values):
                 return _history_manual_repair(connection, operation_id, "finalization_history_order_invalid")
-            if any(operation[flag] for flag in ("report_finalized", "capability_finalized")):
+            if (any(operation[flag] for flag in ("report_finalized", "capability_finalized"))
+                    or any(operation[f"{flag}_at"] is not None for flag in ("report_finalized", "capability_finalized"))
+                    or operation["report_snapshot_digest"] is not None):
+                return _history_manual_repair(connection, operation_id, "finalization_history_order_invalid")
+            if ((operation["history_finalized"] and not _is_canonical_utc(operation["history_finalized_at"]))
+                    or (not operation["history_finalized"] and operation["history_finalized_at"] is not None)):
                 return _history_manual_repair(connection, operation_id, "finalization_history_order_invalid")
             action = connection.execute("SELECT * FROM new_row_pending_actions WHERE action_id=?", (operation_id,)).fetchone()
             if action is None:
@@ -365,11 +379,7 @@ def finalize_published_history(storage: RegistryStorage, operation_id: str) -> F
                 "INSERT INTO new_row_action_history(action_id,event_version,event_type,status,target_row,post_hash,digest,created_at) VALUES(?,1,'new_row','published',?,?,?,?)",
                 (operation_id, target_row, operation["post_hash"], digest, now),
             )
-            if connection.execute(
-                "UPDATE workbook_operation_journal SET history_finalized=1, history_finalized_at=?, updated_at=? "
-                "WHERE operation_id=? AND phase=? AND history_finalized=0",
-                (now, now, operation_id, PHASE_PUBLISHED),
-            ).rowcount != 1:
+            if not _write_history_receipt(connection, operation_id, now):
                 raise sqlite3.OperationalError("history receipt CAS failed")
             return FinalizationProgress(operation_id, "published_pending_finalization", "history", "report", stage="history")
     except FinalizationError:
