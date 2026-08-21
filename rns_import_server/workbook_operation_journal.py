@@ -457,6 +457,12 @@ class WorkbookOperationJournal:
     def finalize_flag(self, operation_id: str, flag: str) -> JournalOperation:
         if flag not in FINALIZATION_FLAGS:
             raise RegistryError("Неизвестный флаг finalization")
+        # Binding is not a generic marker: K3b2a must first prove that the
+        # durable construction/workbook tuple exists in the same transaction
+        # as this receipt.  Keeping that proof outside the generic flag API
+        # prevents an older caller from claiming the side effect happened.
+        if flag == "binding_finalized":
+            raise RegistryError("finalization_receipt_required")
         with self.storage.transaction() as connection:
             current = connection.execute(
                 f"SELECT phase, {flag}, {flag}_at FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)

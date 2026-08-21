@@ -1,0 +1,201 @@
+"""Durable post-publication finalizers.
+
+K3b2a implements only the construction/workbook binding stage.  It receives
+no workbook paths, report contents, or caller-supplied binding values: every
+value comes from the published journal and the K3b1 authority snapshot.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+import sqlite3
+import uuid
+
+from rns_import_server.registry_storage import RegistryError, RegistryStorage, utc_now
+from rns_import_server.workbook_finalization_snapshot import verify_snapshot
+from rns_import_server.workbook_operation_journal import PHASE_MANUAL_REPAIR, PHASE_PUBLISHED
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_BINDING_FAILURE_CODES = frozenset({
+    "finalization_authority_missing",
+    "finalization_authority_corrupt",
+    "finalization_binding_construction_invalid",
+    "finalization_binding_conflict",
+    "finalization_receipt_required",
+})
+
+
+@dataclass(frozen=True)
+class FinalizationProgress:
+    """Public, payload-free result of one post-publication finalizer stage."""
+
+    operation_id: str
+    status: str
+    completed_stage: str | None
+    next_stage: str | None
+    stage: str = "binding"
+    binding_id: str | None = None
+    error_code: str | None = None
+
+
+class FinalizationError(RegistryError):
+    """A typed, non-secret binding finalization error."""
+
+    def __init__(self, code: str, operation_id: str):
+        self.code = code
+        self.operation_id = operation_id
+        self.stage = "binding"
+        super().__init__(code)
+
+
+def _pending(operation_id: str, code: str) -> FinalizationProgress:
+    return FinalizationProgress(
+        operation_id=operation_id,
+        status="published_pending_finalization",
+        completed_stage=None,
+        next_stage="binding",
+        error_code=code,
+    )
+
+
+def _manual_repair(connection: sqlite3.Connection, operation_id: str, code: str) -> FinalizationProgress:
+    if code not in _BINDING_FAILURE_CODES:
+        raise AssertionError("binding failure code must be frozen")
+    updated = connection.execute(
+        "UPDATE workbook_operation_journal SET phase=?, failure_code=?, updated_at=? "
+        "WHERE operation_id=? AND phase=?",
+        (PHASE_MANUAL_REPAIR, code, utc_now(), operation_id, PHASE_PUBLISHED),
+    ).rowcount
+    if updated != 1:
+        raise FinalizationError("finalization_phase_invalid", operation_id)
+    return FinalizationProgress(
+        operation_id=operation_id,
+        status=PHASE_MANUAL_REPAIR,
+        completed_stage=None,
+        next_stage=None,
+        error_code=code,
+    )
+
+
+def _authority_failure(connection: sqlite3.Connection, operation: sqlite3.Row) -> str | None:
+    snapshot = connection.execute(
+        "SELECT snapshot_version, canonical_payload, digest "
+        "FROM workbook_finalization_snapshots WHERE operation_id=?",
+        (operation["operation_id"],),
+    ).fetchone()
+    if snapshot is None:
+        return "finalization_authority_missing"
+    post_hash = operation["post_hash"]
+    if type(post_hash) is not str or not _SHA256.fullmatch(post_hash):
+        return "finalization_authority_corrupt"
+    if not verify_snapshot(
+        operation_id=operation["operation_id"],
+        consumer_id=operation["consumer_id"],
+        workbook_contract_id=operation["workbook_contract_id"],
+        post_hash=post_hash,
+        snapshot_version=snapshot["snapshot_version"],
+        canonical_payload=snapshot["canonical_payload"],
+        digest=snapshot["digest"],
+    ):
+        return "finalization_authority_corrupt"
+    return None
+
+
+def _binding_values(operation: sqlite3.Row) -> tuple[str, str, str, str, str] | None:
+    values = (
+        operation["construction_id"],
+        operation["workbook_contract_id"],
+        operation["target_identity"],
+        operation["sheet_identity"],
+        operation["template_version"],
+    )
+    if any(type(value) is not str or not value.strip() for value in values):
+        return None
+    return values  # type: ignore[return-value]
+
+
+def _write_binding_receipt(connection: sqlite3.Connection, operation_id: str) -> bool:
+    now = utc_now()
+    return connection.execute(
+        "UPDATE workbook_operation_journal SET binding_finalized=1, binding_finalized_at=?, updated_at=? "
+        "WHERE operation_id=? AND phase=? AND binding_finalized=0",
+        (now, now, operation_id, PHASE_PUBLISHED),
+    ).rowcount == 1
+
+
+def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> FinalizationProgress:
+    """Insert-or-verify the one binding and receipt for a published operation.
+
+    A SQLite fault is intentionally surfaced as a pending, non-successful
+    result.  Since both the binding and receipt are one transaction, rollback
+    keeps the operation published and makes a later explicit retry safe.
+    """
+    if type(operation_id) is not str or not operation_id:
+        raise FinalizationError("finalization_operation_missing", operation_id if type(operation_id) is str else "")
+    try:
+        storage.connection.execute("PRAGMA synchronous=FULL")
+        with storage.transaction() as connection:
+            operation = connection.execute(
+                "SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if operation is None:
+                raise FinalizationError("finalization_operation_missing", operation_id)
+            if operation["phase"] != PHASE_PUBLISHED:
+                raise FinalizationError("finalization_phase_invalid", operation_id)
+            if operation["operation_kind"] != "new_row" or operation["consumer_id"] != operation_id:
+                return _manual_repair(connection, operation_id, "finalization_authority_corrupt")
+            authority_failure = _authority_failure(connection, operation)
+            if authority_failure:
+                return _manual_repair(connection, operation_id, authority_failure)
+            if any(operation[flag] for flag in ("capability_finalized", "history_finalized", "report_finalized")):
+                return _manual_repair(connection, operation_id, "finalization_authority_corrupt")
+            values = _binding_values(operation)
+            if values is None:
+                return _manual_repair(connection, operation_id, "finalization_binding_construction_invalid")
+            construction_id, workbook_contract_id, target_identity, sheet_identity, template_version = values
+            if connection.execute("SELECT 1 FROM constructions WHERE id=?", (construction_id,)).fetchone() is None:
+                return _manual_repair(connection, operation_id, "finalization_binding_construction_invalid")
+            bindings = connection.execute(
+                "SELECT * FROM construction_bindings WHERE construction_id=? ORDER BY id", (construction_id,)
+            ).fetchall()
+            exact = [
+                row for row in bindings
+                if (row["workbook_contract_id"], row["target_identity"], row["sheet_identity"],
+                    row["template_version"], row["verified_state"])
+                == (workbook_contract_id, target_identity, sheet_identity, template_version, "verified")
+            ]
+            if operation["binding_finalized"] and (not operation["binding_finalized_at"] or not bindings):
+                return _manual_repair(connection, operation_id, "finalization_receipt_required")
+            if len(bindings) > 1 or (bindings and len(exact) != 1):
+                return _manual_repair(connection, operation_id, "finalization_binding_conflict")
+            if bindings:
+                binding_id = exact[0]["id"]
+            else:
+                binding_id = str(uuid.uuid4())
+                now = utc_now()
+                connection.execute(
+                    "INSERT INTO construction_bindings VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?)",
+                    (binding_id, construction_id, workbook_contract_id, target_identity, sheet_identity,
+                     template_version, now, now, now),
+                )
+                connection.execute(
+                    "UPDATE registry_meta SET generation=generation+1, updated_at=? WHERE id=1", (now,)
+                )
+            if operation["binding_finalized"]:
+                if not operation["binding_finalized_at"]:
+                    return _manual_repair(connection, operation_id, "finalization_receipt_required")
+            else:
+                if not _write_binding_receipt(connection, operation_id):
+                    raise FinalizationError("finalization_phase_invalid", operation_id)
+            return FinalizationProgress(
+                operation_id=operation_id,
+                status="published_pending_finalization",
+                completed_stage="binding",
+                next_stage="history",
+                binding_id=binding_id,
+            )
+    except FinalizationError:
+        raise
+    except sqlite3.Error:
+        return _pending(operation_id, "finalization_binding_storage_failed")
