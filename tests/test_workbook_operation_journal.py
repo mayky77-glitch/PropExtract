@@ -71,7 +71,12 @@ def _finalized_operation(journal: WorkbookOperationJournal, storage: RegistrySto
         "history_finalized=1, history_finalized_at=?, report_finalized=1, report_finalized_at=? WHERE operation_id=?",
         (now, now, now, operation_id),
     )
-    journal.transition(operation_id, expected_phase=PHASE_PUBLISHED, next_phase=PHASE_FINALIZED)
+    # This fixture isolates `record_repair_anomaly`; ordinary callers cannot
+    # manufacture the terminal state through the generic journal API.
+    storage.connection.execute(
+        "UPDATE workbook_operation_journal SET phase='finalized', finalized_at=?, updated_at=? WHERE operation_id=?",
+        (now, now, operation_id),
+    )
     return operation_id
 
 
