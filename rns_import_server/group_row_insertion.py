@@ -309,7 +309,10 @@ def _recheck(context: PublicationContext, plan: MutationPlan, source: Path) -> M
 
 def _manual_repair(context: PublicationContext, operation_id: str, phase: str, code: str) -> None:
     try:
-        context.journal.transition(operation_id, expected_phase=phase, next_phase="manual_repair", failure_code=code)
+        if phase in {"finalized", "manual_repair"}:
+            context.journal.record_repair_anomaly(operation_id, failure_code=code)
+        else:
+            context.journal.transition(operation_id, expected_phase=phase, next_phase="manual_repair", failure_code=code)
     except Exception as error:
         raise GroupRowInsertionError("manual_repair_journal_failed", stage="manual_repair", cause=error) from error
 
