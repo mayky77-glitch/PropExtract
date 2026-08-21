@@ -7,6 +7,7 @@ value comes from the published journal and the K3b1 authority snapshot.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import re
 import sqlite3
 import uuid
@@ -115,6 +116,39 @@ def _binding_values(operation: sqlite3.Row) -> tuple[str, str, str, str, str] | 
     return values  # type: ignore[return-value]
 
 
+def _is_canonical_utc(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
+    except ValueError:
+        return False
+
+
+def _valid_exact_binding(row: sqlite3.Row, values: tuple[str, str, str, str, str]) -> bool:
+    binding_id = row["id"]
+    if type(binding_id) is not str or not binding_id:
+        return False
+    try:
+        if str(uuid.UUID(binding_id)) != binding_id:
+            return False
+    except ValueError:
+        return False
+    construction_id, workbook_contract_id, target_identity, sheet_identity, template_version = values
+    if (row["construction_id"], row["workbook_contract_id"], row["target_identity"], row["sheet_identity"],
+            row["template_version"], row["verified_state"]) != (
+                construction_id, workbook_contract_id, target_identity, sheet_identity, template_version, "verified"):
+        return False
+    return all(_is_canonical_utc(row[column]) for column in ("verified_at", "created_at", "updated_at"))
+
+
+def _increment_generation(connection: sqlite3.Connection, now: str) -> None:
+    if connection.execute(
+        "UPDATE registry_meta SET generation=generation+1, updated_at=? WHERE id=1", (now,)
+    ).rowcount != 1:
+        raise sqlite3.OperationalError("registry generation authority is missing or ambiguous")
+
+
 def _write_binding_receipt(connection: sqlite3.Connection, operation_id: str) -> bool:
     now = utc_now()
     return connection.execute(
@@ -165,11 +199,15 @@ def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> F
                     row["template_version"], row["verified_state"])
                 == (workbook_contract_id, target_identity, sheet_identity, template_version, "verified")
             ]
-            if operation["binding_finalized"] and (not operation["binding_finalized_at"] or not bindings):
+            if operation["binding_finalized"] and not _is_canonical_utc(operation["binding_finalized_at"]):
+                return _manual_repair(connection, operation_id, "finalization_receipt_required")
+            if operation["binding_finalized"] and not bindings:
                 return _manual_repair(connection, operation_id, "finalization_receipt_required")
             if len(bindings) > 1 or (bindings and len(exact) != 1):
                 return _manual_repair(connection, operation_id, "finalization_binding_conflict")
             if bindings:
+                if not _valid_exact_binding(exact[0], values):
+                    return _manual_repair(connection, operation_id, "finalization_binding_conflict")
                 binding_id = exact[0]["id"]
             else:
                 binding_id = str(uuid.uuid4())
@@ -179,12 +217,10 @@ def finalize_published_binding(storage: RegistryStorage, operation_id: str) -> F
                     (binding_id, construction_id, workbook_contract_id, target_identity, sheet_identity,
                      template_version, now, now, now),
                 )
-                connection.execute(
-                    "UPDATE registry_meta SET generation=generation+1, updated_at=? WHERE id=1", (now,)
-                )
+                _increment_generation(connection, now)
             if operation["binding_finalized"]:
-                if not operation["binding_finalized_at"]:
-                    return _manual_repair(connection, operation_id, "finalization_receipt_required")
+                # The exact canonical timestamp was already verified above.
+                pass
             else:
                 if not _write_binding_receipt(connection, operation_id):
                     raise FinalizationError("finalization_phase_invalid", operation_id)

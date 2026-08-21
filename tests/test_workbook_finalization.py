@@ -68,6 +68,39 @@ def test_existing_exact_binding_is_receipted_without_generation_change(tmp_path)
         storage.close()
 
 
+@pytest.mark.parametrize("column,value", [("id", "not-a-uuid"), ("id", None), ("verified_at", "broken")])
+def test_existing_exact_binding_requires_valid_durable_identity_and_evidence(tmp_path, column: str, value: object) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        operation_id = _published(storage); construction = storage.list_constructions()[0]
+        binding_id = storage.bind_construction(
+            construction.id, workbook_contract_id="contract", target_identity="target", sheet_identity="sheet",
+            template_version="template", verified_state="verified", expected_generation=storage.generation,
+        )
+        storage.connection.execute(f"UPDATE construction_bindings SET {column}=? WHERE id=?", (value, binding_id))
+        result = finalize_published_binding(storage, operation_id)
+        assert (result.status, result.error_code, storage.connection.execute("SELECT COUNT(*) FROM construction_bindings").fetchone()[0]) == (
+            "manual_repair", "finalization_binding_conflict", 1,
+        )
+    finally:
+        storage.close()
+
+
+def test_missing_generation_authority_rolls_back_binding_and_receipt(tmp_path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        operation_id = _published(storage)
+        storage.connection.execute("DELETE FROM registry_meta WHERE id=1")
+        result = finalize_published_binding(storage, operation_id)
+        operation = WorkbookOperationJournal(storage).get(operation_id)
+        assert result.error_code == "finalization_binding_storage_failed"
+        assert operation is not None and (operation.phase, operation["binding_finalized"], storage.connection.execute("SELECT COUNT(*) FROM construction_bindings").fetchone()[0]) == (
+            "published", 0, 0,
+        )
+    finally:
+        storage.close()
+
+
 @pytest.mark.parametrize("mutation", [
     "UPDATE workbook_finalization_snapshots SET digest='broken'",
     "UPDATE workbook_operation_journal SET post_hash='A' || substr(post_hash, 2) WHERE operation_id='binding-operation'",
@@ -99,6 +132,23 @@ def test_missing_authority_and_receipt_without_binding_are_durable_manual_repair
         )
         receipt = finalize_published_binding(storage, operation_id)
         assert (receipt.status, receipt.error_code, storage.connection.execute("SELECT COUNT(*) FROM construction_bindings").fetchone()[0]) == (
+            "manual_repair", "finalization_receipt_required", 0,
+        )
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("timestamp", [" ", "2026-01-01", "2026-01-01T00:00:00+00:00"])
+def test_existing_binding_receipt_requires_canonical_utc_timestamp(tmp_path, timestamp: str) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        operation_id = _published(storage)
+        storage.connection.execute(
+            "UPDATE workbook_operation_journal SET binding_finalized=1, binding_finalized_at=? WHERE operation_id=?",
+            (timestamp, operation_id),
+        )
+        result = finalize_published_binding(storage, operation_id)
+        assert (result.status, result.error_code, storage.connection.execute("SELECT COUNT(*) FROM construction_bindings").fetchone()[0]) == (
             "manual_repair", "finalization_receipt_required", 0,
         )
     finally:
