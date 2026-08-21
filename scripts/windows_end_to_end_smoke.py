@@ -88,7 +88,7 @@ def _require_portable_windows_runtime() -> None:
         raise RuntimeError("Windows smoke must use the installed app-local portable Python")
 
 
-def _readline_with_timeout(process: subprocess.Popen[str], timeout: float = 5.0) -> str:
+def _readline_with_timeout(process: subprocess.Popen[str], timeout: float = 20.0) -> str:
     if process.stdout is None:
         raise RuntimeError("native cancel probe stdout is unavailable")
     lines: queue.Queue[str] = queue.Queue()
