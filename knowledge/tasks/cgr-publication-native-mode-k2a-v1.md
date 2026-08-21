@@ -49,3 +49,16 @@ Add read-only `validate_blank_fill` to the mutation manifest and call it for `bl
 Keep tests compact: request mode serialization and invalid-mode pre-open; static PowerShell proof of exclusive mode branches and one insert call; blank-fill success proves unchanged row count/coordinates/formulas and exact trusted values/W link; one parametrized outside/target/formula/link/count failure matrix; publication failure stops before final fsync/backup/replace. Run direct native/manifest/group tests, relevant publication validators, full pytest once, compile/diff/scope/ancestry/identity/clean, then independent P6.
 
 Native Excel 365 remains required later to qualify actual COM behavior. CrossOver/LibreOffice cannot convert this Gate into a native Excel success claim.
+
+## Implementation evidence
+
+- Request JSON carries `mutation_mode`; Python rejects a non-string or unknown
+  mode as `native_mutation_mode_invalid@pre_open`, before request-file write or
+  helper launch.
+- PowerShell validates mode before `New-Object -ComObject Excel.Application`.
+  `middle_insert` contains the sole row `Insert`; `blank_fill` performs no row
+  insertion.
+- `validate_blank_fill` compares read-only semantic manifests, including XLSX
+  hyperlink relationships. It permits only exact request field values and W
+  link, and blocks target or outside value/formula/link/count drift at
+  `GroupRowInsertionError@validate` before final fsync, backup, or replace.

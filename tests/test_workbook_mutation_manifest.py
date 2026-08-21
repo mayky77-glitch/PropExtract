@@ -11,6 +11,7 @@ import rns_import_server.workbook_mutation_manifest as mutation_manifest
 from rns_import_server.workbook_mutation_manifest import (
     MutationManifestError,
     manifest_for,
+    validate_blank_fill,
     validate_dependent_registry_references,
     validate_inserted_row,
     validate_insertion,
@@ -38,6 +39,43 @@ def test_manifest_rejects_unmapped_change(tmp_path: Path) -> None:
     book = load_workbook(candidate); book.active["Y6"] = "=A1"; book.save(candidate); book.close()
     with pytest.raises(RuntimeError, match="mutation_manifest_changed"):
         validate_insertion(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС", insertion_row=5), 5)
+
+
+def _blank_fill_books(path: Path) -> tuple[Path, Path, dict[int, object], str]:
+    control, candidate = path / "control.xlsx", path / "candidate.xlsx"
+    fields, link = {6: "RU-00000000-00-2026", 23: "Документ"}, "https://example.test/document"
+    book = Workbook(); sheet = book.active; sheet.title = "Реестр РНС"
+    sheet["A4"] = "outside"; sheet["F5"] = "old"; sheet["W5"] = "old document"; sheet["W5"].hyperlink = "https://example.test/old"
+    sheet["Y5"] = "=A5"; sheet["Z5"] = "=Y5+1"; book.save(control); book.close()
+    book = load_workbook(control); sheet = book.active
+    for column, value in fields.items(): sheet.cell(5, column).value = value
+    sheet["W5"].hyperlink = link; book.save(candidate); book.close()
+    return control, candidate, fields, link
+
+
+def test_blank_fill_manifest_accepts_only_exact_trusted_row_changes(tmp_path: Path) -> None:
+    control, candidate, fields, link = _blank_fill_books(tmp_path)
+    before, after = manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС")
+    validate_blank_fill(before, after, target_row=5, fields=fields, hyperlink=link)
+    assert (before.max_row, after.max_row, before.formulas["Y5"], after.formulas["Y5"]) == (5, 5, "=A5", "=A5")
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        (lambda sheet: setattr(sheet["A4"], "value", "changed"), "blank-fill-outside-value-mismatch"),
+        (lambda sheet: setattr(sheet["G5"], "value", "untrusted"), "blank-fill-value-mismatch"),
+        (lambda sheet: setattr(sheet["Y5"], "value", "=A1"), "blank-fill-formula-mismatch"),
+        (lambda sheet: setattr(sheet["W5"], "hyperlink", "https://example.test/untrusted"), "blank-fill-hyperlink-mismatch"),
+        (lambda sheet: sheet.insert_rows(1), "blank-fill-row-count-mismatch"),
+    ],
+)
+def test_blank_fill_manifest_rejects_outside_target_formula_link_or_count_changes(tmp_path: Path, change, code: str) -> None:
+    control, candidate, fields, link = _blank_fill_books(tmp_path)
+    book = load_workbook(candidate); change(book.active); book.save(candidate); book.close()
+    with pytest.raises(MutationManifestError) as captured:
+        validate_blank_fill(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС"), target_row=5, fields=fields, hyperlink=link)
+    assert captured.value.code == code
 
 
 def _gate_books(path: Path, insertion_row: int) -> tuple[Path, Path, dict[int, object], str]:

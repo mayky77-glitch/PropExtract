@@ -8,6 +8,7 @@ from typing import Mapping
 
 from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
 from rns_import_server.audit import digest
 
@@ -46,7 +47,10 @@ class MutationManifest:
 
 
 def manifest_for(path: Path, sheet_name: str, *, insertion_row: int | None = None) -> MutationManifest:
-    book = load_workbook(path, read_only=True, data_only=False)
+    # ``read_only`` worksheets omit relationships, including hyperlinks.  A
+    # blank-fill gate must prove those links, so this stays read-only in
+    # behavior but loads a normal workbook view.
+    book = load_workbook(path, read_only=False, data_only=False)
     try:
         sheet = book[sheet_name]
         values: dict[str, object] = {}
@@ -91,6 +95,72 @@ def validate_control(original: MutationManifest, control: MutationManifest) -> N
         raise RuntimeError("control_manifest_structure_changed")
     if original.values != control.values or original.formulas != control.formulas or original.hyperlinks != control.hyperlinks:
         raise RuntimeError("control_manifest_semantic_changed")
+
+
+def _row_map(values: Mapping[str, object], row: int) -> dict[int, object]:
+    result: dict[int, object] = {}
+    for coordinate, value in values.items():
+        column, coordinate_row = coordinate_from_string(coordinate)
+        if coordinate_row == row:
+            result[column_index_from_string(column)] = value
+    return result
+
+
+def _outside_row_map(values: Mapping[str, object], row: int) -> dict[str, object]:
+    return {
+        coordinate: value for coordinate, value in values.items()
+        if coordinate_from_string(coordinate)[1] != row
+    }
+
+
+def validate_blank_fill(
+    control: MutationManifest,
+    candidate: MutationManifest,
+    *,
+    target_row: int,
+    fields: Mapping[int, object],
+    hyperlink: str | None,
+) -> None:
+    """Prove a native blank-fill changed only exact trusted row fields.
+
+    Comparison is manifest-only and read-only.  It deliberately has no repair
+    path: any semantic value, formula, link, sheet, or row-count surprise
+    blocks publication at the caller's validation boundary.
+    """
+    if target_row < 1:
+        _fail("blank-fill-target-row-invalid", control.sheet, str(target_row))
+    trusted = _field_map(fields)
+    if hyperlink is not None and not isinstance(hyperlink, str):
+        _fail("blank-fill-hyperlink-invalid", control.sheet, "hyperlink")
+    if control.sheet != candidate.sheet:
+        _fail("blank-fill-sheet-mismatch", control.sheet, candidate.sheet)
+    if control.max_row != candidate.max_row:
+        _fail("blank-fill-row-count-mismatch", control.sheet, str(target_row))
+    maps = (
+        ("value", control.values, candidate.values),
+        ("formula", control.formulas, candidate.formulas),
+        ("hyperlink", control.hyperlinks, candidate.hyperlinks),
+    )
+    for kind, before, after in maps:
+        if _outside_row_map(before, target_row) != _outside_row_map(after, target_row):
+            _fail(f"blank-fill-outside-{kind}-mismatch", control.sheet, str(target_row))
+
+    expected_values = _row_map(control.values, target_row)
+    for column, value in trusted.items():
+        if value in (None, ""):
+            expected_values.pop(column, None)
+        else:
+            expected_values[column] = value
+    if _row_map(candidate.values, target_row) != expected_values:
+        _fail("blank-fill-value-mismatch", control.sheet, str(target_row))
+    if _row_map(candidate.formulas, target_row) != _row_map(control.formulas, target_row):
+        _fail("blank-fill-formula-mismatch", control.sheet, str(target_row))
+
+    # The request owns W only.  Existing links elsewhere in a claimed blank
+    # row are not inherited: their presence makes this plan invalid.
+    expected_links = {} if hyperlink is None else {23: hyperlink}
+    if _row_map(candidate.hyperlinks, target_row) != expected_links:
+        _fail("blank-fill-hyperlink-mismatch", control.sheet, str(target_row))
 
 
 def _field_map(fields: Mapping[int, object]) -> dict[int, object]:
