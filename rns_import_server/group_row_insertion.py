@@ -38,7 +38,7 @@ from rns_import_server.workbook_mutation_manifest import (
     validate_insertion,
 )
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
-from rns_import_server.registry_storage import RegistryConflictError
+from rns_import_server.registry_storage import RegistryConflictError, RegistryError
 from rns_import_server.workbook_cutover import (
     WorkbookCutoverError,
     fsync_file,
@@ -46,6 +46,13 @@ from rns_import_server.workbook_cutover import (
     replace_verified,
     verify_pre_cutover_target,
 )
+from rns_import_server.workbook_finalization_snapshot import FinalizationSnapshotError, build_payload
+
+_FINALIZATION_AUTHORITY_CODES = frozenset({
+    "workbook_contract_id_required", "consumer_action_identity_mismatch", "finalization_snapshot_required",
+    "finalization_snapshot_invalid", "finalization_snapshot_too_large", "finalization_snapshot_conflict",
+    "finalization_authority_missing", "finalization_authority_corrupt", "finalization_authority_journal_failed",
+})
 
 
 class GroupRowInsertionError(RuntimeError):
@@ -64,6 +71,7 @@ class Journal(Protocol):
     def create(self, **kwargs: object) -> object: ...
     def transition(self, operation_id: str, *, expected_phase: str, next_phase: str, **kwargs: object) -> object: ...
     def record_post_hash(self, operation_id: str, *, expected_phase: str, post_hash: str) -> object: ...
+    def record_finalization_authority(self, operation_id: str, *, expected_phase: str, post_hash: str, payload: object) -> object: ...
     def finalize_flag(self, operation_id: str, flag: str) -> object: ...
 
 
@@ -80,6 +88,8 @@ class PublicationContext:
     idempotency_key: str | None = None
     consumer_id: str | None = None
     operation_kind: str | None = None
+    workbook_contract_id: str | None = None
+    finalization_snapshot_builder: Callable[[str, int, str], object] | None = None
 
 
 @dataclass(frozen=True)
@@ -161,7 +171,7 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _authority(context: PublicationContext) -> tuple[str, str, str]:
+def _authority(context: PublicationContext) -> tuple[str, str, str, str]:
     identifiers = (context.operation_id, context.idempotency_key, context.consumer_id)
     if any(not isinstance(value, str) or not value.strip() for value in identifiers):
         raise GroupRowInsertionError("publication_authority_required", stage="authorize")
@@ -173,7 +183,13 @@ def _authority(context: PublicationContext) -> tuple[str, str, str]:
         raise GroupRowInsertionError("publication_identity_invalid", stage="authorize", cause=error) from error
     if context.operation_kind != "new_row":
         raise GroupRowInsertionError("publication_operation_kind_mismatch", stage="preflight")
-    return operation_id, idempotency_key, consumer_id
+    if consumer_id != operation_id:
+        raise GroupRowInsertionError("consumer_action_identity_mismatch", stage="authorize")
+    if not isinstance(context.workbook_contract_id, str) or not context.workbook_contract_id.strip():
+        raise GroupRowInsertionError("workbook_contract_id_required", stage="authorize")
+    if not callable(context.finalization_snapshot_builder):
+        raise GroupRowInsertionError("finalization_authority_missing", stage="finalization_authority")
+    return operation_id, idempotency_key, consumer_id, context.workbook_contract_id
 
 
 def _evidence(
@@ -285,6 +301,7 @@ def _reserve(
     sheet_identity: str,
     intent_digest: str,
     manifest_digest: str,
+    workbook_contract_id: str,
 ) -> tuple[object, bool]:
     return context.journal.reserve(
         nonce_factory=lambda: (str(uuid4()), str(uuid4())),
@@ -293,7 +310,7 @@ def _reserve(
         target_identity=context.target_identity, sheet_identity=sheet_identity, template_version=context.template_version,
         expected_generation=context.generation, intent_version=_INTENT_VERSION, intent_digest=intent_digest,
         manifest_version=_MANIFEST_VERSION, manifest_digest=manifest_digest,
-        operation_directory=str(directory), canonical_rns=plan.canonical_rns,
+        operation_directory=str(directory), canonical_rns=plan.canonical_rns, workbook_contract_id=workbook_contract_id,
     )
 
 
@@ -322,7 +339,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
     if request.context is None:
         raise GroupRowInsertionError("publication_authority_required", stage="authorize")
     context, plan = request.context, request.plan
-    operation_id, idempotency_key, consumer_id = _authority(context)
+    operation_id, idempotency_key, consumer_id, workbook_contract_id = _authority(context)
     if plan.mode not in {"existing_blank", "insert_before_header"}:
         raise GroupRowInsertionError("group_row_plan_invalid", stage="preflight")
     mode = "blank_fill" if plan.mode == "existing_blank" else "middle_insert"
@@ -348,8 +365,9 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         "manifest_version": _MANIFEST_VERSION,
         "manifest_digest": manifest_digest,
         "operation_directory": str(directory),
+        "workbook_contract_id": workbook_contract_id,
     }
-    phase, created_operation = "planned", False
+    phase, created_operation, authority_recorded = "planned", False, False
     try:
         with context.lock():
             existing = context.journal.get(operation_id)
@@ -367,6 +385,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                     sheet_identity=request.sheet,
                     intent_digest=intent_digest,
                     manifest_digest=manifest_digest,
+                    workbook_contract_id=workbook_contract_id,
                 )
             except RegistryConflictError as error:
                 stored = context.journal.get(operation_id)
@@ -459,7 +478,22 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             backup = directory / "backup.xlsx"; backup_hash = _copy_verified(request.source, backup)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="backup_verified", hashes={"backup_hash": backup_hash}); phase = "backup_verified"
             post_hash = sha256(candidate)
-            context.journal.record_post_hash(operation_id, expected_phase=phase, post_hash=post_hash)
+            try:
+                report = context.finalization_snapshot_builder(operation_id, plan.target_row, post_hash)  # type: ignore[misc]
+                payload = build_payload(action_id=operation_id, target_row=plan.target_row, report=report)
+                context.journal.record_finalization_authority(
+                    operation_id, expected_phase=phase, post_hash=post_hash, payload=payload,
+                )
+                authority_recorded = True
+            except FinalizationSnapshotError as error:
+                raise GroupRowInsertionError(error.code, stage="finalization_authority", cause=error) from error
+            except RegistryError as error:
+                code = str(error)
+                if code in _FINALIZATION_AUTHORITY_CODES:
+                    raise GroupRowInsertionError(code, stage="finalization_authority", cause=error) from error
+                raise GroupRowInsertionError("finalization_authority_journal_failed", stage="finalization_authority") from error
+            except Exception as error:
+                raise GroupRowInsertionError("finalization_authority_journal_failed", stage="finalization_authority") from error
             _recheck(context, plan, request.source)
             try:
                 verify_pre_cutover_target(source=request.source, output=request.output, pre_hash=plan.workbook_hash)
@@ -472,7 +506,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 raise GroupRowInsertionError("published_journal_failed", stage="cutover_published", cause=error) from error
             return {"mode": mode, "row": plan.target_row, "published": True, "operation_id": operation_id, "manifest": candidate_manifest.digest}
     except GroupRowInsertionError as error:
-        if created_operation and not (phase == "backup_verified" and 'post_hash' in locals()):
+        if created_operation and not (phase == "backup_verified" and (authority_recorded or error.stage == "finalization_authority")):
             try:
                 _manual_repair(context, operation_id, phase, error.code)
             except GroupRowInsertionError as cleanup:
@@ -488,7 +522,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                 raise GroupRowInsertionError(code, stage=error.stage, cause=error, cleanup=repair_error) from error
         raise GroupRowInsertionError(code, stage=error.stage, cause=error, cleanup=error.cleanup) from error
     except Exception as error:
-        if created_operation and not (phase == "backup_verified" and 'post_hash' in locals()):
+        if created_operation and not (phase == "backup_verified" and authority_recorded):
             try:
                 _manual_repair(context, operation_id, phase, "group_row_failed")
             except GroupRowInsertionError as repair_error:

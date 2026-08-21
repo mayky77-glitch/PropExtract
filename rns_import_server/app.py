@@ -13,6 +13,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from rns_import_server.report_sanitization import safe_report_projection
 
 try:
     from rns_import_server.audit import atomic_json, digest, sha256
@@ -416,35 +417,6 @@ def _safe_report_string(value: str, key: str | None = None) -> str:
         value = _UNQUOTED_POSIX_PATH_WITH_SPACES.sub("[локальный путь]", value)
         value = _WINDOWS_PATH_IN_TEXT.sub("[локальный путь]", value)
         value = _POSIX_PATH_IN_TEXT.sub("[локальный путь]", value)
-    return value
-
-
-def safe_report_projection(value: object, key: str | None = None) -> object:
-    """Return a disk-safe copy without OCR content or absolute local paths.
-
-    The caller's in-memory result remains untouched for server-held capability
-    actions. This is deliberately recursive because records nest source maps.
-    """
-    normalized_key = (key or "").casefold()
-    if normalized_key in _REPORT_OMITTED_KEYS:
-        return None
-    if isinstance(value, dict):
-        projected: dict[str, object] = {}
-        for index, (item_key, item_value) in enumerate(value.items(), start=1):
-            original_key = str(item_key)
-            if original_key.casefold() in _REPORT_OMITTED_KEYS:
-                continue
-            safe_key = _safe_report_string(original_key, "message")
-            if safe_key in projected:
-                safe_key = f"{safe_key} ({index})"
-            projected[safe_key] = safe_report_projection(item_value, original_key)
-        return projected
-    if isinstance(value, list):
-        return [safe_report_projection(item, key) for item in value]
-    if isinstance(value, tuple):
-        return [safe_report_projection(item, key) for item in value]
-    if isinstance(value, str):
-        return _safe_report_string(value, key)
     return value
 
 
