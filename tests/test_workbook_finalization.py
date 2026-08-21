@@ -237,6 +237,29 @@ def test_history_finalizer_requires_binding_and_writes_one_canonical_event(tmp_p
     finally:
         storage.close()
 
+    storage = RegistryStorage.bootstrap(tmp_path / "ok")
+    target = tmp_path / "registry-ok.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _published(storage)
+        construction = storage.list_constructions()[0]
+        actions = NewRowActionStore(storage)
+        actions.register(action_id=operation_id, job_id="job", construction_id=construction.id, workbook_contract_id="contract",
+                         target_identity="target", target_path=str(target), capability="cap")
+        assert actions.reserve_pending_to_publishing(operation_id, job_authorization="cap")
+        finalize_published_binding(storage, operation_id)
+        first = finalize_published_history(storage, operation_id)
+        operation = WorkbookOperationJournal(storage).get(operation_id)
+        event = storage.connection.execute("SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)).fetchone()
+        assert first.status == "published_pending_finalization" and first.next_stage == "report"
+        assert operation is not None and (operation["history_finalized"], operation["report_finalized"], operation["capability_finalized"]) == (1, 0, 0)
+        assert event is not None and (event["event_version"], event["event_type"], event["status"], event["target_row"], event["post_hash"]) == (1, "new_row", "published", 6, "a" * 64)
+        evidence = (dict(event), operation["history_finalized_at"], storage.generation)
+        replay = finalize_published_history(storage, operation_id)
+        assert replay == first
+        assert (dict(storage.connection.execute("SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)).fetchone()), WorkbookOperationJournal(storage).get(operation_id)["history_finalized_at"], storage.generation) == evidence  # type: ignore[index]
+    finally:
+        storage.close()
+
 
 def _history_ready(storage: RegistryStorage, target) -> str:
     operation_id = _published(storage)
@@ -315,14 +338,59 @@ def test_history_rejects_pending_tuple_and_event_conflicts(tmp_path) -> None:
         storage.close()
 
 
-def test_consumed_action_is_replay_only_and_contradictory_receipts_repair(tmp_path) -> None:
+def test_consumed_capability_history_replay_is_zero_write(tmp_path) -> None:
     storage = RegistryStorage.bootstrap(tmp_path / "consumed")
     target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
     try:
         operation_id = _history_ready(storage, target)
         assert finalize_published_history(storage, operation_id).completed_stage == "history"
         storage.connection.execute("UPDATE new_row_pending_actions SET state='consumed' WHERE action_id=?", (operation_id,))
+        storage.connection.execute(
+            "UPDATE workbook_operation_journal SET capability_finalized=1, capability_finalized_at='2026-08-22T00:00:00Z' "
+            "WHERE operation_id=?", (operation_id,)
+        )
+        before = (dict(WorkbookOperationJournal(storage).get(operation_id).values), dict(storage.connection.execute(
+            "SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)
+        ).fetchone()), storage.connection.total_changes)
         assert finalize_published_history(storage, operation_id).completed_stage == "history"
+        after = (dict(WorkbookOperationJournal(storage).get(operation_id).values), dict(storage.connection.execute(
+            "SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)
+        ).fetchone()), storage.connection.total_changes)
+        assert after == before
+    finally:
+        storage.close()
+
+
+def test_report_receipt_history_replay_is_zero_write(tmp_path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "report")
+    target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        assert finalize_published_history(storage, operation_id).completed_stage == "history"
+        storage.connection.execute(
+            "UPDATE workbook_operation_journal SET report_finalized=1, report_finalized_at='2026-08-22T00:00:00Z', "
+            "report_snapshot_digest=? WHERE operation_id=?", ("b" * 64, operation_id),
+        )
+        before = (dict(WorkbookOperationJournal(storage).get(operation_id).values), dict(storage.connection.execute(
+            "SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)
+        ).fetchone()), storage.connection.total_changes)
+        assert finalize_published_history(storage, operation_id).completed_stage == "history"
+        after = (dict(WorkbookOperationJournal(storage).get(operation_id).values), dict(storage.connection.execute(
+            "SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)
+        ).fetchone()), storage.connection.total_changes)
+        assert after == before
+    finally:
+        storage.close()
+
+
+def test_consumed_action_without_history_receipt_and_contradictory_receipts_repair(tmp_path) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path / "consumed-without-history")
+    target = tmp_path / "registry.xlsx"; target.write_bytes(b"xlsx")
+    try:
+        operation_id = _history_ready(storage, target)
+        storage.connection.execute("UPDATE new_row_pending_actions SET state='consumed' WHERE action_id=?", (operation_id,))
+        assert finalize_published_history(storage, operation_id).error_code == "finalization_action_conflict"
+        assert storage.connection.execute("SELECT COUNT(*) FROM new_row_action_history").fetchone()[0] == 0
     finally:
         storage.close()
 
@@ -339,28 +407,5 @@ def test_consumed_action_is_replay_only_and_contradictory_receipts_repair(tmp_pa
         assert result.error_code == "finalization_history_order_invalid"
         operation = WorkbookOperationJournal(storage).get(operation_id)
         assert operation is not None and operation["history_finalized_at"] == "2026-08-22T00:00:00Z"
-    finally:
-        storage.close()
-
-    storage = RegistryStorage.bootstrap(tmp_path / "ok")
-    target = tmp_path / "registry-ok.xlsx"; target.write_bytes(b"xlsx")
-    try:
-        operation_id = _published(storage)
-        construction = storage.list_constructions()[0]
-        actions = NewRowActionStore(storage)
-        actions.register(action_id=operation_id, job_id="job", construction_id=construction.id, workbook_contract_id="contract",
-                         target_identity="target", target_path=str(target), capability="cap")
-        assert actions.reserve_pending_to_publishing(operation_id, job_authorization="cap")
-        finalize_published_binding(storage, operation_id)
-        first = finalize_published_history(storage, operation_id)
-        operation = WorkbookOperationJournal(storage).get(operation_id)
-        event = storage.connection.execute("SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)).fetchone()
-        assert first.status == "published_pending_finalization" and first.next_stage == "report"
-        assert operation is not None and (operation["history_finalized"], operation["report_finalized"], operation["capability_finalized"]) == (1, 0, 0)
-        assert event is not None and (event["event_version"], event["event_type"], event["status"], event["target_row"], event["post_hash"]) == (1, "new_row", "published", 6, "a" * 64)
-        evidence = (dict(event), operation["history_finalized_at"], storage.generation)
-        replay = finalize_published_history(storage, operation_id)
-        assert replay == first
-        assert (dict(storage.connection.execute("SELECT * FROM new_row_action_history WHERE action_id=?", (operation_id,)).fetchone()), WorkbookOperationJournal(storage).get(operation_id)["history_finalized_at"], storage.generation) == evidence  # type: ignore[index]
     finally:
         storage.close()
