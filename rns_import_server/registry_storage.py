@@ -27,8 +27,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 7
-SEED_REVISION = "construction-registry-v7"
+SCHEMA_VERSION = 8
+SEED_REVISION = "construction-registry-v8"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -110,6 +110,9 @@ _V7_WORKBOOK_AUTHORITY_REFRESH_RECEIPT_COLUMNS = frozenset({
     "old_authority_sha256", "new_authority_sha256", "pre_hash", "post_hash",
     "template_digest", "ownership_digest", "ownership_count", "max_row",
     "generation_before", "generation_after", "created_at",
+})
+_V8_WORKBOOK_AUTHORITY_REFRESH_RECEIPT_COLUMNS = _V7_WORKBOOK_AUTHORITY_REFRESH_RECEIPT_COLUMNS | frozenset({
+    "prior_authority_payload",
 })
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 _LEGACY_LEASE_OWNERSHIP_FAILURE_CODE = "legacy_excel_lease_ownership_missing"
@@ -293,7 +296,7 @@ class RegistryStorage:
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         self._validate_schema(version)
         if version < SCHEMA_VERSION:
@@ -334,13 +337,20 @@ class RegistryStorage:
             required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
             required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
             required["workbook_authorities"] = _V6_WORKBOOK_AUTHORITY_COLUMNS
-        elif version == SCHEMA_VERSION:
+        elif version == 7:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS | _V5_JOURNAL_COLUMNS
             required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
             required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
             required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
             required["workbook_authorities"] = _V6_WORKBOOK_AUTHORITY_COLUMNS
             required["workbook_authority_refresh_receipts"] = _V7_WORKBOOK_AUTHORITY_REFRESH_RECEIPT_COLUMNS
+        elif version == SCHEMA_VERSION:
+            required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS | _V5_JOURNAL_COLUMNS
+            required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
+            required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
+            required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
+            required["workbook_authorities"] = _V6_WORKBOOK_AUTHORITY_COLUMNS
+            required["workbook_authority_refresh_receipts"] = _V8_WORKBOOK_AUTHORITY_REFRESH_RECEIPT_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -566,6 +576,7 @@ class RegistryStorage:
                     max_row INTEGER NOT NULL CHECK (max_row >= 1),
                     generation_before INTEGER NOT NULL CHECK (generation_before >= 0),
                     generation_after INTEGER NOT NULL CHECK (generation_after = generation_before + 1),
+                    prior_authority_payload TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 CREATE TRIGGER new_row_action_history_immutable_update
@@ -591,7 +602,7 @@ class RegistryStorage:
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1, 2, 3, 4, 5, 6}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
@@ -702,6 +713,12 @@ class RegistryStorage:
                     created_at TEXT NOT NULL
                 )"""
             )
+            if "prior_authority_payload" not in {
+                row["name"] for row in connection.execute("PRAGMA table_info(workbook_authority_refresh_receipts)")
+            }:
+                # Existing v7 receipts retain their historical evidence but
+                # cannot be promoted into a v8 predecessor snapshot.
+                connection.execute("ALTER TABLE workbook_authority_refresh_receipts ADD COLUMN prior_authority_payload TEXT")
             connection.execute(
                 "CREATE TRIGGER IF NOT EXISTS workbook_authority_refresh_receipts_immutable_update "
                 "BEFORE UPDATE ON workbook_authority_refresh_receipts BEGIN SELECT RAISE(ABORT, 'workbook_authority_refresh_receipts immutable'); END"

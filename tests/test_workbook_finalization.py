@@ -20,7 +20,7 @@ def _published(storage: RegistryStorage, *, operation_id: str = "binding-operati
         owner_id="owner", pair_nonce="pair", construction_id=construction.id, operation_kind="new_row",
         mutation_mode="blank_fill", target_identity="target", sheet_identity="sheet", template_version="template",
         expected_generation=storage.generation, intent_version="intent-v2", intent_digest="intent",
-        manifest_version="manifest-v2", manifest_digest="manifest", operation_directory="operation",
+        manifest_version="group-row-manifest-v2", manifest_digest="manifest", operation_directory="operation",
         canonical_rns="RU-00000000-00-2026", workbook_contract_id="contract",
     )
     journal.transition(operation_id, expected_phase="planned", next_phase="staged", hashes={"pre_hash": "pre", "staged_hash": "staged"})

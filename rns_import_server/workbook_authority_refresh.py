@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -23,7 +24,13 @@ from rns_import_server.workbook_projection import GroupOwnershipEvidence, Templa
 
 
 _V3_MANIFEST = "group-row-manifest-v3"
+_LEGACY_MANIFESTS = frozenset({"group-row-manifest-v1", "group-row-manifest-v2"})
 _HASH = frozenset("0123456789abcdef")
+_AUTHORITY_FIELDS = (
+    "action_id", "construction_id", "workbook_contract_id", "target_identity", "target_path", "sheet_identity",
+    "template_version", "source_sha256", "template_evidence", "template_digest", "template_count",
+    "ownership_evidence", "ownership_digest", "ownership_count", "max_row", "registry_generation", "created_at",
+)
 
 
 class WorkbookAuthorityRefreshError(RegistryError):
@@ -91,7 +98,6 @@ def _snapshot_target_row(operation: sqlite3.Row, snapshot: sqlite3.Row | None) -
         return None
     # ``verify_snapshot`` has already checked canonical shape and target-row
     # type. Avoid accepting any alternate source for this row.
-    import json
     try:
         target_row = json.loads(snapshot["canonical_payload"])["target_row"]
     except (KeyError, TypeError, ValueError):
@@ -99,8 +105,37 @@ def _snapshot_target_row(operation: sqlite3.Row, snapshot: sqlite3.Row | None) -
     return target_row if type(target_row) is int and target_row >= 2 else None
 
 
+def _authority_state(authority: sqlite3.Row | dict[str, object]) -> tuple[dict[str, object], str, str]:
+    """Canonical immutable authority state, suitable for a receipt snapshot."""
+    try:
+        if set(authority.keys()) != set(_AUTHORITY_FIELDS):
+            raise ValueError
+        values = {field: authority[field] for field in _AUTHORITY_FIELDS}
+        WorkbookAuthorityStore._decode(values)  # type: ignore[arg-type]
+        canonical = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (KeyError, TypeError, ValueError, WorkbookAuthorityError) as error:
+        raise WorkbookAuthorityRefreshError("workbook_authority_refresh_authority_corrupt") from error
+    return values, canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _receipt_prior_state(receipt: sqlite3.Row) -> tuple[dict[str, object], str] | None:
+    value = receipt["prior_authority_payload"]
+    if type(value) is not str:
+        return None
+    try:
+        parsed = json.loads(value)
+        if type(parsed) is not dict:
+            return None
+        state, canonical, digest = _authority_state(parsed)
+    except (TypeError, ValueError, json.JSONDecodeError, WorkbookAuthorityRefreshError):
+        return None
+    if canonical != value or digest != receipt["old_authority_sha256"]:
+        return None
+    return state, digest
+
+
 def _successor(
-    authority: sqlite3.Row, *, mutation_mode: str, target_row: int,
+    authority: sqlite3.Row | dict[str, object], *, mutation_mode: str, target_row: int,
 ) -> tuple[str, str, str, str, int]:
     decoded = WorkbookAuthorityStore._decode(authority)
     ownership = decoded.group_ownership
@@ -151,15 +186,35 @@ def _receipt_valid(
     fields = {
         "operation_id": operation["operation_id"], "action_id": action["action_id"], "consumer_id": operation["consumer_id"],
         "mutation_mode": operation["mutation_mode"], "target_row": target_row,
-        "new_authority_sha256": authority["source_sha256"], "pre_hash": operation["pre_hash"], "post_hash": operation["post_hash"],
+        "pre_hash": operation["pre_hash"], "post_hash": operation["post_hash"],
         "template_digest": authority["template_digest"], "ownership_digest": authority["ownership_digest"],
         "ownership_count": authority["ownership_count"], "max_row": authority["max_row"],
         "generation_after": authority["registry_generation"],
     }
     if any(receipt[key] != value for key, value in fields.items()):
         return False
-    return (receipt["old_authority_sha256"] == operation["pre_hash"] and _hash(receipt["old_authority_sha256"])
-            and _hash(receipt["new_authority_sha256"]) and _hash(receipt["pre_hash"]) and _hash(receipt["post_hash"])
+    prior = _receipt_prior_state(receipt)
+    if prior is None:
+        return False
+    prior_state, _ = prior
+    if (prior_state["source_sha256"] != operation["pre_hash"] or prior_state["registry_generation"] != receipt["generation_before"]
+            or any(prior_state[key] != authority[key] for key in ("action_id", "construction_id", "workbook_contract_id", "target_identity", "target_path", "sheet_identity", "template_version", "created_at"))):
+        return False
+    try:
+        template_json, template_digest, ownership_json, ownership_digest, max_row = _successor(
+            prior_state, mutation_mode=operation["mutation_mode"], target_row=target_row,
+        )
+        expected = dict(prior_state)
+        expected.update(source_sha256=operation["post_hash"], template_evidence=template_json, template_digest=template_digest,
+                        ownership_evidence=ownership_json, ownership_digest=ownership_digest, ownership_count=max_row,
+                        max_row=max_row, registry_generation=receipt["generation_after"])
+        _, _, expected_digest = _authority_state(expected)
+        _, _, actual_digest = _authority_state(authority)
+    except WorkbookAuthorityRefreshError:
+        return False
+    return (expected_digest == actual_digest == receipt["new_authority_sha256"]
+            and _hash(receipt["old_authority_sha256"]) and _hash(receipt["new_authority_sha256"])
+            and _hash(receipt["pre_hash"]) and _hash(receipt["post_hash"])
             and _hash(receipt["template_digest"]) and _hash(receipt["ownership_digest"])
             and type(receipt["generation_before"]) is int and type(receipt["generation_after"]) is int
             and receipt["generation_before"] + 1 == receipt["generation_after"]
@@ -168,8 +223,10 @@ def _receipt_valid(
 
 def has_valid_authority_refresh_receipt(connection: sqlite3.Connection, operation: sqlite3.Row) -> bool:
     """Verify the v3 receipt against the live successor authority, read-only."""
-    if operation["manifest_version"] != _V3_MANIFEST:
+    if operation["manifest_version"] in _LEGACY_MANIFESTS:
         return True
+    if operation["manifest_version"] != _V3_MANIFEST:
+        return False
     action = connection.execute("SELECT * FROM new_row_pending_actions WHERE action_id=?", (operation["operation_id"],)).fetchone()
     authority = connection.execute("SELECT * FROM workbook_authorities WHERE action_id=?", (operation["operation_id"],)).fetchone()
     snapshot = connection.execute(
@@ -225,8 +282,10 @@ def refresh_published_authority(storage: RegistryStorage, operation_id: str) -> 
             if target_row is None:
                 return _manual_repair(connection, operation_id, "workbook_authority_refresh_snapshot_invalid")
             try:
-                WorkbookAuthorityStore._decode(authority)
+                prior_state, prior_payload, prior_digest = _authority_state(authority)
             except WorkbookAuthorityError:
+                return _manual_repair(connection, operation_id, "workbook_authority_refresh_authority_corrupt")
+            except WorkbookAuthorityRefreshError:
                 return _manual_repair(connection, operation_id, "workbook_authority_refresh_authority_corrupt")
             try:
                 target_sha256 = _target_sha256(action["target_path"])
@@ -250,12 +309,17 @@ def refresh_published_authority(storage: RegistryStorage, operation_id: str) -> 
                 return _manual_repair(connection, operation_id, "workbook_authority_refresh_generation_conflict")
             try:
                 template_json, template_digest, ownership_json, ownership_digest, max_row = _successor(
-                    authority, mutation_mode=operation["mutation_mode"], target_row=target_row,
+                    prior_state, mutation_mode=operation["mutation_mode"], target_row=target_row,
                 )
             except WorkbookAuthorityRefreshError as error:
                 return _manual_repair(connection, operation_id, str(error))
             before = int(current_generation["generation"])
             after = before + 1
+            successor_state = dict(prior_state)
+            successor_state.update(source_sha256=operation["post_hash"], template_evidence=template_json, template_digest=template_digest,
+                                   ownership_evidence=ownership_json, ownership_digest=ownership_digest, ownership_count=max_row,
+                                   max_row=max_row, registry_generation=after)
+            _, _, successor_digest = _authority_state(successor_state)
             now = utc_now()
             if connection.execute(
                 "UPDATE workbook_authorities SET source_sha256=?, template_evidence=?, template_digest=?, ownership_evidence=?, "
@@ -266,10 +330,13 @@ def refresh_published_authority(storage: RegistryStorage, operation_id: str) -> 
             ).rowcount != 1:
                 raise sqlite3.OperationalError("authority successor CAS failed")
             connection.execute(
-                "INSERT INTO workbook_authority_refresh_receipts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO workbook_authority_refresh_receipts("
+                "operation_id,action_id,consumer_id,mutation_mode,target_row,old_authority_sha256,new_authority_sha256,"
+                "pre_hash,post_hash,template_digest,ownership_digest,ownership_count,max_row,generation_before,generation_after,"
+                "prior_authority_payload,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (operation_id, operation_id, operation_id, operation["mutation_mode"], target_row,
-                 operation["pre_hash"], operation["post_hash"], operation["pre_hash"], operation["post_hash"],
-                 template_digest, ownership_digest, max_row, max_row, before, after, now),
+                 prior_digest, successor_digest, operation["pre_hash"], operation["post_hash"],
+                 template_digest, ownership_digest, max_row, max_row, before, after, prior_payload, now),
             )
             if connection.execute(
                 "UPDATE registry_meta SET generation=?, updated_at=? WHERE id=1 AND generation=?", (after, now, before)

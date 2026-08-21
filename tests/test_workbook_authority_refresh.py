@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -132,13 +135,89 @@ def test_receipt_storage_failure_rolls_back_the_successor_and_keeps_published_pe
         storage.close()
 
 
-def test_full_v3_finalizer_refreshes_before_binding_and_legacy_stays_covered_elsewhere(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("mode", "target_row", "forged_template_row"), [
+    ("blank_fill", 3, 4),
+    ("middle_insert", 3, 3),
+])
+def test_replay_reconstructs_receipt_bound_predecessor_and_rejects_forged_successor(
+    tmp_path: Path, mode: str, target_row: int, forged_template_row: int,
+) -> None:
+    storage, operation_id, _ = _published(tmp_path, mode=mode, target_row=target_row)
+    try:
+        assert refresh_published_authority(storage, operation_id).refreshed
+        authority = storage.connection.execute("SELECT * FROM workbook_authorities WHERE action_id=?", (operation_id,)).fetchone()
+        assert authority is not None
+        forged_template = json.loads(authority["template_evidence"])
+        for item in forged_template:
+            item["row"] = forged_template_row
+        encoded = json.dumps(forged_template, ensure_ascii=False, separators=(",", ":"))
+        storage.connection.execute(
+            "UPDATE workbook_authorities SET template_evidence=?, template_digest=? WHERE action_id=?",
+            (encoded, hashlib.sha256(encoded.encode()).hexdigest(), operation_id),
+        )
+        result = refresh_published_authority(storage, operation_id)
+        assert (result.status, result.error_code) == ("manual_repair", "workbook_authority_refresh_receipt_invalid")
+    finally:
+        storage.close()
+
+
+def test_concurrent_exact_refresh_commits_one_successor_and_receipt(tmp_path: Path) -> None:
+    storage, operation_id, _ = _published(tmp_path, mode="blank_fill", target_row=3)
+    path = storage.path
+    before = storage.generation
+    storage.close()
+    barrier = Barrier(2)
+
+    def refresh() -> bool:
+        connection = RegistryStorage(path)
+        try:
+            barrier.wait()
+            return refresh_published_authority(connection, operation_id).refreshed
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert all(future.result() for future in (executor.submit(refresh), executor.submit(refresh)))
+    verifier = RegistryStorage(path)
+    try:
+        assert (verifier.generation, verifier.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0]) == (before + 1, 1)
+    finally:
+        verifier.close()
+
+
+@pytest.mark.parametrize("manifest_version", ["group-row-manifest-v1", "group-row-manifest-v2"])
+def test_exact_legacy_manifest_versions_keep_finalizer_behavior(tmp_path: Path, manifest_version: str) -> None:
     storage, operation_id, _ = _published(tmp_path, mode="blank_fill", target_row=2)
     try:
+        storage.connection.execute("UPDATE workbook_operation_journal SET manifest_version=? WHERE operation_id=?", (manifest_version, operation_id))
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+        assert storage.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 0
+    finally:
+        storage.close()
+
+
+def test_unknown_manifest_blocks_before_any_finalizer_or_refresh_write(tmp_path: Path) -> None:
+    storage, operation_id, _ = _published(tmp_path, mode="blank_fill", target_row=2)
+    try:
+        storage.connection.execute("UPDATE workbook_operation_journal SET manifest_version='group-row-manifest-v4' WHERE operation_id=?", (operation_id,))
+        result = finalize_published_operation(storage, operation_id)
+        operation = WorkbookOperationJournal(storage).get(operation_id)
+        assert (result.status, result.error_code) == ("manual_repair", "finalization_authority_refresh_required")
+        assert operation is not None and (operation["binding_finalized"], operation["history_finalized"], operation["report_finalized"], operation["capability_finalized"]) == (0, 0, 0, 0)
+        assert storage.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 0
+    finally:
+        storage.close()
+
+
+def test_full_v3_finalizer_refreshes_before_binding_and_legacy_stays_covered_elsewhere(tmp_path: Path) -> None:
+    storage, operation_id, target = _published(tmp_path, mode="blank_fill", target_row=2)
+    try:
+        published_bytes = target.read_bytes()
         result = finalize_published_operation(storage, operation_id)
         operation = WorkbookOperationJournal(storage).get(operation_id)
         assert result.status == "finalized"
         assert operation is not None and operation["binding_finalized"] == 1
         assert storage.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 1
+        assert target.read_bytes() == published_bytes
     finally:
         storage.close()
