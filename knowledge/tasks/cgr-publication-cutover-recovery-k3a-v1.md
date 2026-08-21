@@ -2,7 +2,7 @@
 card_id: cgr-publication-cutover-recovery-k3a-v1
 status: frozen
 version: 2
-supersedes: ""
+supersedes: null
 work_id: cgr-publication-cutover-recovery-k3a-v1
 task_id: publication-cutover-recovery
 purpose: "Make workbook cutover and post-hash recovery authoritative, durable, and replay-safe without performing finalizer side effects."
@@ -58,4 +58,3 @@ knowledge_paths:
 - Compact matrix covers same-path and separate output, pre/post/third/missing target hashes, published/finalized replay, CAS failure after replace, manual-repair journal failure, and both mutation modes.
 - Publication ordering proves candidate fsync → backup fsync/hash → durable post-hash → recheck → replace → target/parent fsync → post-hash verify → published. No finalizer flag or `finalized` transition occurs.
 - Existing K1/K2A/K2B1/K2B2a/K2B2b tests stay green. Native Excel COM and full UI journey remain external Gates.
-
