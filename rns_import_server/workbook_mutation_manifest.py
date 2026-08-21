@@ -42,7 +42,7 @@ class MutationManifest:
     max_row: int
     values: dict[str, object]
     formulas: dict[str, str]
-    hyperlinks: dict[str, str]
+    hyperlinks: dict[str, dict[str, str | None]]
     digest: str
 
 
@@ -55,14 +55,19 @@ def manifest_for(path: Path, sheet_name: str, *, insertion_row: int | None = Non
         sheet = book[sheet_name]
         values: dict[str, object] = {}
         formulas: dict[str, str] = {}
-        links: dict[str, str] = {}
+        links: dict[str, dict[str, str | None]] = {}
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value not in (None, ""):
                     (formulas if isinstance(cell.value, str) and cell.value.startswith("=") else values)[cell.coordinate] = cell.value
                 hyperlink = getattr(cell, "hyperlink", None)
-                if hyperlink and hyperlink.target:
-                    links[cell.coordinate] = hyperlink.target
+                if hyperlink:
+                    target, location = hyperlink.target, hyperlink.location
+                    if target is not None or location is not None:
+                        links[cell.coordinate] = {
+                            "target": target if isinstance(target, str) else None,
+                            "location": location if isinstance(location, str) else None,
+                        }
         payload = {"version": "native-group-row-insertion-v1", "sheet": sheet_name, "insertion_row": insertion_row,
                    "max_row": sheet.max_row, "values": values, "formulas": formulas, "hyperlinks": links}
         return MutationManifest(**payload, digest=digest(payload))
@@ -132,6 +137,8 @@ def validate_blank_fill(
     trusted = _field_map(fields)
     if hyperlink is not None and not isinstance(hyperlink, str):
         _fail("blank-fill-hyperlink-invalid", control.sheet, "hyperlink")
+    if hyperlink is not None and 23 not in trusted:
+        _fail("blank-fill-hyperlink-display-required", control.sheet, "W")
     if control.sheet != candidate.sheet:
         _fail("blank-fill-sheet-mismatch", control.sheet, candidate.sheet)
     if control.max_row != candidate.max_row:
@@ -158,7 +165,7 @@ def validate_blank_fill(
 
     # The request owns W only.  Existing links elsewhere in a claimed blank
     # row are not inherited: their presence makes this plan invalid.
-    expected_links = {} if hyperlink is None else {23: hyperlink}
+    expected_links = {} if hyperlink is None else {23: {"target": hyperlink, "location": None}}
     if _row_map(candidate.hyperlinks, target_row) != expected_links:
         _fail("blank-fill-hyperlink-mismatch", control.sheet, str(target_row))
 

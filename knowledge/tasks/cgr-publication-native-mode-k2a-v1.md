@@ -62,3 +62,6 @@ Native Excel 365 remains required later to qualify actual COM behavior. CrossOve
   hyperlink relationships. It permits only exact request field values and W
   link, and blocks target or outside value/formula/link/count drift at
   `GroupRowInsertionError@validate` before final fsync, backup, or replace.
+- Hyperlink manifests retain both external `target` and internal `location`.
+  Blank-fill admits only W external target plus null location; a requested
+  hyperlink requires trusted `fields[23]` display text.

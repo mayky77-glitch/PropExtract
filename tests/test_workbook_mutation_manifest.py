@@ -45,7 +45,7 @@ def _blank_fill_books(path: Path) -> tuple[Path, Path, dict[int, object], str]:
     control, candidate = path / "control.xlsx", path / "candidate.xlsx"
     fields, link = {6: "RU-00000000-00-2026", 23: "Документ"}, "https://example.test/document"
     book = Workbook(); sheet = book.active; sheet.title = "Реестр РНС"
-    sheet["A4"] = "outside"; sheet["F5"] = "old"; sheet["W5"] = "old document"; sheet["W5"].hyperlink = "https://example.test/old"
+    sheet["A4"] = "outside"; sheet["A4"].hyperlink = "https://example.test/outside"; sheet["F5"] = "old"; sheet["W5"] = "old document"; sheet["W5"].hyperlink = "https://example.test/old"
     sheet["Y5"] = "=A5"; sheet["Z5"] = "=Y5+1"; book.save(control); book.close()
     book = load_workbook(control); sheet = book.active
     for column, value in fields.items(): sheet.cell(5, column).value = value
@@ -58,6 +58,7 @@ def test_blank_fill_manifest_accepts_only_exact_trusted_row_changes(tmp_path: Pa
     before, after = manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС")
     validate_blank_fill(before, after, target_row=5, fields=fields, hyperlink=link)
     assert (before.max_row, after.max_row, before.formulas["Y5"], after.formulas["Y5"]) == (5, 5, "=A5", "=A5")
+    assert after.hyperlinks["W5"] == {"target": link, "location": None}
 
 
 @pytest.mark.parametrize(
@@ -67,6 +68,8 @@ def test_blank_fill_manifest_accepts_only_exact_trusted_row_changes(tmp_path: Pa
         (lambda sheet: setattr(sheet["G5"], "value", "untrusted"), "blank-fill-value-mismatch"),
         (lambda sheet: setattr(sheet["Y5"], "value", "=A1"), "blank-fill-formula-mismatch"),
         (lambda sheet: setattr(sheet["W5"], "hyperlink", "https://example.test/untrusted"), "blank-fill-hyperlink-mismatch"),
+        (lambda sheet: setattr(sheet["W5"].hyperlink, "location", "Sheet1!A1"), "blank-fill-hyperlink-mismatch"),
+        (lambda sheet: setattr(sheet["A4"].hyperlink, "location", "Sheet1!A1"), "blank-fill-outside-hyperlink-mismatch"),
         (lambda sheet: sheet.insert_rows(1), "blank-fill-row-count-mismatch"),
     ],
 )
@@ -76,6 +79,13 @@ def test_blank_fill_manifest_rejects_outside_target_formula_link_or_count_change
     with pytest.raises(MutationManifestError) as captured:
         validate_blank_fill(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС"), target_row=5, fields=fields, hyperlink=link)
     assert captured.value.code == code
+
+
+def test_blank_fill_requires_trusted_w_display_for_requested_hyperlink(tmp_path: Path) -> None:
+    control, candidate, fields, link = _blank_fill_books(tmp_path)
+    with pytest.raises(MutationManifestError) as captured:
+        validate_blank_fill(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС"), target_row=5, fields={6: fields[6]}, hyperlink=link)
+    assert captured.value.code == "blank-fill-hyperlink-display-required"
 
 
 def _gate_books(path: Path, insertion_row: int) -> tuple[Path, Path, dict[int, object], str]:

@@ -3,7 +3,7 @@ param([Parameter(Mandatory = $true)][string]$Request)
 
 $ErrorActionPreference = 'Stop'
 $data = Get-Content -Raw -LiteralPath $Request | ConvertFrom-Json
-if ($data.mutation_mode -notin @('middle_insert', 'blank_fill')) {
+if ($data.mutation_mode -cnotin @('middle_insert', 'blank_fill')) {
     [Console]::Error.WriteLine('native_mutation_mode_invalid')
     exit 1
 }
@@ -34,7 +34,7 @@ try {
     $control = $null
     $candidate = $excel.Workbooks.Open($data.candidate, 0, $false)
     $sheet = $candidate.Worksheets.Item([string]$data.sheet)
-    if ($data.mutation_mode -eq 'middle_insert') {
+    if ($data.mutation_mode -ceq 'middle_insert') {
         $sheet.Rows.Item([int]$data.insertion_row).Insert(-4121, 0)
     }
     foreach ($property in $data.fields.psobject.Properties) { $sheet.Cells.Item([int]$data.insertion_row, [int]$property.Name).Value2 = $property.Value }

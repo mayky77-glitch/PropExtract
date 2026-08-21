@@ -28,8 +28,11 @@ def test_invalid_native_mutation_mode_fails_before_request_file_or_helper_launch
     assert not (tmp_path / "ops").exists()
 
 
-def test_powershell_has_exclusive_mode_branches_and_one_middle_insert() -> None:
+@pytest.mark.parametrize("mode", ["MIDDLE_INSERT", "Middle_Insert", None])
+def test_powershell_rejects_noncanonical_mode_before_com_and_has_one_middle_insert(mode: str | None) -> None:
     script = (Path(__file__).parents[1] / "scripts" / "windows_excel_insert.ps1").read_text(encoding="utf-8")
-    assert "if ($data.mutation_mode -notin @('middle_insert', 'blank_fill'))" in script
-    assert "if ($data.mutation_mode -eq 'middle_insert')" in script
+    guard = "if ($data.mutation_mode -cnotin @('middle_insert', 'blank_fill'))"
+    assert guard in script and mode not in {"middle_insert", "blank_fill"}
+    assert script.index(guard) < script.index("New-Object -ComObject Excel.Application")
+    assert "if ($data.mutation_mode -ceq 'middle_insert')" in script
     assert script.count(".Insert(-4121, 0)") == 1

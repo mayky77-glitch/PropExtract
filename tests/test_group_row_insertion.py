@@ -117,6 +117,18 @@ def test_blank_fill_manifest_failure_blocks_fsync_backup_and_replace(tmp_path: P
     assert calls == ["candidate.xlsx"] and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
 
 
+def test_blank_fill_hyperlink_without_trusted_w_display_blocks_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, calls = Journal(), []
+    replace_file = insertion.os.replace
+    monkeypatch.setattr(insertion.os, "replace", lambda source, destination: calls.append("replace") or replace_file(source, destination))
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, "file:///document", _context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage) == ("blank-fill-hyperlink-display-required", "validate")
+    assert calls == [] and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
+
+
 def test_v2_authority_and_evidence_are_stable_distinct_and_journaled(tmp_path: Path) -> None:
     source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
     plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
