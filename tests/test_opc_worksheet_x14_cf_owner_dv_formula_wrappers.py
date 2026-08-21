@@ -11,6 +11,7 @@ from rns_import_server.opc_worksheet_x14_cf_owner_topology import (
     read_worksheet_x14_cf_owner_topology,
 )
 from tests.opc_worksheet_x14_cf_owner_fixture_factory import CF_URI, DV_URI, X14, XM, package, worksheet
+from tests.real_rns_corpus import real_rns_corpus_path
 
 
 PART = "xl/worksheets/first.xml"
@@ -98,7 +99,7 @@ def test_formula_wrapper_does_not_change_cf_fault_tier_or_document_order(tmp_pat
 
 
 def test_real_read_only_corpus_accepts_x14_dv_formula_wrappers_without_mutation() -> None:
-    corpus = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    corpus = real_rns_corpus_path()
     expected_hash = "2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1"
     assert hashlib.sha256(corpus.read_bytes()).hexdigest() == expected_hash
     result = read_worksheet_x14_cf_owner_topology(corpus)

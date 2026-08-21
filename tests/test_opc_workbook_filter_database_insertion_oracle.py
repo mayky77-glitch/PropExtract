@@ -12,6 +12,7 @@ from rns_import_server.opc_workbook_filter_database_insertion_oracle import (
 )
 from rns_import_server.opc_workbook_defined_name_reader import read_workbook_defined_name_semantics
 from tests.opc_workbook_defined_name_fixture_factory import package, workbook
+from tests.real_rns_corpus import real_rns_corpus_path
 
 
 SHEET = "Первый"
@@ -34,7 +35,7 @@ def test_rows_accept_semantic_a3_aq605_to_a3_aq606_and_real_source_is_read_only(
         "A3", "AQ605", "AQ606",
     )
 
-    source = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    source = real_rns_corpus_path()
     before = sha256(source.read_bytes()).hexdigest()
     owners = tuple(item for item in read_workbook_defined_name_semantics(source).filter_databases if item.worksheet.name == "Реестр РНС")
     assert len(owners) == 1

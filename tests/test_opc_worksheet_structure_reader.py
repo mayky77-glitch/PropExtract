@@ -407,9 +407,9 @@ def test_merge_matrix_count_order_and_normalized_duplicate_are_exact(tmp_path):
 
 def test_real_source_all_sheets_keep_native_structure_projection():
     from hashlib import sha256
-    from pathlib import Path
+    from tests.real_rns_corpus import real_rns_corpus_path
 
-    source = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    source = real_rns_corpus_path()
     assert sha256(source.read_bytes()).hexdigest() == "2a1786d5836e4c3144107704f281bc9513fcd8de97937499268dc806c1106dd1"
     cells = read_worksheet_cell_semantics(source)
     result = read_worksheet_structure_semantics(source)
