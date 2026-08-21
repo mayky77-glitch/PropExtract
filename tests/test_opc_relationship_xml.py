@@ -179,6 +179,44 @@ def test_rejects_literal_xml_attribute_whitespace_before_elementtree_normalizes_
     assert _error_tuple(payload) == ("invalid-relationship-target", PART, target)
 
 
+@pytest.mark.parametrize("encoding", ("utf-16-le", "utf-16-be"))
+def test_bomless_utf16_declared_document_preserves_literal_target_control_rejection(encoding: str):
+    target = "file:///run/user/1000/РнС\tи ГРО/реестр.xlsx"
+    payload = (
+        '<?xml version="1.0" encoding="utf-16"?>'
+        + _document(_relationship(
+            Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+            Target=target,
+            TargetMode="External",
+        ))
+    ).encode(encoding)
+    assert _error_tuple(payload) == ("invalid-relationship-target", PART, target)
+
+
+@pytest.mark.parametrize("encoding", ("utf-16-le", "utf-16-be"))
+def test_bomless_utf16_declared_document_without_literal_control_stays_accepted(encoding: str):
+    payload = (
+        '<?xml version="1.0" encoding="utf-16"?>'
+        + _document(_relationship(Target="worksheets/sheet1.xml"))
+    ).encode(encoding)
+    assert parse_relationship_xml(PART, payload)[0].target == "worksheets/sheet1.xml"
+
+
+def test_elementtree_parse_root_and_child_errors_precede_literal_target_control_check():
+    duplicate_target = _document(
+        '<Relationship Id="rId" Type="urn:x" Target="one.xml" Target="file:///a\tb"/>'
+    )
+    assert _error_tuple(duplicate_target) == ("malformed-xml", PART, "document")
+
+    wrong_root = '<Other><Relationship Id="rId" Type="urn:x" Target="file:///a\tb"/></Other>'
+    assert _error_tuple(wrong_root) == ("invalid-relationships-root", PART, "Other")
+
+    wrong_namespace_child = _document(
+        '<Relationship xmlns="urn:wrong" Id="rId" Type="urn:x" Target="file:///a\tb"/>'
+    )
+    assert _error_tuple(wrong_namespace_child) == ("invalid-relationships-child", PART, "{urn:wrong}Relationship")
+
+
 @pytest.mark.parametrize(
     ("character_reference", "normalized_character"),
     (("&#9;", "\t"), ("&#10;", "\n"), ("&#13;", "\r"), ("&#x9;", "\t"), ("&#xA;", "\n"), ("&#xD;", "\r")),

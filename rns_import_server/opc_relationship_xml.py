@@ -323,6 +323,14 @@ def _decode_xml_lexical_source(payload: bytes | str) -> str | None:
         encoding = "utf-16"
     elif payload.startswith(b"\xef\xbb\xbf"):
         encoding = "utf-8-sig"
+    elif payload.startswith(b"<\x00?\x00x\x00m\x00l\x00"):
+        # ElementTree accepts this BOM-less UTF-16LE form when the XML
+        # declaration says ``utf-16``.  Decode its unambiguous byte signature
+        # here too, so literal attribute controls cannot bypass the lexer.
+        encoding = "utf-16-le"
+    elif payload.startswith(b"\x00<\x00?\x00x\x00m\x00l"):
+        # Same contract for the big-endian signature.
+        encoding = "utf-16-be"
     else:
         match = _XML_DECLARATION_ENCODING.match(payload)
         encoding = match.group(1).decode("ascii") if match is not None else "utf-8"
@@ -332,7 +340,7 @@ def _decode_xml_lexical_source(payload: bytes | str) -> str | None:
         return None
 
 
-def _literal_relationship_target_whitespace(payload: bytes | str) -> str | None:
+def _literal_relationship_target_whitespace(payload: bytes | str, relationship_index: int) -> str | None:
     """Return a literal TAB/LF/CR in ``Relationship@Target``, if any.
 
     This small lexer recognizes quoted attributes and skips XML comments,
@@ -343,6 +351,7 @@ def _literal_relationship_target_whitespace(payload: bytes | str) -> str | None:
     if source is None:
         return None
     position = 0
+    seen_relationships = 0
     while position < len(source):
         start = source.find("<", position)
         if start < 0:
@@ -413,9 +422,12 @@ def _literal_relationship_target_whitespace(payload: bytes | str) -> str | None:
             if position < 0:
                 return None
             value = source[value_start:position]
-            if is_relationship and attribute == "Target" and any(character in "\t\r\n" for character in value):
-                return value
+            if is_relationship and attribute == "Target":
+                if seen_relationships == relationship_index and any(character in "\t\r\n" for character in value):
+                    return value
             position += 1
+        if is_relationship:
+            seen_relationships += 1
     return None
 
 
@@ -432,9 +444,6 @@ def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationshi
         _fail("invalid-xml-input", part, type(payload).__name__)
     if _contains_doctype(payload):
         _fail("forbidden-doctype", part, "doctype")
-    literal_target = _literal_relationship_target_whitespace(payload)
-    if literal_target is not None:
-        _fail("invalid-relationship-target", part, literal_target)
     try:
         root = ET.fromstring(payload)
     except (ET.ParseError, UnicodeError, ValueError):
@@ -468,6 +477,9 @@ def parse_relationship_xml(part: str, payload: bytes | str) -> tuple[Relationshi
         if target_mode not in _TARGET_MODES:
             _fail("invalid-target-mode", part, target_mode)
         target = child.attrib["Target"]
+        literal_target = _literal_relationship_target_whitespace(payload, len(records))
+        if literal_target is not None:
+            _fail("invalid-relationship-target", part, literal_target)
         if _split_uri_reference(target) is None and not _is_raw_space_hyperlink_target(target, type_uri, target_mode):
             _fail("invalid-relationship-target", part, target)
         if target_mode == "Internal" and not (
