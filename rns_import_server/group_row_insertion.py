@@ -240,6 +240,27 @@ def _existing_operation(
         raise GroupRowInsertionError("publication_intent_conflict", stage="recovery")
 
 
+def _classify_existing(
+    context: PublicationContext,
+    operation: object,
+    *,
+    expected: Mapping[str, object],
+    source: Path,
+) -> dict[str, object]:
+    """Classify a verified authority without mutating a live first publisher."""
+    _existing_operation(operation, expected=expected)
+    values = _operation_values(operation)
+    # Authority is durable before the first publisher has copied its control
+    # file. A concurrent loser must wait, never turn that live operation into
+    # manual repair merely because pre-hash evidence is not written yet.
+    recovery = "in_progress" if values.get("phase") == "planned" and not values.get("pre_hash") and not values.get("post_hash") else recover_group_row(context=context, operation=operation, source=source)
+    return {
+        "published": False,
+        "operation_id": expected["operation_id"],
+        "recovery": recovery,
+    }
+
+
 def _create(
     context: PublicationContext,
     plan: MutationPlan,
@@ -308,7 +329,10 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         "target_identity": context.target_identity,
         "sheet_identity": request.sheet,
         "template_version": context.template_version,
-        "expected_generation": context.generation,
+        # This immutable value belongs to the original plan. A restarted
+        # integration may observe a newer registry generation, but an exact
+        # operation replay must still bind to its stored authority first.
+        "expected_generation": plan.registry_generation,
         "intent_version": _INTENT_VERSION,
         "intent_digest": intent_digest,
         "manifest_version": _MANIFEST_VERSION,
@@ -320,12 +344,7 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         with context.lock():
             existing = context.journal.get(operation_id)
             if existing is not None:
-                _existing_operation(existing, expected=expected)
-                return {
-                    "published": False,
-                    "operation_id": operation_id,
-                    "recovery": recover_group_row(context=context, operation=existing, source=request.source),
-                }
+                return _classify_existing(context, existing, expected=expected, source=request.source)
             if plan.registry_generation != context.generation:
                 raise GroupRowInsertionError("registry_generation_stale", stage="authorize")
             plan = _recheck(context, plan, request.source)
@@ -340,18 +359,16 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
                     manifest_digest=manifest_digest,
                 )
             except RegistryConflictError as error:
-                raise GroupRowInsertionError("publication_intent_conflict", stage="recovery", cause=error) from error
+                stored = context.journal.get(operation_id)
+                if stored is None:
+                    raise GroupRowInsertionError("publication_intent_conflict", stage="recovery", cause=error) from error
+                return _classify_existing(context, stored, expected=expected, source=request.source)
             stored = context.journal.get(operation_id)
             if stored is None:
                 raise GroupRowInsertionError("publication_intent_conflict", stage="recovery")
             stored_values = _operation_values(stored)
             if stored_values.get("owner_id") != owner or stored_values.get("pair_nonce") != pair:
-                _existing_operation(stored, expected=expected)
-                return {
-                    "published": False,
-                    "operation_id": operation_id,
-                    "recovery": recover_group_row(context=context, operation=stored, source=request.source),
-                }
+                return _classify_existing(context, stored, expected=expected, source=request.source)
             created_operation = True
             directory.mkdir(parents=True, exist_ok=False)
             control, candidate = directory / "control.xlsx", directory / "candidate.xlsx"

@@ -49,4 +49,5 @@ This Gate does not claim native Excel ownership, blank-fill correctness, post-ha
 - `PublicationContext` now requires integration-owned canonical operation UUID, idempotency key, consumer ID and exact `new_row` kind before publication work.
 - V2 intent and manifest SHA-256 evidence are separately canonicalized; non-JSON values, NaN and invalid field keys stop at `authorize`.
 - An exact existing operation is classified through recovery without a new journal record, operation directory, nonce pair or native mutation. Legacy/v1 and immutable conflicts fail closed.
-- Focused group/journal/storage suite: `37 passed` (2026-08-21). Full suite: `1549 passed`; 10 unrelated HTTP tests are blocked by sandbox `PermissionError` on `bind(127.0.0.1, 0)`.
+- Focused group/journal/storage suite: `39 passed` (2026-08-21). Full suite: `1551 passed`; 10 unrelated HTTP tests are blocked by sandbox `PermissionError` on `bind(127.0.0.1, 0)`.
+- Remediation: replay keeps the original plan generation even when the integration has restarted against a later registry generation. A concurrent journal-CAS loser reloads and verifies the winner authority, then returns `in_progress` while the winner has not written pre-hash evidence; it cannot make a directory, run native Excel, or mark the live winner for manual repair.

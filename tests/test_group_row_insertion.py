@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from rns_import_server.opc_workbook_filter_database_insertion_oracle import OPCW
 from rns_import_server.opc_worksheet_structure_insertion_oracle import OPCWorksheetStructureInsertionOracleError
 from rns_import_server.workbook_groups import MutationPlan
 from rns_import_server.workbook_mutation_manifest import MutationManifestError
+from rns_import_server.registry_storage import RegistryConflictError
 
 
 class Journal:
@@ -36,6 +38,21 @@ class Journal:
         if self.operation is not None: self.operation["post_hash"] = post_hash
         self.calls.append(("post", post_hash)); return object()
     def finalize_flag(self, operation_id, flag): self.calls.append((flag, {})); return object()
+
+
+class RacingJournal(Journal):
+    """Minimal CAS double for the loser branch of one concurrent create."""
+
+    def __init__(self):
+        super().__init__(); self._create_lock = threading.Lock(); self._create_barrier = threading.Barrier(2); self.create_attempts = 0
+
+    def create(self, **kwargs):
+        self._create_barrier.wait(timeout=3)
+        with self._create_lock:
+            self.create_attempts += 1
+            if self.operation is not None:
+                raise RegistryConflictError("duplicate operation")
+            return super().create(**kwargs)
 
 
 def _book(path: Path) -> None:
@@ -120,6 +137,53 @@ def test_exact_replay_enters_recovery_without_second_directory_or_native_mutatio
     assert (replay["published"], replay["operation_id"], replay["recovery"], calls, tuple((tmp_path / "ops").iterdir())) == (
         False, "00000000-0000-4000-8000-000000000001", "manual_repair", ["00000000-0000-4000-8000-000000000001"], directories,
     )
+
+
+def test_exact_replay_uses_planned_generation_after_independent_registry_bump(tmp_path: Path) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, calls = Journal(), []
+    context = _context(plan, journal)
+    def native(request, _script):
+        calls.append(request.operation_id)
+        book = load_workbook(request.candidate); book[request.sheet].cell(request.insertion_row, 6).value = plan.canonical_rns; book.save(request.candidate); book.close()
+        return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
+    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=replace(context, native_runner=native))
+    publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    journal.phase = "staged"; journal.operation["phase"] = "staged"
+    replay = publish_group_row(replace(request, context=replace(request.context, generation=2)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")  # type: ignore[arg-type]
+    assert (replay["published"], replay["recovery"], calls, journal.operation["expected_generation"]) == (False, "re_resolve_required", ["00000000-0000-4000-8000-000000000001"], 1)
+
+
+def test_concurrent_create_loser_reloads_authority_without_native_or_manual_repair(tmp_path: Path) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, native_started, release, calls = RacingJournal(), threading.Event(), threading.Event(), []
+    def first_native(request, _script):
+        calls.append((request.operation_id, request.owner_nonce, request.pair_nonce)); native_started.set()
+        assert release.wait(timeout=3)
+        book = load_workbook(request.candidate); book[request.sheet].cell(request.insertion_row, 6).value = plan.canonical_rns; book.save(request.candidate); book.close()
+        return {"lease": {"excel_adapter": "mock", "excel_pid": 1, "excel_hwnd": 2, "excel_process_started_at": "now", "excel_build": "mock"}}
+    first_context = replace(_context(plan, journal), native_runner=first_native)
+    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=first_context)
+    result, failures = [], []
+    def run(name: str, current: GroupRowRequest) -> None:
+        try:
+            result.append((name, publish_group_row(current, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")))
+        except BaseException as error:
+            failures.append(error)
+    worker_one = threading.Thread(target=run, args=("one", request), daemon=True)
+    worker_two = threading.Thread(target=run, args=("two", request), daemon=True)
+    worker_one.start(); worker_two.start(); assert native_started.wait(timeout=3), failures
+    release.set(); worker_one.join(timeout=5); worker_two.join(timeout=5)
+    assert not worker_one.is_alive() and not worker_two.is_alive() and not failures
+    outcomes = {name: value for name, value in result}
+    assert sorted(value["published"] for value in outcomes.values()) == [False, True]
+    assert [value["recovery"] for value in outcomes.values() if value["published"] is False] == ["in_progress"]
+    assert len(calls) == 1 and len(tuple((tmp_path / "ops").iterdir())) == 1
+    assert journal.create_attempts == 2
+    assert journal.operation["owner_id"] == calls[0][1] and journal.operation["pair_nonce"] == calls[0][2]
+    assert "manual_repair" not in [name for name, _ in journal.calls]
 
 
 def test_conflicting_replay_and_non_new_row_kind_fail_before_files_or_native(tmp_path: Path) -> None:
