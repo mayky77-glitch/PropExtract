@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError, RegistryStorage
+from rns_import_server.excel_process_authority import ExcelProcessLease
 from rns_import_server.workbook_operation_journal import (
     JournalTransitionError,
     PHASE_BACKUP_VERIFIED,
@@ -26,6 +27,14 @@ def _operation(journal: WorkbookOperationJournal, storage: RegistryStorage) -> s
         intent_version="intent-v1", intent_digest="intent-digest", manifest_version="manifest-v1",
         manifest_digest="manifest-digest", operation_directory="operation-dir", canonical_rns="RU-00000000-00-2026",
     ).operation_id
+
+
+def _lease(operation_id: str, *, owner: str = "owner-1", pair: str = "nonce-1") -> ExcelProcessLease:
+    return ExcelProcessLease(
+        operation_id=operation_id, owner_id=owner, pair_nonce=pair, adapter_type="com", adapter_image="powershell.exe",
+        adapter_pid=10, adapter_started_at="2026-08-21T00:00:00Z", excel_image="EXCEL.EXE", excel_pid=11,
+        excel_hwnd=12, excel_process_started_at="2026-08-21T00:00:01Z", excel_build="16.0.1",
+    )
 
 
 def test_atomic_reservation_creates_nonce_pair_once_and_reuses_authority(tmp_path: Path) -> None:
@@ -67,14 +76,14 @@ def test_journal_requires_legal_cas_phases_and_durable_hash_evidence(tmp_path: P
             journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"staged_hash": "s"})
         journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "s"})
         assert storage.connection.execute("PRAGMA synchronous").fetchone()[0] == 2
-        journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease={"excel_adapter": "com", "excel_pid": 10})
+        with pytest.raises(RegistryError):
+            journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE)
+        journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease=_lease(operation_id))
         with pytest.raises(RegistryError):
             journal.transition(operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED)
         journal.transition(
             operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED,
             hashes={"validation_digest": "v", "control_hash": "control"},
-            excel_lease={"excel_adapter": "com", "excel_pid": 10, "excel_hwnd": 11,
-                         "excel_process_started_at": "started", "excel_build": "build"},
         )
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
         with pytest.raises(RegistryError):
@@ -118,11 +127,9 @@ def test_journal_idempotency_restart_and_independent_finalization(tmp_path: Path
                 canonical_rns="RU-00000000-00-2026",
             )
         journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "staged"})
-        journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE)
+        journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease=_lease(operation_id))
         journal.transition(operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED,
-                           hashes={"validation_digest": "v", "control_hash": "c"},
-                           excel_lease={"excel_adapter": "com", "excel_pid": 1, "excel_hwnd": 2,
-                                        "excel_process_started_at": "s", "excel_build": "b"})
+                           hashes={"validation_digest": "v", "control_hash": "c"})
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
         journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
@@ -185,11 +192,9 @@ def test_finalization_flag_replay_after_finalized_restart_preserves_first_timest
         journal = WorkbookOperationJournal(storage)
         operation_id = _operation(journal, storage)
         journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "staged"})
-        journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE)
+        journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease=_lease(operation_id))
         journal.transition(operation_id, expected_phase=PHASE_NATIVE, next_phase=PHASE_VALIDATED,
-                           hashes={"validation_digest": "v", "control_hash": "c"},
-                           excel_lease={"excel_adapter": "com", "excel_pid": 1, "excel_hwnd": 2,
-                                        "excel_process_started_at": "s", "excel_build": "b"})
+                           hashes={"validation_digest": "v", "control_hash": "c"})
         journal.transition(operation_id, expected_phase=PHASE_VALIDATED, next_phase=PHASE_BACKUP_VERIFIED, hashes={"backup_hash": "b"})
         journal.record_post_hash(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, post_hash="post")
         journal.transition(operation_id, expected_phase=PHASE_BACKUP_VERIFIED, next_phase=PHASE_PUBLISHED)
@@ -243,5 +248,25 @@ def test_manual_repair_is_visible_and_requires_failure_evidence(tmp_path: Path) 
             journal.transition(operation_id, expected_phase="planned", next_phase="manual_repair")
         journal.transition(operation_id, expected_phase="planned", next_phase="manual_repair", failure_code="hash_mismatch")
         assert [item.operation_id for item in journal.incomplete()] == [operation_id]
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("lease", [
+    None,
+    {"excel_adapter": "com"},
+    _lease("other-operation"),
+    _lease("operation-1", owner="other-owner"),
+    _lease("operation-1", pair="other-pair"),
+])
+def test_native_transition_requires_exact_full_lease_and_authority_pair(tmp_path: Path, lease: object) -> None:
+    storage = RegistryStorage.bootstrap(tmp_path)
+    try:
+        journal = WorkbookOperationJournal(storage)
+        operation_id = _operation(journal, storage)
+        journal.transition(operation_id, expected_phase="planned", next_phase=PHASE_STAGED, hashes={"pre_hash": "pre", "staged_hash": "staged"})
+        with pytest.raises(RegistryError):
+            journal.transition(operation_id, expected_phase=PHASE_STAGED, next_phase=PHASE_NATIVE, excel_lease=lease)  # type: ignore[arg-type]
+        assert journal.get(operation_id).phase == PHASE_STAGED  # type: ignore[union-attr]
     finally:
         storage.close()

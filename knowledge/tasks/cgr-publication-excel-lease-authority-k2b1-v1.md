@@ -1,6 +1,6 @@
 ---
 type: task
-status: in_progress
+status: completed
 work_id: cgr-publication-excel-lease-authority-k2b1-v1
 tags: [task/implementation, feature/construction-routing, status/in_progress]
 last_verified: 2026-08-21
@@ -60,3 +60,17 @@ scope/ancestry/identity/clean, then independent P6.
 K2B1 is a pure authority foundation. K2B2 later wires it to a live parent-child
 permission/cancel channel and exact COM cleanup. Passing K2B1 alone never means
 that Microsoft Excel publication was executed or accepted.
+
+## Evidence
+
+- Added immutable `ExcelProcessLease` plus injected fail-closed inspector:
+  prelaunch snapshot, exact adapter/Excel identities, HWND ownership and UTC
+  chronology are required before durability.
+- `staged -> native` now accepts only that full record and atomically projects
+  all seven durable process fields after operation/owner/pair matching.
+- Schema v3 and deterministic seed are current. v2 native in-flight records
+  without adapter PID/start are durable `manual_repair` with
+  `legacy_excel_lease_ownership_missing`; published/finalized history remains.
+- Focused: `38 passed`; deterministic build/check and seed validator passed.
+  Full suite: `1585 passed`, 10 known sandbox loopback-bind denials; no product
+  test failure. No Excel process was launched or claimed.
