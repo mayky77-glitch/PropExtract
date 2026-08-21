@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -15,18 +17,21 @@ from rns_import_server.workbook_authority import (
 from rns_import_server.workbook_authority_refresh import (
     AuthorityRefreshError, refresh_published_authority, verify_authority_refresh_receipt,
 )
+import rns_import_server.workbook_authority_refresh as refresh_module
 from rns_import_server.workbook_finalization_snapshot import build_payload
 from rns_import_server.workbook_operation_journal import WorkbookOperationJournal
 from rns_import_server.workbook_projection import GroupOwnershipEvidence, TemplateCellEvidence
 
 
-def _setup(tmp_path: Path, mode: str = "blank_fill", row: int = 2) -> tuple[RegistryStorage, str, Path, str, str]:
+def _setup(tmp_path: Path, mode: str = "blank_fill", row: int = 2, target_directory: Path | None = None) -> tuple[RegistryStorage, str, Path, str, str]:
     storage = RegistryStorage.create_seed(tmp_path / "registry.sqlite3", [{
         "seed_entry_id": "seed", "code_prefix": "123-1234567", "official_name": "Стройка", "status": "active",
     }])
     construction_id = storage.list_constructions()[0].id
     operation_id = "action"
-    target = tmp_path / "target.xlsx"
+    directory = target_directory or tmp_path
+    directory.mkdir(exist_ok=True)
+    target = directory / "target.xlsx"
     pre, post = b"before", b"after"
     target.write_bytes(pre)
     NewRowActionStore(storage).register(
@@ -182,5 +187,91 @@ def test_shifted_successor_remains_rejected_by_unchanged_wa1_projection(tmp_path
         assert refresh_published_authority(storage, operation_id).status == "refreshed"
         with pytest.raises(WorkbookAuthorityError, match="workbook_authority_corrupt"):
             RegistryWorkbookProjectionAuthority(storage, operation_id).read_authority()
+    finally:
+        storage.close()
+
+
+def test_redigested_row4_predecessor_requires_manual_repair_without_writes(tmp_path: Path) -> None:
+    storage, operation_id, target, pre_hash, post_hash = _setup(tmp_path)
+    try:
+        authority = storage.connection.execute("SELECT template_evidence FROM workbook_authorities").fetchone()
+        template = json.loads(authority["template_evidence"])
+        for item in template:
+            item["row"] = 4
+        payload = json.dumps(template, ensure_ascii=False, separators=(",", ":"))
+        storage.connection.execute(
+            "UPDATE workbook_authorities SET template_evidence=?, template_digest=?",
+            (payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()),
+        )
+        before = (storage.generation, storage.connection.total_changes)
+        result = refresh_published_authority(storage, operation_id)
+        assert (result.status, storage.generation, storage.connection.total_changes) == ("manual_repair", *before)
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("statement", [
+    "UPDATE workbook_operation_journal SET operation_kind='group_provision'",
+    "UPDATE workbook_operation_journal SET mutation_mode='middle_insert'",
+    "UPDATE workbook_operation_journal SET manifest_version='group-row-manifest-v2'",
+])
+def test_journal_contradictions_require_manual_repair_without_writes(tmp_path: Path, statement: str) -> None:
+    storage, operation_id, target, pre_hash, post_hash = _setup(tmp_path)
+    try:
+        assert refresh_published_authority(storage, operation_id).status == "refreshed"
+        storage.connection.execute(statement)
+        before = (storage.generation, storage.connection.total_changes)
+        result = refresh_published_authority(storage, operation_id)
+        assert (result.status, storage.generation, storage.connection.total_changes) == ("manual_repair", *before)
+    finally:
+        storage.close()
+
+
+def test_forged_replay_predecessor_requires_manual_repair_without_writes(tmp_path: Path) -> None:
+    storage, operation_id, target, pre_hash, post_hash = _setup(tmp_path)
+    try:
+        assert refresh_published_authority(storage, operation_id).status == "refreshed"
+        storage.connection.execute("DROP TRIGGER workbook_authority_refresh_receipts_immutable_update")
+        row = dict(storage.connection.execute("SELECT * FROM workbook_authority_refresh_receipts").fetchone())
+        predecessor = json.loads(row["predecessor_payload"])
+        predecessor["registry_generation"] += 7
+        row["predecessor_payload"] = refresh_module._canonical_json(predecessor)
+        row["predecessor_digest"] = refresh_module._digest("workbook-authority-refresh-predecessor-v1", row["predecessor_payload"])
+        row["envelope_digest"] = refresh_module._digest(
+            "workbook-authority-refresh-receipt-v1", refresh_module._canonical_json(refresh_module._receipt_envelope(row))
+        )
+        storage.connection.execute(
+            "UPDATE workbook_authority_refresh_receipts SET predecessor_payload=?, predecessor_digest=?, envelope_digest=?",
+            (row["predecessor_payload"], row["predecessor_digest"], row["envelope_digest"]),
+        )
+        before = (storage.generation, storage.connection.total_changes)
+        result = refresh_published_authority(storage, operation_id)
+        assert (result.status, storage.generation, storage.connection.total_changes) == ("manual_repair", *before)
+    finally:
+        storage.close()
+
+
+def test_ancestor_swap_to_symlink_is_pending_without_hashing_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    safe, attacker = tmp_path / "safe", tmp_path / "attacker"
+    attacker.mkdir()
+    (attacker / "target.xlsx").write_bytes(b"attacker")
+    storage, operation_id, target, pre_hash, post_hash = _setup(tmp_path, target_directory=safe)
+    original_open = refresh_module.os.open
+    swapped = False
+
+    def swap_before_final(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if path == "target.xlsx" and not swapped:
+            swapped = True
+            old = tmp_path / "safe-held"
+            os.replace(safe, old)
+            safe.symlink_to(attacker, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(refresh_module.os, "open", swap_before_final)
+        result = refresh_published_authority(storage, operation_id)
+        assert (result.status, result.error_code) == ("published_pending_finalization", "refresh_target_unstable")
+        assert storage.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 0
     finally:
         storage.close()

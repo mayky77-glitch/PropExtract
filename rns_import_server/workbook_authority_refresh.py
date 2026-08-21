@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -109,27 +110,36 @@ def _nonempty(value: object, code: str = "refresh_authority_corrupt") -> str:
     return value
 
 
-def _canonical_target(value: object) -> Path:
+def _wa1_scalar(value: object) -> bool:
+    return value is None or type(value) in {bool, int, str} or (type(value) is float and math.isfinite(value))
+
+
+def _target_parts(value: object) -> tuple[Path, tuple[str, ...]]:
     if type(value) is not str or not value or not os.path.isabs(value) or os.path.normpath(value) != value:
         raise AuthorityRefreshError("refresh_target_unreadable")
     path = Path(value)
-    try:
-        for component in (path, *path.parents):
-            if component.is_symlink():
-                raise AuthorityRefreshError("refresh_target_unreadable")
-        if path.is_symlink() or not path.is_file():
-            raise AuthorityRefreshError("refresh_target_unreadable")
-    except OSError as error:
-        raise AuthorityRefreshError("refresh_target_unreadable") from error
-    return path
+    if path.anchor != os.path.sep or not path.parts[1:] or any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise AuthorityRefreshError("refresh_target_unreadable")
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise AuthorityRefreshError("refresh_target_unreadable")
+    return path, tuple(path.parts[1:])
 
 
 def _bound_sha256(value: object) -> str:
-    path = _canonical_target(value)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    path, parts = _target_parts(value)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptors: list[int] = []
     try:
-        descriptor = os.open(path, flags)
+        root = os.open(path.anchor, directory_flags)
+        descriptors.append(root)
+        for component in parts[:-1]:
+            descriptor = os.open(component, directory_flags, dir_fd=descriptors[-1])
+            descriptors.append(descriptor)
+        descriptor = os.open(parts[-1], file_flags, dir_fd=descriptors[-1])
     except OSError as error:
+        for open_descriptor in reversed(descriptors):
+            os.close(open_descriptor)
         raise AuthorityRefreshError("refresh_target_unreadable") from error
     try:
         before = os.fstat(descriptor)
@@ -144,20 +154,31 @@ def _bound_sha256(value: object) -> str:
         after = os.fstat(descriptor)
         if after != before:
             raise AuthorityRefreshError("refresh_target_unstable")
-        try:
-            current = os.stat(path, follow_symlinks=False)
-        except OSError as error:
-            raise AuthorityRefreshError("refresh_target_unstable") from error
-        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+        # Every component was opened relative to a held parent descriptor.
+        # Bind that chain back to the canonical absolute names after reading;
+        # a swapped ancestor/symlink therefore fails without touching its
+        # replacement bytes.
+        current_path = Path(path.anchor)
+        for component, open_descriptor in zip(parts[:-1], descriptors[1:]):
+            current_path /= component
+            current = os.lstat(current_path)
+            held = os.fstat(open_descriptor)
+            if stat.S_ISLNK(current.st_mode) or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                raise AuthorityRefreshError("refresh_target_unstable")
+        current = os.lstat(path)
+        if (stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)):
             raise AuthorityRefreshError("refresh_target_unstable")
         return digest.hexdigest()
     except OSError as error:
         raise AuthorityRefreshError("refresh_target_unreadable") from error
     finally:
         os.close(descriptor)
+        for open_descriptor in reversed(descriptors):
+            os.close(open_descriptor)
 
 
-def _authority_payload(row: Mapping[str, object]) -> dict[str, object]:
+def _authority_payload(row: Mapping[str, object], *, require_wa1_template: bool = False) -> dict[str, object]:
     try:
         if set(_AUTHORITY_FIELDS) - set(row.keys()):
             raise ValueError
@@ -190,7 +211,8 @@ def _authority_payload(row: Mapping[str, object]) -> dict[str, object]:
         for column, item in enumerate(template, 1):
             if (not isinstance(item, dict) or set(item) != {"row", "column", "value"}
                     or type(item["row"]) is not int or type(item["column"]) is not int
-                    or item["column"] != column):
+                    or (require_wa1_template and item["row"] != 3) or item["column"] != column
+                    or not _wa1_scalar(item["value"])):
                 raise ValueError
         for number, item in enumerate(ownership, 1):
             if (not isinstance(item, dict) or set(item) != {"row", "owned"}
@@ -304,7 +326,7 @@ def _read_context(connection: sqlite3.Connection, operation_id: str) -> tuple[sq
 
 def _validate_first_context(connection: sqlite3.Connection, journal: sqlite3.Row, action: sqlite3.Row,
                             authority: sqlite3.Row, snapshot: sqlite3.Row, operation_id: str) -> tuple[dict[str, object], int]:
-    predecessor = _authority_payload(authority)
+    predecessor = _authority_payload(authority, require_wa1_template=True)
     try:
         if (journal["operation_id"] != operation_id or journal["consumer_id"] != operation_id
                 or authority["action_id"] != operation_id or action["action_id"] != operation_id
@@ -338,6 +360,47 @@ def _validate_first_context(connection: sqlite3.Connection, journal: sqlite3.Row
         raise AuthorityRefreshError("refresh_evidence_contradictory")
 
 
+def _validate_replay_context(connection: sqlite3.Connection, *, operation_id: str, receipt: AuthorityRefreshReceipt,
+                             predecessor: Mapping[str, object], successor: Mapping[str, object], journal: sqlite3.Row,
+                             action: sqlite3.Row, authority: sqlite3.Row, snapshot: sqlite3.Row) -> None:
+    """Bind every replay input to the immutable receipt before accepting it."""
+    try:
+        if (receipt.operation_id != operation_id or receipt.action_id != operation_id
+                or predecessor["action_id"] != operation_id or successor["action_id"] != operation_id
+                or predecessor["source_sha256"] != receipt.pre_hash or predecessor["registry_generation"] != receipt.prior_generation
+                or successor["source_sha256"] != receipt.post_hash or successor["registry_generation"] != receipt.successor_generation
+                or journal["operation_id"] != operation_id or journal["consumer_id"] != operation_id
+                or journal["operation_kind"] != "new_row" or journal["phase"] != "published"
+                or journal["manifest_version"] != _MANIFEST_VERSION or journal["manifest_version"] != receipt.manifest_version
+                or journal["mutation_mode"] != receipt.mutation_mode or journal["pre_hash"] != receipt.pre_hash
+                or journal["post_hash"] != receipt.post_hash or journal["expected_generation"] != receipt.prior_generation
+                or action["action_id"] != operation_id or action["state"] != "pending" or not _same_authority(authority, successor)):
+            raise ValueError
+        for name in ("construction_id", "workbook_contract_id", "target_identity", "target_path", "sheet_identity", "template_version"):
+            if predecessor[name] != successor[name]:
+                raise ValueError
+        for name in ("construction_id", "workbook_contract_id", "target_identity", "target_path"):
+            if predecessor[name] != action[name]:
+                raise ValueError
+        for name in ("construction_id", "workbook_contract_id", "target_identity", "sheet_identity", "template_version"):
+            if predecessor[name] != journal[name]:
+                raise ValueError
+        if not verify_snapshot(operation_id=operation_id, consumer_id=journal["consumer_id"],
+                               workbook_contract_id=journal["workbook_contract_id"], post_hash=journal["post_hash"],
+                               snapshot_version=snapshot["snapshot_version"], canonical_payload=snapshot["canonical_payload"],
+                               digest=snapshot["digest"]):
+            raise ValueError
+        snapshot_payload = _strict_json(snapshot["canonical_payload"])
+        if not isinstance(snapshot_payload, dict) or snapshot_payload.get("target_row") != receipt.target_row:
+            raise ValueError
+        rebuilt = _successor(predecessor, mutation_mode=receipt.mutation_mode, target_row=receipt.target_row,
+                             post_hash=receipt.post_hash, successor_generation=receipt.successor_generation)
+        if rebuilt != successor or connection.execute("SELECT generation FROM registry_meta WHERE id=1").fetchone()[0] != receipt.successor_generation:
+            raise ValueError
+    except (AuthorityRefreshError, TypeError, ValueError, KeyError):
+        raise AuthorityRefreshError("refresh_evidence_contradictory")
+
+
 def _verify_existing(storage: RegistryStorage, operation_id: str, *, within_transaction: bool = False) -> AuthorityRefreshReceipt:
     connection = storage.connection
     row = connection.execute("SELECT * FROM workbook_authority_refresh_receipts WHERE operation_id=?", (operation_id,)).fetchone()
@@ -347,24 +410,10 @@ def _verify_existing(storage: RegistryStorage, operation_id: str, *, within_tran
     if receipt.operation_id != operation_id or receipt.action_id != operation_id:
         raise AuthorityRefreshError("refresh_receipt_corrupt")
     journal, action, authority, snapshot = _read_context(connection, operation_id)
-    predecessor = _authority_payload(_strict_json(row["predecessor_payload"]))
-    # The receipt itself is the replay authority; its stored predecessor must
-    # map exactly to its stored successor before current state is accepted.
-    rebuilt = _successor(predecessor, mutation_mode=receipt.mutation_mode, target_row=receipt.target_row,
-                         post_hash=receipt.post_hash, successor_generation=receipt.successor_generation)
+    predecessor = _authority_payload(_strict_json(row["predecessor_payload"]), require_wa1_template=True)
     stored_successor = _authority_payload(_strict_json(row["successor_payload"]))
-    if rebuilt != stored_successor or not _same_authority(authority, stored_successor):
-        raise AuthorityRefreshError("refresh_successor_contradictory")
-    if (journal["operation_id"] != operation_id or journal["consumer_id"] != operation_id
-            or action["action_id"] != operation_id or authority["action_id"] != operation_id
-            or journal["post_hash"] != receipt.post_hash or journal["pre_hash"] != receipt.pre_hash
-            or not verify_snapshot(operation_id=operation_id, consumer_id=journal["consumer_id"],
-                                   workbook_contract_id=journal["workbook_contract_id"], post_hash=journal["post_hash"],
-                                   snapshot_version=snapshot["snapshot_version"], canonical_payload=snapshot["canonical_payload"],
-                                   digest=snapshot["digest"])):
-        raise AuthorityRefreshError("refresh_evidence_contradictory")
-    if connection.execute("SELECT generation FROM registry_meta WHERE id=1").fetchone()[0] != receipt.successor_generation:
-        raise AuthorityRefreshError("refresh_successor_contradictory")
+    _validate_replay_context(connection, operation_id=operation_id, receipt=receipt, predecessor=predecessor,
+                             successor=stored_successor, journal=journal, action=action, authority=authority, snapshot=snapshot)
     if _bound_sha256(action["target_path"]) != receipt.post_hash:
         raise AuthorityRefreshError("refresh_target_hash_mismatch")
     return receipt
