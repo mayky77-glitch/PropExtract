@@ -22,7 +22,7 @@ class ExcelProcessAuthorityError(RuntimeError):
 
 def strict_utc(value: object) -> str:
     """Normalize whole-second UTC only; local/nonzero-offset time is forbidden."""
-    if not isinstance(value, str) or re.fullmatch(
+    if type(value) is not str or re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)", value
     ) is None:
         raise ExcelProcessAuthorityError("excel_lease_timestamp_invalid")
@@ -49,6 +49,21 @@ class ExcelProcessInspector(Protocol):
     def hwnd_process_id(self, hwnd: int) -> int: ...
 
 
+def _validate_lease_scalars(lease: "ExcelProcessLease") -> None:
+    for value in (lease.operation_id, lease.owner_id, lease.pair_nonce, lease.adapter_image, lease.excel_build):
+        if type(value) is not str or not value:
+            raise ExcelProcessAuthorityError("excel_lease_identity_invalid")
+    if type(lease.adapter_type) is not str or lease.adapter_type != "com":
+        raise ExcelProcessAuthorityError("excel_lease_adapter_invalid")
+    if type(lease.excel_image) is not str or lease.excel_image != "EXCEL.EXE":
+        raise ExcelProcessAuthorityError("excel_lease_excel_image_invalid")
+    for value in (lease.adapter_pid, lease.excel_pid, lease.excel_hwnd):
+        if type(value) is not int or value <= 0:
+            raise ExcelProcessAuthorityError("excel_lease_identity_invalid")
+    strict_utc(lease.adapter_started_at)
+    strict_utc(lease.excel_process_started_at)
+
+
 @dataclass(frozen=True)
 class ExcelProcessLease:
     operation_id: str
@@ -65,16 +80,7 @@ class ExcelProcessLease:
     excel_build: str
 
     def __post_init__(self) -> None:
-        for value in (self.operation_id, self.owner_id, self.pair_nonce, self.adapter_image, self.excel_build):
-            if not isinstance(value, str) or not value:
-                raise ExcelProcessAuthorityError("excel_lease_identity_invalid")
-        if self.adapter_type != "com":
-            raise ExcelProcessAuthorityError("excel_lease_adapter_invalid")
-        if self.excel_image != "EXCEL.EXE":
-            raise ExcelProcessAuthorityError("excel_lease_excel_image_invalid")
-        for value in (self.adapter_pid, self.excel_pid, self.excel_hwnd):
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ExcelProcessAuthorityError("excel_lease_identity_invalid")
+        _validate_lease_scalars(self)
         object.__setattr__(self, "adapter_started_at", strict_utc(self.adapter_started_at))
         object.__setattr__(self, "excel_process_started_at", strict_utc(self.excel_process_started_at))
 
@@ -101,13 +107,16 @@ def verify_excel_process_lease(
     Every inspector failure is an authority failure.  In particular, failure
     to get a snapshot is not interpreted as an empty prelaunch set.
     """
-    if not isinstance(launched_adapter_pid, int) or isinstance(launched_adapter_pid, bool) or launched_adapter_pid <= 0:
+    if type(lease) is not ExcelProcessLease:
+        raise ExcelProcessAuthorityError("excel_lease_identity_invalid")
+    _validate_lease_scalars(lease)
+    if type(launched_adapter_pid) is not int or launched_adapter_pid <= 0:
         raise ExcelProcessAuthorityError("excel_lease_adapter_pid_invalid")
     if lease.adapter_pid != launched_adapter_pid:
         raise ExcelProcessAuthorityError("excel_lease_adapter_pid_mismatch")
     try:
         before = inspector.prelaunch_excel_pids()
-        if not isinstance(before, frozenset) or any(not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 for pid in before):
+        if type(before) is not frozenset or any(type(pid) is not int or pid <= 0 for pid in before):
             raise TypeError("snapshot")
     except ExcelProcessAuthorityError:
         raise
@@ -117,12 +126,13 @@ def verify_excel_process_lease(
         adapter = inspector.process_identity(lease.adapter_pid)
         excel = inspector.process_identity(lease.excel_pid)
         hwnd_pid = inspector.hwnd_process_id(lease.excel_hwnd)
-        if (not isinstance(adapter, ProcessIdentity) or not isinstance(excel, ProcessIdentity)
-                or not isinstance(hwnd_pid, int) or isinstance(hwnd_pid, bool) or hwnd_pid <= 0):
+        if (type(adapter) is not ProcessIdentity or type(excel) is not ProcessIdentity
+                or type(hwnd_pid) is not int or hwnd_pid <= 0):
             raise TypeError("probe")
         for identity in (adapter, excel):
-            if (not isinstance(identity.pid, int) or isinstance(identity.pid, bool) or identity.pid <= 0
-                    or not isinstance(identity.image, str) or not isinstance(identity.started_at, str)):
+            if (type(identity.pid) is not int or identity.pid <= 0
+                    or type(identity.image) is not str or not identity.image
+                    or type(identity.started_at) is not str):
                 raise TypeError("identity")
         adapter_started = strict_utc(adapter.started_at)
         excel_started = strict_utc(excel.started_at)

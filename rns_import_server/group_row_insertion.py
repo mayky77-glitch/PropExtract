@@ -69,7 +69,6 @@ class PublicationContext:
     generation: int
     target_identity: str
     template_version: str = "construction-group-template-v1"
-    native_runner: Callable[[NativeInsertRequest, Path], dict[str, object]] | None = None
     operation_id: str | None = None
     idempotency_key: str | None = None
     consumer_id: str | None = None
@@ -377,14 +376,14 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             staged_hash = _copy_verified(request.source, control); _copy_verified(request.source, candidate)
             context.journal.transition(operation_id, expected_phase=phase, next_phase="staged", hashes={"pre_hash": plan.workbook_hash, "staged_hash": staged_hash})
             phase = "staged"
-            if context.native_runner is None and not native_excel_available():
+            if not native_excel_available():
                 code = "excel_required_for_middle_insert" if mode == "middle_insert" else "excel_required_for_group_publication"
                 raise GroupRowInsertionError(code, stage="pre_open")
             if mode == "middle_insert" and not insertion_is_structurally_safe(inspect_workbook(request.source, request.sheet), plan.target_row):
                 raise GroupRowInsertionError("group_row_structure_unsafe", stage="preflight")
             native = NativeInsertRequest(operation_id, owner, pair, control, candidate, plan.target_row,
                 directory / "excel-lease.json", directory / "lease-ack.json", request.sheet, request.fields, request.hyperlink, mode)
-            result = context.native_runner(native, native_script) if context.native_runner else run_native_insert(native, script=native_script)
+            result = run_native_insert(native, script=native_script)
             lease = result.get("lease")
             if not isinstance(lease, dict):
                 raise GroupRowInsertionError("excel_lease_missing", stage="lease")
@@ -460,8 +459,9 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
         if created_operation: _manual_repair(context, operation_id, phase, error.code)
         raise
     except NativeExcelError as error:
-        if created_operation: _manual_repair(context, operation_id, phase, error.code)
-        raise GroupRowInsertionError(error.code, stage=error.stage, cause=error) from error
+        code = "excel_required_for_group_publication" if mode == "blank_fill" and error.code == "excel_required_for_middle_insert" else error.code
+        if created_operation: _manual_repair(context, operation_id, phase, code)
+        raise GroupRowInsertionError(code, stage=error.stage, cause=error) from error
     except Exception as error:
         if created_operation: _manual_repair(context, operation_id, phase, "group_row_failed")
         raise GroupRowInsertionError("group_row_failed", stage=phase, cause=error) from error
