@@ -12,6 +12,7 @@ from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import OPCWorksheet
 from rns_import_server.opc_workbook_filter_database_insertion_oracle import OPCWorkbookFilterDatabaseInsertionOracleError
 from rns_import_server.opc_worksheet_structure_insertion_oracle import OPCWorksheetStructureInsertionOracleError
 from rns_import_server.workbook_groups import MutationPlan
+from rns_import_server.workbook_mutation_manifest import MutationManifestError
 
 
 class Journal:
@@ -64,6 +65,8 @@ def _patch_middle_insert_pre_oracle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(insertion, "manifest_for", lambda *_args, **_kwargs: SimpleNamespace(digest="manifest"))
     monkeypatch.setattr(insertion, "validate_control", lambda *_: None)
     monkeypatch.setattr(insertion, "validate_insertion", lambda *_: None)
+    monkeypatch.setattr(insertion, "validate_inserted_row", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(insertion, "validate_dependent_registry_references", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(insertion, "validate_filter_database_middle_insert", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(insertion, "validate_worksheet_structure_middle_insert", lambda *_args, **_kwargs: None)
 
@@ -75,6 +78,8 @@ def test_middle_insert_validators_precede_fsync_backup_and_replace(tmp_path: Pat
     calls = []
     monkeypatch.setattr(insertion, "validate_control", lambda *_: calls.append("generic-control"))
     monkeypatch.setattr(insertion, "validate_insertion", lambda *_: calls.append("generic-insertion"))
+    monkeypatch.setattr(insertion, "validate_inserted_row", lambda *_args, **_kwargs: calls.append("inserted-row"))
+    monkeypatch.setattr(insertion, "validate_dependent_registry_references", lambda *_args, **_kwargs: calls.append("dependents"))
     x14_call = []
     monkeypatch.setattr(insertion, "validate_x14_cf_middle_insert", lambda *args, **kwargs: (calls.append("x14"), x14_call.append((args, kwargs))))
     monkeypatch.setattr(insertion, "validate_filter_database_middle_insert", lambda *_args, **_kwargs: calls.append("filter"))
@@ -92,7 +97,7 @@ def test_middle_insert_validators_precede_fsync_backup_and_replace(tmp_path: Pat
     monkeypatch.setattr(insertion.os, "replace", spy_replace)
     result = publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
     assert result["published"] is True and output.exists()
-    assert calls[calls.index("generic-control"):] == ["generic-control", "generic-insertion", "x14", "filter", "structure", "fsync", "backup", "replace"]
+    assert calls[calls.index("generic-control"):] == ["generic-control", "generic-insertion", "inserted-row", "dependents", "x14", "filter", "structure", "fsync", "backup", "replace"]
     assert len(x14_call) == 1
     (control, candidate), kwargs = x14_call[0]
     assert (control.name, candidate.name, control.parent == candidate.parent) == ("control.xlsx", "candidate.xlsx", True)
@@ -111,6 +116,20 @@ def test_middle_insert_x14_oracle_failure_blocks_publication_and_requests_manual
     assert (captured.value.code, captured.value.stage, captured.value.cause) == (failure.code, "validate", failure)
     assert sha256(source) == source_hash and not output.exists()
     assert not list((tmp_path / "ops").rglob("backup.xlsx"))
+    assert "published" not in [name for name, _ in journal.calls] and journal.calls[-1][0] == "manual_repair"
+
+
+def test_inserted_row_gate_failure_blocks_publication_before_x14_backup_and_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "out.xlsx"; _book(source)
+    source_hash = sha256(source)
+    plan = MutationPlan("insert_before_header", 6, "book", source_hash, 1, "construction", "RU-00000000-00-2026")
+    journal = Journal(); _patch_middle_insert_pre_oracle(monkeypatch)
+    failure = MutationManifestError("inserted-row-value-mismatch", subject="Реестр РНС", field="F6")
+    monkeypatch.setattr(insertion, "validate_inserted_row", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=_context(plan, journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage, captured.value.cause) == (failure.code, "validate", failure)
+    assert sha256(source) == source_hash and not output.exists() and not list((tmp_path / "ops").rglob("backup.xlsx"))
     assert "published" not in [name for name, _ in journal.calls] and journal.calls[-1][0] == "manual_repair"
 
 

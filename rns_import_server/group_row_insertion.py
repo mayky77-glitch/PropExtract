@@ -24,7 +24,14 @@ from rns_import_server.opc_worksheet_structure_insertion_oracle import (
     validate_worksheet_structure_middle_insert,
 )
 from rns_import_server.workbook_groups import MutationPlan
-from rns_import_server.workbook_mutation_manifest import manifest_for, validate_control, validate_insertion
+from rns_import_server.workbook_mutation_manifest import (
+    MutationManifestError,
+    manifest_for,
+    validate_control,
+    validate_dependent_registry_references,
+    validate_inserted_row,
+    validate_insertion,
+)
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
 
 
@@ -168,6 +175,23 @@ def publish_group_row(request: GroupRowRequest, *, native_script: Path, operatio
             validate_control(original, control_manifest)
             if mode == "middle_insert":
                 validate_insertion(control_manifest, candidate_manifest, plan.target_row)
+                try:
+                    validate_inserted_row(
+                        control,
+                        candidate,
+                        sheet_name=request.sheet,
+                        insertion_row=plan.target_row,
+                        fields=request.fields,
+                        hyperlink=request.hyperlink,
+                    )
+                    validate_dependent_registry_references(
+                        control,
+                        candidate,
+                        insertion_row=plan.target_row,
+                        registry_sheet=request.sheet,
+                    )
+                except MutationManifestError as error:
+                    raise GroupRowInsertionError(error.code, stage="validate", cause=error) from error
                 try:
                     validate_x14_cf_middle_insert(
                         control,
