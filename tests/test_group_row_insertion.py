@@ -9,6 +9,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.hyperlink import Hyperlink
 
 import rns_import_server.group_row_insertion as insertion
+import rns_import_server.workbook_cutover as cutover
 from rns_import_server.excel_native import native_excel_available
 import rns_import_server.workbook_mutation_manifest as mutation_manifest
 from rns_import_server.audit import sha256
@@ -529,39 +530,117 @@ def test_manual_repair_journal_failure_is_typed_and_observable(tmp_path: Path) -
     assert isinstance(captured.value.cause, RuntimeError)
 
 
-def test_real_journal_restart_recovers_post_hash_without_second_mutation(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("plan_mode", "boundary", "expected_code", "expected_stage", "replace_count", "recovery"),
+    [
+        ("existing_blank", "post_hash", "group_row_failed", "backup_verified", 0, "re_resolve_required"),
+        ("existing_blank", "replace", "cutover_replace_failed", "cutover_replace", 0, "re_resolve_required"),
+        ("existing_blank", "fsync", "cutover_target_fsync_failed", "cutover_target_fsync", 1, "finalization_pending"),
+        ("existing_blank", "hash", "cutover_target_hash_failed", "cutover_target_hash", 1, "finalization_pending"),
+        ("existing_blank", "published_cas", "published_journal_failed", "cutover_published", 1, "finalization_pending"),
+        ("insert_before_header", "post_hash", "group_row_failed", "backup_verified", 0, "re_resolve_required"),
+        ("insert_before_header", "replace", "cutover_replace_failed", "cutover_replace", 0, "re_resolve_required"),
+        ("insert_before_header", "fsync", "cutover_target_fsync_failed", "cutover_target_fsync", 1, "finalization_pending"),
+        ("insert_before_header", "hash", "cutover_target_hash_failed", "cutover_target_hash", 1, "finalization_pending"),
+        ("insert_before_header", "published_cas", "published_journal_failed", "cutover_published", 1, "finalization_pending"),
+    ],
+)
+def test_real_journal_publish_crash_restart_recovers_without_repeat_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan_mode: str,
+    boundary: str,
+    expected_code: str,
+    expected_stage: str,
+    replace_count: int,
+    recovery: str,
+) -> None:
+    """Each durable boundary either re-resolves or publishes exact post bytes once."""
     storage = RegistryStorage.bootstrap(tmp_path / "runtime")
-    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"
-    source.write_bytes(b"pre"); output.write_bytes(b"post")
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"; _book(source)
+    construction = storage.list_constructions()[0]
+    plan = MutationPlan(plan_mode, 5 if plan_mode == "existing_blank" else 6, "book", sha256(source), storage.generation,
+                        construction.id, "RU-00000000-00-2026")
+    journal, native_calls, replace_attempts, replaces = WorkbookOperationJournal(storage), [], [], []
+    context = _context(plan, journal)
+    request = GroupRowRequest(plan, source, output, "Реестр РНС", {6: plan.canonical_rns}, context=context)
+    if plan_mode == "insert_before_header":
+        _patch_middle_insert_pre_oracle(monkeypatch)
+
+    def native(native_request, _script, current_journal):
+        native_calls.append(native_request.operation_id)
+        book = load_workbook(native_request.candidate); sheet = book[native_request.sheet]
+        if native_request.mutation_mode == "middle_insert": sheet.insert_rows(native_request.insertion_row)
+        for column, value in native_request.fields.items(): sheet.cell(native_request.insertion_row, column).value = value
+        book.save(native_request.candidate); book.close()
+        operation = current_journal.get(native_request.operation_id)
+        assert operation is not None
+        current_journal.transition(native_request.operation_id, expected_phase="staged", next_phase="native", excel_lease=ExcelProcessLease(
+            native_request.operation_id, operation["owner_id"], operation["pair_nonce"], "com", "powershell.exe", 10,
+            "2026-08-21T00:00:00Z", "EXCEL.EXE", 11, 12, "2026-08-21T00:00:01Z", "16.0.1",
+        ))
+        return {"durable_phase": "native"}
+
+    monkeypatch.setattr(insertion, "run_native_insert", native)
+    crashed = False
+    if boundary == "post_hash":
+        record_post_hash = journal.record_post_hash
+        def crash_after_post_hash(*args, **kwargs):
+            nonlocal crashed
+            result = record_post_hash(*args, **kwargs)
+            if not crashed:
+                crashed = True; raise RuntimeError("crash after durable post hash")
+            return result
+        monkeypatch.setattr(journal, "record_post_hash", crash_after_post_hash)
+    elif boundary == "published_cas":
+        transition = journal.transition
+        def crash_published_cas(*args, **kwargs):
+            nonlocal crashed
+            if not crashed and kwargs.get("next_phase") == "published":
+                crashed = True; raise RuntimeError("published CAS unavailable")
+            return transition(*args, **kwargs)
+        monkeypatch.setattr(journal, "transition", crash_published_cas)
+    replace_file = cutover.os.replace
+    def crash_replace(candidate, target):
+        nonlocal crashed
+        if Path(candidate).name == "candidate.xlsx":
+            replace_attempts.append((Path(candidate), Path(target)))
+            if boundary == "replace" and not crashed:
+                crashed = True; raise OSError("replace unavailable")
+        result = replace_file(candidate, target)
+        if Path(candidate).name == "candidate.xlsx": replaces.append((Path(candidate), Path(target)))
+        return result
+    monkeypatch.setattr(cutover.os, "replace", crash_replace)
+    if boundary == "fsync":
+        fsync_file = cutover.fsync_file
+        def crash_target_fsync(path):
+            nonlocal crashed
+            if Path(path) == output and not crashed:
+                crashed = True; raise OSError("target fsync unavailable")
+            return fsync_file(path)
+        monkeypatch.setattr(cutover, "fsync_file", crash_target_fsync)
+    elif boundary == "hash":
+        hash_file = cutover.sha256
+        def crash_target_hash(path):
+            nonlocal crashed
+            if Path(path) == output and output.exists() and not crashed:
+                crashed = True; raise OSError("target hash unavailable")
+            return hash_file(path)
+        monkeypatch.setattr(cutover, "sha256", crash_target_hash)
+
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(request, native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+    assert (captured.value.code, captured.value.stage, len(replace_attempts), len(replaces)) == (expected_code, expected_stage, 0 if boundary == "post_hash" else 1, replace_count)
+    operation = journal.get(context.operation_id)
+    assert operation and (operation.phase, operation["post_hash"], operation["backup_hash"]) == ("backup_verified", sha256(output) if output.exists() else sha256((tmp_path / "ops" / context.operation_id / "candidate.xlsx")), sha256(source))
+    assert all(not operation[flag] for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"))
+    storage.close()
+    restarted = RegistryStorage(storage.path)
     try:
-        journal = WorkbookOperationJournal(storage); construction = storage.list_constructions()[0]
-        operation_id = "restart-operation"
-        journal.create(
-            operation_id=operation_id, idempotency_key="restart-key", consumer_id="restart-consumer", owner_id="owner",
-            pair_nonce="pair", construction_id=construction.id, operation_kind="new_row", mutation_mode="blank_fill",
-            target_identity="book", sheet_identity="sheet", template_version="template", expected_generation=storage.generation,
-            intent_version="intent", intent_digest="intent-digest", manifest_version="manifest", manifest_digest="manifest-digest",
-            operation_directory=str(tmp_path / "operation"), canonical_rns="RU-00000000-00-2026",
-        )
-        journal.transition(operation_id, expected_phase="planned", next_phase="staged", hashes={"pre_hash": sha256(source), "staged_hash": sha256(source)})
-        journal.transition(
-            operation_id, expected_phase="staged", next_phase="native", excel_lease=ExcelProcessLease(
-                operation_id, "owner", "pair", "com", "powershell.exe", 10, "2026-08-21T00:00:00Z",
-                "EXCEL.EXE", 11, 12, "2026-08-21T00:00:01Z", "16.0.1",
-            ),
-        )
-        journal.transition(operation_id, expected_phase="native", next_phase="validated", hashes={"control_hash": sha256(source), "validation_digest": "digest"})
-        journal.transition(operation_id, expected_phase="validated", next_phase="backup_verified", hashes={"backup_hash": sha256(source)})
-        journal.record_post_hash(operation_id, expected_phase="backup_verified", post_hash=sha256(output))
-        storage.close(); restarted = RegistryStorage(storage.path)
-        try:
-            restarted_journal = WorkbookOperationJournal(restarted)
-            context = PublicationContext(lambda: nullcontext(), lambda current: current, restarted_journal, 1, "book")
-            operation = restarted_journal.get(operation_id)
-            assert operation and recover_group_row(context=context, operation=operation, source=source, output=output) == "finalization_pending"
-            assert restarted_journal.get(operation_id).phase == "published"  # type: ignore[union-attr]
-        finally:
-            restarted.close()
+        restarted_journal = WorkbookOperationJournal(restarted)
+        replay = publish_group_row(replace(request, context=replace(context, journal=restarted_journal)), native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops")
+        restored = restarted_journal.get(context.operation_id)
+        assert restored and (replay["published"], replay["recovery"], restored.phase, len(native_calls), len(replaces)) == (False, recovery, "published" if recovery == "finalization_pending" else "backup_verified", 1, replace_count)
+        assert all(not restored[flag] for flag in ("capability_finalized", "binding_finalized", "history_finalized", "report_finalized"))
     finally:
-        if storage.connection:
-            pass
+        restarted.close()
