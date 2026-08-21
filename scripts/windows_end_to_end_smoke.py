@@ -10,6 +10,8 @@ import argparse
 import hashlib
 import json
 import os
+import queue
+import subprocess
 import sys
 import tempfile
 import threading
@@ -84,6 +86,73 @@ def _require_portable_windows_runtime() -> None:
     ).resolve()
     if Path(sys.executable).resolve() != expected:
         raise RuntimeError("Windows smoke must use the installed app-local portable Python")
+
+
+def _readline_with_timeout(process: subprocess.Popen[str], timeout: float = 5.0) -> str:
+    if process.stdout is None:
+        raise RuntimeError("native cancel probe stdout is unavailable")
+    lines: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True)
+    reader.start()
+    try:
+        return lines.get(timeout=timeout).strip()
+    except queue.Empty as error:
+        raise RuntimeError("native cancel probe did not become ready") from error
+
+
+def _qualify_native_cancel_listener(root: Path) -> str:
+    """Exercise the exact helper listener over a native redirected stdin pipe."""
+    if os.name != "nt":
+        raise RuntimeError("native cancel listener qualification requires Windows")
+    helper = (PROJECT_ROOT / "scripts" / "windows_excel_insert.ps1").read_text(encoding="utf-8")
+    source_start = helper.index("using System;\n", helper.index("Add-Type -ReferencedAssemblies"))
+    source_end = helper.index("\n'@\n\nfunction Test-NativeCancel", source_start)
+    listener = helper[source_start:source_end]
+    probe = root / "native-cancel-listener-probe.ps1"
+    probe.write_text(
+        "Add-Type -ReferencedAssemblies 'System.Runtime.Serialization.dll' -TypeDefinition @'\n"
+        + listener
+        + "\n'@\n"
+        + "$l=New-Object NativeCancelListener;$l.Start();if(-not $l.WaitForOpen(5000)){exit 6};"
+        + "[Console]::Out.WriteLine('ready');"
+        + "for($i=0;$i -lt 300;$i++){$l.Poll();if($l.Failed){exit 5};"
+        + "if($l.IsCancellationRequested){[Console]::Out.WriteLine('cancelled');exit 4};"
+        + "Start-Sleep -Milliseconds 10};[Console]::Out.WriteLine('complete');exit 0\n",
+        encoding="utf-8",
+    )
+
+    def run(*, cancel: bool) -> tuple[int, str]:
+        process = subprocess.Popen(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            if process.stdin is None:
+                raise RuntimeError("native cancel probe stdin is unavailable")
+            process.stdin.write('{"command":"open"}\n')
+            process.stdin.flush()
+            if _readline_with_timeout(process) != "ready":
+                raise RuntimeError("native cancel probe returned an invalid ready marker")
+            if cancel:
+                process.stdin.write('{"command":"cancel"}\n')
+                process.stdin.flush()
+            code = process.wait(timeout=4.0)
+            if process.stdout is None:
+                raise RuntimeError("native cancel probe stdout disappeared")
+            return code, process.stdout.read().strip()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=1.0)
+
+    if run(cancel=False) != (0, "complete"):
+        raise RuntimeError("native no-cancel checkpoints blocked or failed")
+    if run(cancel=True) != (4, "cancelled"):
+        raise RuntimeError("native post-open cancel was not consumed within grace")
+    return "native-powershell-live-stdin"
 
 
 def _request(port: int, method: str, path: str, payload: dict[str, object] | None = None) -> tuple[int, dict[str, object], str | None]:
@@ -749,6 +818,7 @@ def self_test() -> dict[str, object]:
             "temporary_fixture_deleted": True,
             "field_contracts": field_contracts,
             "admin_contracts": admin_contracts,
+            "native_cancel_listener": _qualify_native_cancel_listener(Path(temporary_name)),
         }
 
 
