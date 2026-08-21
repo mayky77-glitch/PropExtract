@@ -19,6 +19,9 @@ import tempfile
 import uuid
 
 from rns_import_server.registry_storage import RegistryError, RegistryStorage, utc_now
+from rns_import_server.workbook_authority_refresh import (
+    AuthorityRefreshError, refresh_published_authority, verify_authority_refresh_receipt,
+)
 from rns_import_server.workbook_finalization_snapshot import verify_snapshot
 from rns_import_server.workbook_operation_journal import PHASE_FINALIZED, PHASE_MANUAL_REPAIR, PHASE_PUBLISHED
 from rns_import_server.workbook_finalization_snapshot import canonical_json
@@ -41,6 +44,13 @@ _REPORT_FAILURE_CODES = frozenset({
     "finalization_report_verify_failed", "finalization_capability_order_invalid",
     "finalization_capability_conflict", "finalization_order_invalid", "finalization_journal_failed",
 })
+_REFRESH_FAILURE_CODES = frozenset({
+    "finalization_manifest_invalid", "refresh_authority_corrupt", "refresh_evidence_contradictory",
+    "refresh_evidence_missing", "refresh_internal_invalid", "refresh_mapping_invalid", "refresh_operation_invalid",
+    "refresh_receipt_corrupt", "refresh_receipt_missing", "refresh_target_hash_mismatch",
+})
+_LEGACY_MANIFEST_VERSIONS = frozenset({"manifest-v1", "manifest-v2"})
+_REFRESH_MANIFEST_VERSION = "group-row-manifest-v3"
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,17 @@ def _pending(operation_id: str, code: str) -> FinalizationProgress:
     )
 
 
+def _refresh_pending(operation_id: str, code: str) -> FinalizationProgress:
+    return FinalizationProgress(
+        operation_id=operation_id,
+        status="published_pending_finalization",
+        completed_stage=None,
+        next_stage="refresh",
+        stage="refresh",
+        error_code=code,
+    )
+
+
 def _history_pending(operation_id: str, code: str) -> FinalizationProgress:
     return FinalizationProgress(
         operation_id=operation_id, status="published_pending_finalization", completed_stage="binding",
@@ -84,7 +105,7 @@ def _history_pending(operation_id: str, code: str) -> FinalizationProgress:
 
 
 def _manual_repair(connection: sqlite3.Connection, operation_id: str, code: str) -> FinalizationProgress:
-    if code not in _BINDING_FAILURE_CODES | _HISTORY_FAILURE_CODES | _REPORT_FAILURE_CODES:
+    if code not in _BINDING_FAILURE_CODES | _HISTORY_FAILURE_CODES | _REPORT_FAILURE_CODES | _REFRESH_FAILURE_CODES:
         raise AssertionError("finalizer failure code must be frozen")
     updated = connection.execute(
         "UPDATE workbook_operation_journal SET phase=?, failure_code=?, updated_at=? "
@@ -100,6 +121,100 @@ def _manual_repair(connection: sqlite3.Connection, operation_id: str, code: str)
         next_stage=None,
         error_code=code,
     )
+
+
+def _refresh_manual_repair(connection: sqlite3.Connection, operation_id: str, code: str) -> FinalizationProgress:
+    result = _manual_repair(connection, operation_id, code)
+    return FinalizationProgress(
+        operation_id=result.operation_id,
+        status=result.status,
+        completed_stage=None,
+        next_stage=None,
+        stage="refresh",
+        error_code=result.error_code,
+    )
+
+
+def _refresh_failure(storage: RegistryStorage, operation_id: str, code: str) -> FinalizationProgress:
+    """Durably stop before legacy finalizer side effects after a v3 failure."""
+    try:
+        with storage.transaction() as connection:
+            operation = connection.execute(
+                "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if operation is None or operation["phase"] != PHASE_PUBLISHED:
+                raise FinalizationError("finalization_phase_invalid", operation_id, stage="refresh")
+            return _refresh_manual_repair(connection, operation_id, code)
+    except FinalizationError:
+        raise
+    except sqlite3.Error:
+        return _refresh_pending(operation_id, "refresh_sqlite_failed")
+
+
+def _promote_refreshed_action(storage: RegistryStorage, operation_id: str) -> FinalizationProgress | None:
+    """Advance the v3 action only after its receipt is durably verified."""
+    try:
+        with storage.transaction() as connection:
+            if connection.execute(
+                "UPDATE new_row_pending_actions SET state='publishing', updated_at=? "
+                "WHERE action_id=? AND state='pending'",
+                (utc_now(), operation_id),
+            ).rowcount != 1:
+                return _refresh_manual_repair(connection, operation_id, "refresh_evidence_contradictory")
+    except sqlite3.Error:
+        return _refresh_pending(operation_id, "refresh_sqlite_failed")
+    return None
+
+
+def _manifest_finalization_gate(storage: RegistryStorage, operation_id: str, phase: str) -> FinalizationProgress | None:
+    """Run WA2a before any v3 finalizer write; legacy manifests bypass it exactly."""
+    operation = storage.connection.execute(
+        "SELECT manifest_version FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+    ).fetchone()
+    if operation is None:
+        raise FinalizationError("finalization_operation_missing", operation_id, stage="refresh")
+    manifest_version = operation["manifest_version"]
+    if type(manifest_version) is str and manifest_version in _LEGACY_MANIFEST_VERSIONS:
+        return None
+    if type(manifest_version) is not str or manifest_version != _REFRESH_MANIFEST_VERSION:
+        if phase == PHASE_FINALIZED:
+            return _terminal_manual_repair(storage, operation_id, "finalization_manifest_invalid")
+        return _refresh_failure(storage, operation_id, "finalization_manifest_invalid")
+    # WA2a verifier binds replay evidence to a published journal.  A terminal
+    # replay has no downstream first write left to authorize.
+    if phase == PHASE_FINALIZED:
+        return None
+    action = storage.connection.execute(
+        "SELECT state FROM new_row_pending_actions WHERE action_id=?", (operation_id,)
+    ).fetchone()
+    if action is not None and action["state"] == "publishing":
+        completed = storage.connection.execute(
+            "SELECT binding_finalized FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        receipt = storage.connection.execute(
+            "SELECT 1 FROM workbook_authority_refresh_receipts WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        if completed is not None and completed["binding_finalized"] and receipt is not None:
+            return None
+    refreshed = refresh_published_authority(storage, operation_id)
+    if refreshed.status == "published_pending_finalization":
+        return _refresh_pending(operation_id, refreshed.error_code or "refresh_sqlite_failed")
+    if refreshed.status == "manual_repair":
+        return _refresh_failure(storage, operation_id, refreshed.error_code or "refresh_internal_invalid")
+    try:
+        verify_authority_refresh_receipt(storage, operation_id)
+    except AuthorityRefreshError as error:
+        return _refresh_failure(storage, operation_id, error.code)
+    except sqlite3.Error:
+        return _refresh_pending(operation_id, "refresh_sqlite_failed")
+    return None
+
+
+def _requires_authority_refresh(storage: RegistryStorage, operation_id: str) -> bool:
+    row = storage.connection.execute(
+        "SELECT manifest_version FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+    ).fetchone()
+    return row is not None and type(row["manifest_version"]) is str and row["manifest_version"] == _REFRESH_MANIFEST_VERSION
 
 
 def _history_manual_repair(connection: sqlite3.Connection, operation_id: str, code: str) -> FinalizationProgress:
@@ -448,10 +563,17 @@ def _preflight_target(connection: sqlite3.Connection, operation: sqlite3.Row) ->
     action = connection.execute("SELECT * FROM new_row_pending_actions WHERE action_id=?", (operation["operation_id"],)).fetchone()
     if action is None:
         return "finalization_capability_conflict"
+    refreshed_pending_action = (
+        action["state"] == "pending" and type(operation["manifest_version"]) is str
+        and operation["manifest_version"] == _REFRESH_MANIFEST_VERSION
+        and connection.execute(
+            "SELECT 1 FROM workbook_authority_refresh_receipts WHERE operation_id=?", (operation["operation_id"],)
+        ).fetchone() is not None
+    )
     if (action["action_id"] != operation["operation_id"]
             or (action["construction_id"], action["workbook_contract_id"], action["target_identity"])
             != (operation["construction_id"], operation["workbook_contract_id"], operation["target_identity"])
-            or action["state"] not in {"publishing", "consumed"}
+            or (action["state"] not in {"publishing", "consumed"} and not refreshed_pending_action)
             or not _SHA256.fullmatch(str(action["capability_digest"]))):
         return "finalization_capability_conflict"
     target_failure = _target_post_hash_failure(operation, action)
@@ -786,6 +908,16 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
     """
     if type(operation_id) is not str or not operation_id:
         raise FinalizationError("finalization_operation_missing", operation_id if type(operation_id) is str else "", stage="report")
+    current = storage.connection.execute(
+        "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+    ).fetchone()
+    if current is None:
+        raise FinalizationError("finalization_operation_missing", operation_id, stage="binding")
+    if current["phase"] not in {PHASE_PUBLISHED, PHASE_FINALIZED}:
+        raise FinalizationError("finalization_phase_invalid", operation_id, stage="binding")
+    refresh_gate = _manifest_finalization_gate(storage, operation_id, current["phase"])
+    if refresh_gate is not None:
+        return refresh_gate
     try:
         with storage.transaction() as connection:
             current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
@@ -849,6 +981,10 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
             binding_failure = _verify_completed_binding(connection, current)
             if binding_failure:
                 return _manual_repair(connection, operation_id, binding_failure)
+    if _requires_authority_refresh(storage, operation_id):
+        promoted = _promote_refreshed_action(storage, operation_id)
+        if promoted is not None:
+            return promoted
     current = storage.connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
     assert current is not None
     if not current["history_finalized"]:

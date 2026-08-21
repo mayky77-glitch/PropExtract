@@ -72,3 +72,10 @@ knowledge_paths:
 ## Gate
 
 - One P4 implementation attempt, at most one localized remediation, then independent P6. Reject after that blocks WA2b. No integration before P6 acceptance.
+
+## Implementation handoff — 2026-08-22
+
+- Coordinator now gates only exact `group-row-manifest-v3` through WA2a refresh and receipt verification before legacy finalizer stages. Exact `manifest-v1`/`manifest-v2` bypass it; every other value/type durable-repairs at `refresh`.
+- A v3 action remains `pending` through refresh, verified replay and binding, then atomically becomes `publishing` before history. This keeps refresh replay valid after a crash while retaining legacy history/report/capability order.
+- Focused evidence: `PYTHONPATH=. python3 -m pytest -q tests/test_workbook_finalization.py tests/test_workbook_finalization_report.py tests/test_workbook_authority_refresh.py tests/test_workbook_authority_finalization.py` — `61 passed`; compile and whitespace checks passed.
+- Residual boundary: v3 finalization expects the action to enter this coordinator as `pending`; a pre-reserved v3 action fails closed through WA2a rather than bypassing refresh.
