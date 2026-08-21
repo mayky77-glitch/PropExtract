@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import sqlite3
 import threading
 
 import pytest
@@ -10,7 +11,9 @@ import rns_import_server.workbook_finalization as finalization
 from rns_import_server.new_row_action_store import NewRowActionStore
 from rns_import_server.registry_storage import RegistryStorage
 from rns_import_server.workbook_authority import WorkbookAuthorityEnrollment, WorkbookAuthorityStore
-from rns_import_server.workbook_authority_refresh import AuthorityRefreshError, AuthorityRefreshResult
+from rns_import_server.workbook_authority_refresh import (
+    AuthorityRefreshError, AuthorityRefreshResult, refresh_published_authority, verify_authority_refresh_receipt,
+)
 from rns_import_server.workbook_finalization import finalize_published_operation
 from rns_import_server.workbook_finalization_snapshot import build_payload
 from rns_import_server.workbook_operation_journal import WorkbookOperationJournal
@@ -200,5 +203,102 @@ def test_concurrent_v3_finalization_has_one_refresh_and_no_workbook_or_native_mu
         assert storage.connection.execute("SELECT COUNT(*) FROM workbook_authority_refresh_receipts").fetchone()[0] == 1
         assert storage.connection.execute("SELECT COUNT(*) FROM construction_bindings").fetchone()[0] == 1
         assert not hasattr(finalization, "excel_native") and not hasattr(finalization, "workbook")
+    finally:
+        storage.close()
+
+
+def test_v3_retry_after_history_pending_rechecks_promoted_refresh_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage, operation_id, target = _published(tmp_path)
+    original_history = finalization._finalize_published_history
+    try:
+        monkeypatch.setattr(finalization, "_finalize_published_history", lambda *args, **kwargs: finalization._history_pending(operation_id, "injected"))
+        first = finalize_published_operation(storage, operation_id)
+        assert (first.status, first.next_stage, storage.connection.execute("SELECT state FROM new_row_pending_actions").fetchone()[0]) == (
+            "published_pending_finalization", "history", "publishing",
+        )
+        monkeypatch.setattr(finalization, "_finalize_published_history", original_history)
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+    finally:
+        storage.close()
+
+
+def test_v3_promotion_barrier_allows_one_cas_and_one_verified_replay(tmp_path: Path) -> None:
+    storage, operation_id, target = _published(tmp_path); start = threading.Barrier(2); results: list[object] = []
+    try:
+        assert refresh_published_authority(storage, operation_id).status == "refreshed"
+        verify_authority_refresh_receipt(storage, operation_id)
+        assert finalization._finalize_published_binding(storage, operation_id, verify_target=True).next_stage == "history"
+
+        def promote() -> None:
+            contender = RegistryStorage(storage.path)
+            try:
+                start.wait(timeout=5)
+                results.append(finalization._promote_refreshed_action(contender, operation_id))
+            finally:
+                contender.close()
+
+        first, second = threading.Thread(target=promote), threading.Thread(target=promote)
+        first.start(); second.start(); first.join(timeout=5); second.join(timeout=5)
+        assert not first.is_alive() and not second.is_alive()
+        assert results == [None, None]
+        assert storage.connection.execute("SELECT state FROM new_row_pending_actions").fetchone()[0] == "publishing"
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+    finally:
+        storage.close()
+
+
+def test_finalized_v3_replay_repairs_corrupt_refresh_before_report_restore(tmp_path: Path) -> None:
+    storage, operation_id, target = _published(tmp_path)
+    try:
+        assert finalize_published_operation(storage, operation_id).status == "finalized"
+        report = target.with_name(f"{target.stem} — отчет PropExtract.json"); report.unlink()
+        storage.connection.execute("DROP TRIGGER workbook_authority_refresh_receipts_immutable_update")
+        storage.connection.execute(
+            "UPDATE workbook_authority_refresh_receipts SET successor_digest="
+            "CASE WHEN substr(successor_digest,1,1)='a' THEN 'b' ELSE 'a' END || substr(successor_digest,2)"
+        )
+        result = finalize_published_operation(storage, operation_id)
+        assert (result.status, result.stage, result.error_code, report.exists()) == (
+            "manual_repair", "finalized", "refresh_receipt_corrupt", False,
+        )
+    finally:
+        storage.close()
+
+
+def test_legacy_first_read_sqlite_error_is_pending_not_raw(tmp_path: Path) -> None:
+    storage, operation_id, target = _published(tmp_path, manifest_version="manifest-v2")
+    try:
+        denied = False
+
+        def authorizer(action: int, first: str | None, second: str | None, database: str | None, source: str | None) -> int:
+            nonlocal denied
+            if not denied and action == sqlite3.SQLITE_SELECT:
+                denied = True
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        storage.connection.set_authorizer(authorizer)
+        result = finalize_published_operation(storage, operation_id)
+        assert (result.status, result.error_code) == ("published_pending_finalization", "finalization_journal_failed")
+    finally:
+        storage.connection.set_authorizer(None)
+        storage.close()
+
+
+@pytest.mark.parametrize("result", [
+    AuthorityRefreshResult("other", "replayed"),
+    AuthorityRefreshResult("action", "unexpected"),  # type: ignore[arg-type]
+])
+def test_bad_refresh_result_cannot_reach_verifier_or_downstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result: AuthorityRefreshResult,
+) -> None:
+    storage, operation_id, target = _published(tmp_path)
+    try:
+        monkeypatch.setattr(finalization, "refresh_published_authority", lambda *args: result)
+        monkeypatch.setattr(finalization, "verify_authority_refresh_receipt", lambda *args: (_ for _ in ()).throw(AssertionError("verify")))
+        observed = finalize_published_operation(storage, operation_id)
+        assert (observed.status, observed.error_code, _downstream_counts(storage)) == (
+            "manual_repair", "refresh_internal_invalid", (0, 0, 0, 0),
+        )
     finally:
         storage.close()

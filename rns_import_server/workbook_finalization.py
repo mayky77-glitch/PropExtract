@@ -22,6 +22,7 @@ from rns_import_server.registry_storage import RegistryError, RegistryStorage, u
 from rns_import_server.workbook_authority_refresh import (
     AuthorityRefreshError, refresh_published_authority, verify_authority_refresh_receipt,
 )
+import rns_import_server.workbook_authority_refresh as authority_refresh
 from rns_import_server.workbook_finalization_snapshot import verify_snapshot
 from rns_import_server.workbook_operation_journal import PHASE_FINALIZED, PHASE_MANUAL_REPAIR, PHASE_PUBLISHED
 from rns_import_server.workbook_finalization_snapshot import canonical_json
@@ -155,15 +156,63 @@ def _promote_refreshed_action(storage: RegistryStorage, operation_id: str) -> Fi
     """Advance the v3 action only after its receipt is durably verified."""
     try:
         with storage.transaction() as connection:
-            if connection.execute(
+            promoted = connection.execute(
                 "UPDATE new_row_pending_actions SET state='publishing', updated_at=? "
                 "WHERE action_id=? AND state='pending'",
                 (utc_now(), operation_id),
-            ).rowcount != 1:
-                return _refresh_manual_repair(connection, operation_id, "refresh_evidence_contradictory")
+            ).rowcount == 1
+            if not promoted:
+                failure = _promoted_refresh_context_failure(connection, operation_id)
+                if failure is None:
+                    return None
+                return _refresh_manual_repair(connection, operation_id, failure)
     except sqlite3.Error:
         return _refresh_pending(operation_id, "refresh_sqlite_failed")
     return None
+
+
+def _promoted_refresh_context_failure(connection: sqlite3.Connection, operation_id: str) -> str | None:
+    """Recheck immutable WA2a evidence after action left its verifier's pending state."""
+    try:
+        operation = connection.execute(
+            "SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        action = connection.execute(
+            "SELECT * FROM new_row_pending_actions WHERE action_id=?", (operation_id,)
+        ).fetchone()
+        authority = connection.execute("SELECT * FROM workbook_authorities WHERE action_id=?", (operation_id,)).fetchone()
+        receipt_row = connection.execute(
+            "SELECT * FROM workbook_authority_refresh_receipts WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        if operation is None or action is None or authority is None:
+            return "refresh_evidence_contradictory"
+        if receipt_row is None:
+            return "refresh_receipt_missing"
+        receipt = authority_refresh._receipt(receipt_row)
+        successor = authority_refresh._authority_payload(authority_refresh._strict_json(receipt_row["successor_payload"]))
+        if (receipt.operation_id != operation_id or receipt.action_id != operation_id
+                or operation["operation_kind"] != "new_row" or operation["consumer_id"] != operation_id
+                or operation["manifest_version"] != _REFRESH_MANIFEST_VERSION
+                or operation["mutation_mode"] != receipt.mutation_mode or operation["pre_hash"] != receipt.pre_hash
+                or operation["post_hash"] != receipt.post_hash or operation["expected_generation"] != receipt.prior_generation
+                or action["action_id"] != operation_id or action["state"] not in {"publishing", "consumed"}
+                or (action["construction_id"], action["workbook_contract_id"], action["target_identity"])
+                != (operation["construction_id"], operation["workbook_contract_id"], operation["target_identity"])
+                or not authority_refresh._same_authority(authority, successor)):
+            return "refresh_evidence_contradictory"
+        return None
+    except AuthorityRefreshError as error:
+        return error.code
+    except (TypeError, ValueError, KeyError):
+        return "refresh_evidence_contradictory"
+
+
+def _promoted_refresh_context(storage: RegistryStorage, operation_id: str) -> str | None:
+    try:
+        with storage.transaction() as connection:
+            return _promoted_refresh_context_failure(connection, operation_id)
+    except sqlite3.Error:
+        return "refresh_sqlite_failed"
 
 
 def _manifest_finalization_gate(storage: RegistryStorage, operation_id: str, phase: str) -> FinalizationProgress | None:
@@ -183,7 +232,8 @@ def _manifest_finalization_gate(storage: RegistryStorage, operation_id: str, pha
     # WA2a verifier binds replay evidence to a published journal.  A terminal
     # replay has no downstream first write left to authorize.
     if phase == PHASE_FINALIZED:
-        return None
+        failure = _promoted_refresh_context(storage, operation_id)
+        return _terminal_manual_repair(storage, operation_id, failure) if failure else None
     action = storage.connection.execute(
         "SELECT state FROM new_row_pending_actions WHERE action_id=?", (operation_id,)
     ).fetchone()
@@ -195,12 +245,19 @@ def _manifest_finalization_gate(storage: RegistryStorage, operation_id: str, pha
             "SELECT 1 FROM workbook_authority_refresh_receipts WHERE operation_id=?", (operation_id,)
         ).fetchone()
         if completed is not None and completed["binding_finalized"] and receipt is not None:
-            return None
+            failure = _promoted_refresh_context(storage, operation_id)
+            if failure is None:
+                return None
+            return _refresh_pending(operation_id, failure) if failure == "refresh_sqlite_failed" else _refresh_failure(storage, operation_id, failure)
     refreshed = refresh_published_authority(storage, operation_id)
+    if refreshed.operation_id != operation_id:
+        return _refresh_failure(storage, operation_id, "refresh_internal_invalid")
     if refreshed.status == "published_pending_finalization":
         return _refresh_pending(operation_id, refreshed.error_code or "refresh_sqlite_failed")
     if refreshed.status == "manual_repair":
         return _refresh_failure(storage, operation_id, refreshed.error_code or "refresh_internal_invalid")
+    if refreshed.status not in {"refreshed", "replayed"}:
+        return _refresh_failure(storage, operation_id, "refresh_internal_invalid")
     try:
         verify_authority_refresh_receipt(storage, operation_id)
     except AuthorityRefreshError as error:
@@ -908,16 +965,21 @@ def finalize_published_operation(storage: RegistryStorage, operation_id: str) ->
     """
     if type(operation_id) is not str or not operation_id:
         raise FinalizationError("finalization_operation_missing", operation_id if type(operation_id) is str else "", stage="report")
-    current = storage.connection.execute(
-        "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
-    ).fetchone()
-    if current is None:
-        raise FinalizationError("finalization_operation_missing", operation_id, stage="binding")
-    if current["phase"] not in {PHASE_PUBLISHED, PHASE_FINALIZED}:
-        raise FinalizationError("finalization_phase_invalid", operation_id, stage="binding")
-    refresh_gate = _manifest_finalization_gate(storage, operation_id, current["phase"])
-    if refresh_gate is not None:
-        return refresh_gate
+    try:
+        current = storage.connection.execute(
+            "SELECT phase FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)
+        ).fetchone()
+        if current is None:
+            raise FinalizationError("finalization_operation_missing", operation_id, stage="binding")
+        if current["phase"] not in {PHASE_PUBLISHED, PHASE_FINALIZED}:
+            raise FinalizationError("finalization_phase_invalid", operation_id, stage="binding")
+        refresh_gate = _manifest_finalization_gate(storage, operation_id, current["phase"])
+        if refresh_gate is not None:
+            return refresh_gate
+    except FinalizationError:
+        raise
+    except sqlite3.Error:
+        return _pending(operation_id, "finalization_journal_failed")
     try:
         with storage.transaction() as connection:
             current = connection.execute("SELECT * FROM workbook_operation_journal WHERE operation_id=?", (operation_id,)).fetchone()
