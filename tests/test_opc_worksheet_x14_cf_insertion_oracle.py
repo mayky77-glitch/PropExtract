@@ -13,6 +13,7 @@ from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import (
 )
 from rns_import_server.opc_worksheet_x14_cf_owner_topology import read_worksheet_x14_cf_sqref_envelope
 from tests.opc_worksheet_x14_cf_sqref_fixture_factory import corpus, extension, owner, rule
+from tests.real_rns_corpus import real_rns_corpus_path
 
 
 SHEET = "Первый"
@@ -101,7 +102,7 @@ def test_unsupported_formula_and_malformed_candidate_block_without_writes(monkey
 
 
 def test_real_source_projection_and_fingerprints_are_read_only() -> None:
-    source = Path(__file__).resolve().parents[4] / "Автоматизация РнС и ГРО" / "Реестр РНС Иркутск.xlsx"
+    source = real_rns_corpus_path()
     before = sha256(source.read_bytes()).hexdigest()
     projection = read_worksheet_x14_cf_sqref_envelope(source)
     rules = tuple(rule for sheet in projection.worksheets for container in sheet.containers for rule in container.rules)
