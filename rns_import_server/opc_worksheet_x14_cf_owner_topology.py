@@ -23,7 +23,7 @@ _CF_URI="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"; _DV_URI="{CCE6A557-97BC-4b89-A
 _OWNED=frozenset({_FORMS,_FORM,_RULE,_DXF,_F,_SQREF})
 _LOCALS=frozenset({"conditionalFormattings","conditionalFormatting","cfRule","dxf","f","sqref"})
 
-__all__=("OPCWorksheetX14CfOwnerTopologyError","X14CfContainerOwner","WorksheetX14CfOwnerTopology","WorkbookX14CfOwnerTopology","X14CfRuleEnvelope","X14CfOwnerRuleEnvelope","WorksheetX14CfRuleEnvelope","WorkbookX14CfRuleEnvelope","read_worksheet_x14_cf_owner_topology","read_worksheet_x14_cf_rule_envelope")
+__all__=("OPCWorksheetX14CfOwnerTopologyError","X14CfContainerOwner","WorksheetX14CfOwnerTopology","WorkbookX14CfOwnerTopology","X14CfRuleEnvelope","X14CfOwnerRuleEnvelope","WorksheetX14CfRuleEnvelope","WorkbookX14CfRuleEnvelope","X14CfSqrefRange","X14CfOwnerSqrefEnvelope","WorksheetX14CfSqrefEnvelope","WorkbookX14CfSqrefEnvelope","read_worksheet_x14_cf_owner_topology","read_worksheet_x14_cf_rule_envelope","read_worksheet_x14_cf_sqref_envelope")
 
 @dataclass(frozen=True)
 class X14CfContainerOwner:
@@ -57,6 +57,28 @@ class WorksheetX14CfRuleEnvelope:
 @dataclass(frozen=True)
 class WorkbookX14CfRuleEnvelope:
     worksheets: tuple[WorksheetX14CfRuleEnvelope,...]
+@dataclass(frozen=True)
+class X14CfSqrefRange:
+    source_token: str
+    start_coordinate: str
+    end_coordinate: str
+    min_row: int
+    min_column: int
+    max_row: int
+    max_column: int
+@dataclass(frozen=True)
+class X14CfOwnerSqrefEnvelope:
+    owner: X14CfContainerOwner
+    rules: tuple[X14CfRuleEnvelope,...]
+    sqref_text: str
+    ranges: tuple[X14CfSqrefRange,...]
+@dataclass(frozen=True)
+class WorksheetX14CfSqrefEnvelope:
+    worksheet: WorksheetDescriptor
+    containers: tuple[X14CfOwnerSqrefEnvelope,...]
+@dataclass(frozen=True)
+class WorkbookX14CfSqrefEnvelope:
+    worksheets: tuple[WorksheetX14CfSqrefEnvelope,...]
 @dataclass
 class OPCWorksheetX14CfOwnerTopologyError(ValueError):
     code: str
@@ -265,3 +287,68 @@ def read_worksheet_x14_cf_rule_envelope(package_path:os.PathLike[str]|str)->Work
             projected.append(X14CfOwnerRuleEnvelope(owner,tuple(rules)))
         worksheets.append(WorksheetX14CfRuleEnvelope(sheet,tuple(projected)))
     return WorkbookX14CfRuleEnvelope(tuple(worksheets))
+
+_A1_CELL=re.compile(r"^\$?([A-Za-z]{1,3})\$?([0-9]+)$")
+_A1_MAX_COLUMN=16384
+_A1_MAX_ROW=1048576
+
+def _sqref_fail(part:CanonicalPartURI,detail:str)->None:
+    _fail("invalid-x14-cf-sqref",part.value,"sqref",detail)
+
+def _a1_cell(value:str,part:CanonicalPartURI,source_token:str)->tuple[str,int,int]:
+    match=_A1_CELL.fullmatch(value)
+    if match is None:_sqref_fail(part,source_token)
+    letters,row_text=match.groups()
+    if len(row_text)>1 and row_text.startswith("0"):_sqref_fail(part,source_token)
+    row=int(row_text)
+    column=0
+    for letter in letters.upper(): column=column*26+ord(letter)-64
+    if not 1<=row<=_A1_MAX_ROW or not 1<=column<=_A1_MAX_COLUMN:_sqref_fail(part,source_token)
+    return f"{letters.upper()}{row}",row,column
+
+def _sqref_range(token:str,part:CanonicalPartURI)->X14CfSqrefRange:
+    pieces=token.split(":")
+    if len(pieces)>2:_sqref_fail(part,token)
+    start,start_row,start_column=_a1_cell(pieces[0],part,token)
+    if len(pieces)==1:end,end_row,end_column=start,start_row,start_column
+    else:end,end_row,end_column=_a1_cell(pieces[1],part,token)
+    if start_row>end_row or start_column>end_column:_sqref_fail(part,token)
+    return X14CfSqrefRange(token,start,end,start_row,start_column,end_row,end_column)
+
+def _sqref(node:ET.Element,part:CanonicalPartURI)->tuple[str,tuple[X14CfSqrefRange,...]]:
+    if node.attrib:_sqref_fail(part,"attribute")
+    if list(node):_sqref_fail(part,"child")
+    text=node.text or ""
+    if not text.strip(" \t\r\n"):_sqref_fail(part,"text")
+    ranges=[]; seen=set()
+    for token in (item for item in re.split(r"[ \t\r\n]+",text) if item):
+        current=_sqref_range(token,part)
+        geometry=(current.min_row,current.min_column,current.max_row,current.max_column)
+        if geometry in seen:_fail("duplicate-x14-cf-sqref",part.value,"sqref",token)
+        for prior in ranges:
+            if (current.min_row<=prior.max_row and prior.min_row<=current.max_row
+                    and current.min_column<=prior.max_column and prior.min_column<=current.max_column):
+                _fail("overlapping-x14-cf-sqref",part.value,"sqref",token)
+        seen.add(geometry);ranges.append(current)
+    return text,tuple(ranges)
+
+def read_worksheet_x14_cf_sqref_envelope(package_path:os.PathLike[str]|str)->WorkbookX14CfSqrefEnvelope:
+    """Project strict X14 CF owners, rules, and their direct typed sqref ranges."""
+    accepted=_accepted(_path(package_path)); worksheets=[]
+    for sheet,part,owners in accepted:
+        priorities:set[int]=set(); rule_order=0; projected=[]
+        for owner,node in owners:
+            rules=[]; sqref_text=None; ranges=None
+            for path_index,child in enumerate(node,1):
+                if child.tag==_RULE:
+                    if sqref_text is not None:_fail("invalid-x14-cf-order",part.value,"conditionalFormatting","cfRule,sqref")
+                    rule_order+=1;rules.append(_rule(child,part,owner,rule_order,path_index,priorities))
+                elif child.tag==_SQREF:
+                    if not rules:_fail("invalid-x14-cf-order",part.value,"conditionalFormatting","cfRule,sqref")
+                    if sqref_text is not None:_fail("duplicate-x14-cf-sqref",part.value,"sqref",child.text or "")
+                    sqref_text,ranges=_sqref(child,part)
+            if not rules:_fail("invalid-x14-cf-cardinality",part.value,"conditionalFormatting","cfRule")
+            if sqref_text is None:_fail("invalid-x14-cf-cardinality",part.value,"conditionalFormatting","sqref")
+            projected.append(X14CfOwnerSqrefEnvelope(owner,tuple(rules),sqref_text,ranges))
+        worksheets.append(WorksheetX14CfSqrefEnvelope(sheet,tuple(projected)))
+    return WorkbookX14CfSqrefEnvelope(tuple(worksheets))

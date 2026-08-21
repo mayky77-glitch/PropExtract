@@ -77,3 +77,11 @@ Run exactly:
 `git diff --check`
 
 Verify exact ancestry, four-path scope, frozen blobs, human identity and clean tree. Independent P6 must reproduce first-event precedence and anti-shallow A1 corpus. No fallback, partial success, DXF/formula interpretation, mutation, publication, UI/CrossOver or native Excel claim.
+
+## Implementation handoff evidence — 2026-08-21
+
+- Implemented only the four frozen owned paths. The reader reuses `_accepted` and `_rule`; no native reader, source XML mutation, fallback, publication or Excel claim was added.
+- Direct contract: `python3 -m pytest -q tests/test_opc_worksheet_x14_cf_sqref_envelope.py` — `37 passed`.
+- Exact focused regression command: `652 passed`.
+- Compile and whitespace checks passed. Full `python3 -m pytest -q` reached `1394 passed, 10 failed`; every failure is an existing HTTP test attempting `socket.bind(("127.0.0.1", 0))`, denied by this managed sandbox with `PermissionError: [Errno 1] Operation not permitted`.
+- No designated real target workbook was supplied in this recovery worktree. The sole `.xlsx` is `rns_import_server/data/construction_group_template.v1.xlsx`, not identified by this card as the target for the frozen 1,558-rule qualification; it was not opened or modified.
