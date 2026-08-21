@@ -18,6 +18,18 @@ function Write-DurableUtf8NoBom([string]$Path, [string]$Content) {
     } finally { $stream.Dispose() }
 }
 
+function Test-NativeCancel {
+    # PowerShell 5.1 consumes this on the owning COM thread; no background job.
+    # queued cancel at every post-open mutation checkpoint.
+    while ([Console]::In.Peek() -ge 0) {
+        $line = [Console]::In.ReadLine()
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            $message = $line | ConvertFrom-Json
+            if ($message.command -ceq 'cancel') { throw 'excel_operation_cancelled' }
+        }
+    }
+}
+
 $excel = $null
 $control = $null
 $candidate = $null
@@ -62,19 +74,26 @@ try {
     if ($command.command -cne 'open') { throw 'excel_open_not_granted' }
 
     $control = $excel.Workbooks.Open($data.control, 0, $false)
+    Test-NativeCancel
     $excel.CalculateFullRebuild()
+    Test-NativeCancel
     $control.Save()
+    Test-NativeCancel
     $control.Close($true)
     $control = $null
     $candidate = $excel.Workbooks.Open($data.candidate, 0, $false)
+    Test-NativeCancel
     $sheet = $candidate.Worksheets.Item([string]$data.sheet)
     if ($data.mutation_mode -ceq 'middle_insert') {
         $sheet.Rows.Item([int]$data.insertion_row).Insert(-4121, 0)
     }
     foreach ($property in $data.fields.psobject.Properties) { $sheet.Cells.Item([int]$data.insertion_row, [int]$property.Name).Value2 = $property.Value }
     if ($data.hyperlink) { $sheet.Hyperlinks.Add($sheet.Cells.Item([int]$data.insertion_row, 23), $data.hyperlink) | Out-Null }
+    Test-NativeCancel
     $excel.CalculateFullRebuild()
+    Test-NativeCancel
     $candidate.Save()
+    Test-NativeCancel
     $candidate.Close($true)
     $candidate = $null
     $success = $true
