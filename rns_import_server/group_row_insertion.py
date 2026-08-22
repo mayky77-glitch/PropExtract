@@ -36,6 +36,7 @@ from rns_import_server.workbook_mutation_manifest import (
     validate_dependent_registry_references,
     validate_inserted_row,
     validate_insertion,
+    is_allowlisted_column,
 )
 from rns_import_server.workbook_structure import inspect_workbook, insertion_is_structurally_safe
 from rns_import_server.registry_storage import RegistryConflictError, RegistryError
@@ -217,7 +218,7 @@ def _evidence(
     try:
         fields: list[list[object]] = []
         for column, value in sorted(request.fields.items()):
-            if type(column) is not int or not 1 <= column <= 16_384:
+            if not is_allowlisted_column(column):
                 raise ValueError("noncanonical field key")
             _canonical_json(value)
             fields.append([column, value])
