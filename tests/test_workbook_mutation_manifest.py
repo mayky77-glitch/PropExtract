@@ -88,6 +88,13 @@ def test_blank_fill_requires_trusted_w_display_for_requested_hyperlink(tmp_path:
     assert captured.value.code == "blank-fill-hyperlink-display-required"
 
 
+@pytest.mark.parametrize("fields", [{25: "x"}, {26: "x"}, {28: "x"}, {True: "x"}, {6: " +unsafe"}, {6: float("nan")}])
+def test_manifest_uses_exact_payload_allowlist(tmp_path: Path, fields: dict[object, object]) -> None:
+    control, candidate, _trusted, link = _blank_fill_books(tmp_path)
+    with pytest.raises(MutationManifestError, match="inserted-row-fields-invalid"):
+        validate_blank_fill(manifest_for(control, "Реестр РНС"), manifest_for(candidate, "Реестр РНС"), target_row=5, fields=fields, hyperlink=link)
+
+
 def _gate_books(path: Path, insertion_row: int) -> tuple[Path, Path, dict[int, object], str]:
     control, candidate = path / "control.xlsx", path / "candidate.xlsx"
     fields, link = {6: "RU-00000000-00-2026", 23: "Документ"}, "https://example.test/document"

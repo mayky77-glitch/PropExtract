@@ -11,6 +11,7 @@ from openpyxl.formula.translate import Translator
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 
 from rns_import_server.audit import digest
+from rns_import_server.new_row_payload import NewRowPayloadError, validate_fields
 
 
 ALLOWLISTED_COLUMNS = tuple(range(1, 25)) + (27,)  # A:X and AA
@@ -171,18 +172,10 @@ def validate_blank_fill(
 
 
 def _field_map(fields: Mapping[int, object]) -> dict[int, object]:
-    if not isinstance(fields, Mapping):
-        _fail("inserted-row-fields-invalid", "fields", type(fields).__name__)
-    result: dict[int, object] = {}
-    for column, value in fields.items():
-        if isinstance(column, bool) or not isinstance(column, int) or not _FIRST_REQUEST_COLUMN <= column <= _LAST_REQUEST_COLUMN:
-            _fail("inserted-row-fields-invalid", "fields", str(column))
-        if column in _FORMULA_COLUMNS:
-            _fail("inserted-row-formula-field-forbidden", "fields", str(column))
-        if isinstance(value, str) and value.startswith("="):
-            _fail("inserted-row-formula-value-forbidden", "fields", str(column))
-        result[column] = value
-    return result
+    try:
+        return validate_fields(fields)
+    except NewRowPayloadError as error:
+        _fail("inserted-row-fields-invalid", "fields", str(error))
 
 
 def _style_semantics(cell: object) -> tuple[object, ...]:

@@ -13,6 +13,7 @@ from typing import Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from rns_import_server.audit import sha256
+from rns_import_server.new_row_payload import NewRowPayloadError, canonical_json as _strict_payload_json, validate_fields
 from rns_import_server.excel_native import NativeExcelError, NativeInsertRequest, native_excel_available, run_native_insert
 from rns_import_server.opc_worksheet_x14_cf_insertion_oracle import (
     OPCWorksheetX14CfInsertionOracleError,
@@ -141,30 +142,7 @@ _MANIFEST_VERSION = "group-row-manifest-v2"
 
 
 def _canonical_json(value: object) -> str:
-    """Encode only finite, genuine JSON values; never coerce unknown objects."""
-    def validate(current: object) -> None:
-        if current is None or isinstance(current, (str, bool)):
-            return
-        if isinstance(current, int) and not isinstance(current, bool):
-            return
-        if isinstance(current, float):
-            if math.isfinite(current):
-                return
-            raise ValueError("nonfinite JSON number")
-        if isinstance(current, list):
-            for item in current:
-                validate(item)
-            return
-        if isinstance(current, dict):
-            for key, item in current.items():
-                if not isinstance(key, str):
-                    raise ValueError("noncanonical JSON object key")
-                validate(item)
-            return
-        raise ValueError("non-JSON value")
-
-    validate(value)
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return _strict_payload_json(value)
 
 
 def _digest(value: object) -> str:
@@ -215,12 +193,7 @@ def _evidence(
     ):
         raise GroupRowInsertionError("publication_intent_value_invalid", stage="authorize")
     try:
-        fields: list[list[object]] = []
-        for column, value in sorted(request.fields.items()):
-            if type(column) is not int or not 1 <= column <= 16_384:
-                raise ValueError("noncanonical field key")
-            _canonical_json(value)
-            fields.append([column, value])
+        fields = [[column, value] for column, value in sorted(validate_fields(request.fields).items())]
         intent_digest = _digest({
             "operation_kind": context.operation_kind,
             "consumer_id": context.consumer_id,
@@ -240,7 +213,7 @@ def _evidence(
             "target_row": plan.target_row,
             "format_source_row": plan.target_row - 1,
         })
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, NewRowPayloadError) as error:
         raise GroupRowInsertionError("publication_intent_value_invalid", stage="authorize", cause=error) from error
     return intent_digest, manifest_digest
 

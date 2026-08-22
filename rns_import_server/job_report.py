@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from rns_import_server.new_row_payload import ImportedNewRowState, NewRowPayload, NewRowPayloadError, canonical_json, strict_json
+
 try:
     from rns_import_server.audit import atomic_json
 except ModuleNotFoundError:
@@ -97,6 +99,27 @@ def final_report_payload(job: dict[str, object]) -> dict[str, Any]:
         "warning": _safe_warning(job.get("warning")),
     }
     return payload
+
+
+def new_row_final_report_snapshot(state: ImportedNewRowState, payload: NewRowPayload) -> dict[str, object]:
+    """Return detached memory-only final state; never touches report storage."""
+    if type(state) is not ImportedNewRowState or type(payload) is not NewRowPayload:
+        raise NewRowPayloadError("new_row_report_snapshot_invalid")
+    if (state.action_id, state.construction_id, state.canonical_rns, state.object_tail) != (
+        payload.action_id, payload.construction_id, payload.canonical_rns, payload.object_tail,
+    ):
+        raise NewRowPayloadError("new_row_report_snapshot_conflict")
+    result = {
+        "schema": "propextract.new-row-payload-snapshot.v1", "action_id": payload.action_id,
+        "construction_id": payload.construction_id, "canonical_rns": payload.canonical_rns,
+        "object_tail": payload.object_tail, "payload_digest": payload.digest,
+        "fields": [[column, strict_json(value)] for column, value in sorted(payload.fields.items())],
+        "w_display": payload.w_display, "w_target": payload.w_target,
+        "imported_summary": strict_json(state.report_state),
+    }
+    # Canonical round trip is a cheap proof that this is detached JSON data.
+    import json
+    return json.loads(canonical_json(result))
 
 
 def write_final_action_report(target: Path, job: dict[str, object]) -> Path:
