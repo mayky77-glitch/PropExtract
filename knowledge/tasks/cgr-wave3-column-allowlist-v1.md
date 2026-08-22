@@ -75,3 +75,7 @@ knowledge_paths:
 ## Gate
 
 - One P4 implementation attempt, at most one localized remediation, then independent P6. No integration before terminal acceptance; rejection blocks this Gate.
+
+## Implementation evidence
+
+- 2026-08-22: exact allowlist implemented at group-publication evidence and manifest field-map boundaries. Focused acceptance: 94 passed; compileall and `git diff --check` passed.
