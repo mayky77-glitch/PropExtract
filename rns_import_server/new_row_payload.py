@@ -53,16 +53,13 @@ def canonical_json(value: object) -> str:
     return json.dumps(strict_json(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ImportedNewRowState:
     action_id: str
     construction_id: str
     canonical_rns: str
     object_tail: str
     imported_fields: Mapping[int, object]
-    resolution_c: object
-    resolution_d: object
-    resolution_f: object
     w_display: str
     w_target: str
     report_state: object = None
@@ -71,10 +68,26 @@ class ImportedNewRowState:
         if any(type(value) is not str or not value for value in (self.action_id, self.construction_id, self.canonical_rns, self.object_tail, self.w_display, self.w_target)):
             raise NewRowPayloadError("new_row_payload_identity_invalid")
         fields = validate_fields(self.imported_fields)
-        for column, value in ((3, self.resolution_c), (4, self.resolution_d), (6, self.resolution_f), (23, self.w_display)):
-            fields[column] = strict_json(value)
+        fields[23] = strict_json(self.w_display)
         object.__setattr__(self, "imported_fields", MappingProxyType(deepcopy(fields)))
         object.__setattr__(self, "report_state", strict_json(deepcopy(self.report_state)))
+
+
+@dataclass(frozen=True, repr=False)
+class ResolvedNewRowAuthority:
+    action_id: str
+    construction_id: str
+    canonical_rns: str
+    object_tail: str
+    resolution_c: object
+    resolution_d: object
+    resolution_f: object
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not str or not value for value in (self.action_id, self.construction_id, self.canonical_rns, self.object_tail)):
+            raise NewRowPayloadError("new_row_payload_authority_invalid")
+        for name in ("resolution_c", "resolution_d", "resolution_f"):
+            object.__setattr__(self, name, strict_json(deepcopy(getattr(self, name))))
 
 
 @dataclass(frozen=True)
@@ -89,10 +102,15 @@ class NewRowPayload:
     digest: str
 
 
-def build_new_row_payload(state: ImportedNewRowState) -> NewRowPayload:
-    if type(state) is not ImportedNewRowState:
+def build_new_row_payload(state: ImportedNewRowState, authority: ResolvedNewRowAuthority) -> NewRowPayload:
+    if type(state) is not ImportedNewRowState or type(authority) is not ResolvedNewRowAuthority:
         raise NewRowPayloadError("new_row_payload_state_invalid")
+    if (state.action_id, state.construction_id, state.canonical_rns, state.object_tail) != (
+        authority.action_id, authority.construction_id, authority.canonical_rns, authority.object_tail,
+    ):
+        raise NewRowPayloadError("new_row_payload_authority_conflict")
     fields = validate_fields(state.imported_fields)
+    fields.update({3: authority.resolution_c, 4: authority.resolution_d, 6: authority.resolution_f, 23: state.w_display})
     payload = {
         "action_id": state.action_id, "construction_id": state.construction_id, "canonical_rns": state.canonical_rns,
         "object_tail": state.object_tail, "fields": [[key, fields[key]] for key in sorted(fields)],

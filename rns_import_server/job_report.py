@@ -113,13 +113,24 @@ def new_row_final_report_snapshot(state: ImportedNewRowState, payload: NewRowPay
         "schema": "propextract.new-row-payload-snapshot.v1", "action_id": payload.action_id,
         "construction_id": payload.construction_id, "canonical_rns": payload.canonical_rns,
         "object_tail": payload.object_tail, "payload_digest": payload.digest,
-        "fields": [[column, strict_json(value)] for column, value in sorted(payload.fields.items())],
-        "w_display": payload.w_display, "w_target": payload.w_target,
+        "fields": [[column, strict_json(value)] for column, value in sorted(payload.fields.items()) if column != 23],
+        "w_display": payload.w_display,
         "imported_summary": strict_json(state.report_state),
     }
     # Canonical round trip is a cheap proof that this is detached JSON data.
     import json
     return json.loads(canonical_json(result))
+
+
+def new_row_final_report_builder(state: ImportedNewRowState, payload: NewRowPayload):
+    """Build compatible finalizer callback without filesystem authority."""
+    def build(operation_id: str, target_row: int, post_hash: str) -> dict[str, object]:
+        if operation_id != payload.action_id or type(target_row) is not int or target_row < 2 or type(post_hash) is not str or len(post_hash) != 64:
+            raise NewRowPayloadError("new_row_report_snapshot_blocked")
+        snapshot = new_row_final_report_snapshot(state, payload)
+        snapshot["final_state"] = {"workbook_sha256": post_hash, "target_row": target_row}
+        return snapshot
+    return build
 
 
 def write_final_action_report(target: Path, job: dict[str, object]) -> Path:
