@@ -34,6 +34,11 @@ def _fail(code: str, subject: str, field: str) -> None:
     raise MutationManifestError(code, subject=subject, field=field)
 
 
+def is_allowlisted_column(column: object) -> bool:
+    """Return whether a request key is one exact writable workbook column."""
+    return type(column) is int and column in ALLOWLISTED_COLUMNS
+
+
 @dataclass(frozen=True)
 class MutationManifest:
     version: str
@@ -175,10 +180,8 @@ def _field_map(fields: Mapping[int, object]) -> dict[int, object]:
         _fail("inserted-row-fields-invalid", "fields", type(fields).__name__)
     result: dict[int, object] = {}
     for column, value in fields.items():
-        if isinstance(column, bool) or not isinstance(column, int) or not _FIRST_REQUEST_COLUMN <= column <= _LAST_REQUEST_COLUMN:
-            _fail("inserted-row-fields-invalid", "fields", str(column))
-        if column in _FORMULA_COLUMNS:
-            _fail("inserted-row-formula-field-forbidden", "fields", str(column))
+        if not is_allowlisted_column(column):
+            _fail("inserted-row-fields-invalid", "fields", "column")
         if isinstance(value, str) and value.startswith("="):
             _fail("inserted-row-formula-value-forbidden", "fields", str(column))
         result[column] = value
