@@ -30,6 +30,20 @@ class _ColumnEnum(IntEnum):
     A = 1
 
 
+class _HostileColumnKey:
+    def __str__(self) -> str:
+        raise AssertionError("string conversion must not occur")
+
+    def __repr__(self) -> str:
+        raise AssertionError("representation conversion must not occur")
+
+    def __int__(self) -> int:
+        raise AssertionError("integer conversion must not occur")
+
+    def __index__(self) -> int:
+        raise AssertionError("index conversion must not occur")
+
+
 @pytest.mark.parametrize("column", (1, 24, 27))
 def test_blank_fill_accepts_exact_allowlisted_builtin_integer_columns(column: int) -> None:
     coordinate = f"{get_column_letter(column)}5"
@@ -47,6 +61,28 @@ def test_blank_fill_rejects_every_non_allowlisted_column_key(column: object) -> 
     with pytest.raises(MutationManifestError) as captured:
         validate_blank_fill(control, candidate, target_row=5, fields={column: "untrusted"}, hyperlink=None)  # type: ignore[dict-item]
     assert captured.value.code == "inserted-row-fields-invalid"
+
+
+@pytest.mark.parametrize("entry_point", ("blank_fill", "inserted_row"))
+def test_manifest_rejects_hostile_column_without_user_controlled_conversion(
+    monkeypatch: pytest.MonkeyPatch, entry_point: str,
+) -> None:
+    hostile = _HostileColumnKey()
+    fields = {hostile: "untrusted"}  # type: ignore[dict-item]
+    if entry_point == "blank_fill":
+        control = MutationManifest("v", "sheet", None, 5, {}, {}, {}, "control")
+        candidate = MutationManifest("v", "sheet", None, 5, {}, {}, {}, "candidate")
+        with pytest.raises(MutationManifestError) as captured:
+            validate_blank_fill(control, candidate, target_row=5, fields=fields, hyperlink=None)
+    else:
+        loads = []
+        monkeypatch.setattr(mutation_manifest, "load_workbook", lambda *_args, **_kwargs: loads.append(True))
+        with pytest.raises(MutationManifestError) as captured:
+            validate_inserted_row(
+                Path("control.xlsx"), Path("candidate.xlsx"), sheet_name="sheet", insertion_row=2, fields=fields, hyperlink=None,
+            )
+        assert loads == []
+    assert (captured.value.code, captured.value.field) == ("inserted-row-fields-invalid", "column")
 
 
 def _save(path: Path, inserted: bool = False) -> None:

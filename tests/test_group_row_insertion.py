@@ -87,6 +87,14 @@ class _ColumnEnum(IntEnum):
     A = 1
 
 
+class _HostileColumnKey:
+    def __lt__(self, _other: object) -> bool:
+        raise AssertionError("comparison must not occur")
+
+    def __gt__(self, _other: object) -> bool:
+        raise AssertionError("comparison must not occur")
+
+
 def _book(path: Path) -> None:
     book = Workbook(); sheet = book.active; sheet.title = "Реестр РНС"; sheet.cell(5, 25).value = "=A5"; book.save(path); book.close()
 
@@ -146,6 +154,26 @@ def test_group_publication_rejects_non_allowlisted_column_before_every_side_effe
     with pytest.raises(GroupRowInsertionError) as captured:
         publish_group_row(
             GroupRowRequest(plan, source, output, "Реестр РНС", {column: "untrusted"}, context=_context(plan, journal)),  # type: ignore[dict-item]
+            native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops",
+        )
+    assert (captured.value.code, captured.value.stage) == ("publication_intent_value_invalid", "authorize")
+    assert journal.calls == [] and journal.operation is None
+    assert native_calls == [] and fsync_calls == [] and replace_calls == []
+    assert not (tmp_path / "ops").exists() and not output.exists()
+
+
+def test_group_publication_rejects_hostile_mixed_key_before_sorting_or_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, output = tmp_path / "source.xlsx", tmp_path / "output.xlsx"; _book(source)
+    plan = MutationPlan("existing_blank", 5, "book", sha256(source), 1, "construction", "RU-00000000-00-2026")
+    journal, native_calls, fsync_calls, replace_calls = Journal(), [], [], []
+    monkeypatch.setattr(insertion, "run_native_insert", lambda *_args: native_calls.append(True))
+    monkeypatch.setattr(insertion, "_fsync", lambda *_args: fsync_calls.append(True))
+    monkeypatch.setattr(insertion, "replace_verified", lambda *_args, **_kwargs: replace_calls.append(True))
+    with pytest.raises(GroupRowInsertionError) as captured:
+        publish_group_row(
+            GroupRowRequest(plan, source, output, "Реестр РНС", {1: "trusted", _HostileColumnKey(): "untrusted"}, context=_context(plan, journal)),  # type: ignore[dict-item]
             native_script=tmp_path / "helper.ps1", operation_directory=tmp_path / "ops",
         )
     assert (captured.value.code, captured.value.stage) == ("publication_intent_value_invalid", "authorize")

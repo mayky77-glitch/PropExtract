@@ -181,7 +181,7 @@ def _field_map(fields: Mapping[int, object]) -> dict[int, object]:
     result: dict[int, object] = {}
     for column, value in fields.items():
         if not is_allowlisted_column(column):
-            _fail("inserted-row-fields-invalid", "fields", str(column))
+            _fail("inserted-row-fields-invalid", "fields", "column")
         if isinstance(value, str) and value.startswith("="):
             _fail("inserted-row-formula-value-forbidden", "fields", str(column))
         result[column] = value

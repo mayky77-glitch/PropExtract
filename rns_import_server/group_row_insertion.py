@@ -216,10 +216,11 @@ def _evidence(
     ):
         raise GroupRowInsertionError("publication_intent_value_invalid", stage="authorize")
     try:
-        fields: list[list[object]] = []
-        for column, value in sorted(request.fields.items()):
+        for column in request.fields:
             if not is_allowlisted_column(column):
                 raise ValueError("noncanonical field key")
+        fields: list[list[object]] = []
+        for column, value in sorted(request.fields.items()):
             _canonical_json(value)
             fields.append([column, value])
         intent_digest = _digest({
