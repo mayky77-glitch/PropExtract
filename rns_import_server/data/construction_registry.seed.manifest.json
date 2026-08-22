@@ -1,6 +1,6 @@
 {
   "entry_count": 4,
-  "schema_version": 7,
-  "seed_revision": "construction-registry-v7",
-  "sha256": "779844a548ebe189ff8b9a2040da483e7705238caab0f49a1e85f665944f49a6"
+  "schema_version": 8,
+  "seed_revision": "construction-registry-v8",
+  "sha256": "02f380940c3cfd01c18cfa8009ff6b451892acaaf824711314ba4b7484e926d5"
 }

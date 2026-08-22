@@ -27,8 +27,8 @@ from rns_import_server.construction_registry import (
 )
 
 
-SCHEMA_VERSION = 7
-SEED_REVISION = "construction-registry-v7"
+SCHEMA_VERSION = 8
+SEED_REVISION = "construction-registry-v8"
 BUSY_TIMEOUT_MS = 1_500
 DEFAULT_APP_NAME = "PropExtract"
 DEFAULT_SEED_PATH = Path(__file__).with_name("data") / "construction_registry.seed.sqlite3"
@@ -109,6 +109,11 @@ _V7_REFRESH_RECEIPT_COLUMNS = frozenset({
     "operation_id", "action_id", "receipt_version", "manifest_version", "mutation_mode", "target_row",
     "pre_hash", "post_hash", "prior_generation", "successor_generation", "predecessor_payload",
     "predecessor_digest", "successor_payload", "successor_digest", "envelope_digest", "created_at",
+})
+_V8_PENDING_ACTION_COLUMNS = _V5_PENDING_ACTION_COLUMNS | frozenset({"predecessor_action_id"})
+_V8_LIFECYCLE_RECEIPT_COLUMNS = frozenset({
+    "action_id", "receipt_version", "terminal_state", "operation_id", "observed_row",
+    "expected_pre_hash", "observed_workbook_hash", "digest", "created_at",
 })
 _LEGACY_JOURNAL_STATE_FAILURE_CODE = "legacy_journal_state_invalid"
 _LEGACY_LEASE_OWNERSHIP_FAILURE_CODE = "legacy_excel_lease_ownership_missing"
@@ -292,7 +297,7 @@ class RegistryStorage:
             raise RegistrySchemaError("Версия схемы локального справочника имеет неверный формат")
         if version > SCHEMA_VERSION:
             raise RegistrySchemaError("Локальный справочник создан более новой версией программы")
-        if version not in {0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         self._validate_schema(version)
         if version < SCHEMA_VERSION:
@@ -333,13 +338,16 @@ class RegistryStorage:
             required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
             required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
             required["workbook_authorities"] = _V6_WORKBOOK_AUTHORITY_COLUMNS
-        elif version == SCHEMA_VERSION:
+        elif version in {7, SCHEMA_VERSION}:
             required["workbook_operation_journal"] = _V1_JOURNAL_COLUMNS | _V2_JOURNAL_COLUMNS | _V3_JOURNAL_COLUMNS | _V4_JOURNAL_COLUMNS | _V5_JOURNAL_COLUMNS
             required["workbook_finalization_snapshots"] = _V4_SNAPSHOT_COLUMNS
             required["new_row_pending_actions"] = _V5_PENDING_ACTION_COLUMNS
             required["new_row_action_history"] = _V5_ACTION_HISTORY_COLUMNS
             required["workbook_authorities"] = _V6_WORKBOOK_AUTHORITY_COLUMNS
             required["workbook_authority_refresh_receipts"] = _V7_REFRESH_RECEIPT_COLUMNS
+            if version == SCHEMA_VERSION:
+                required["new_row_pending_actions"] = _V8_PENDING_ACTION_COLUMNS
+                required["new_row_action_lifecycle_receipts"] = _V8_LIFECYCLE_RECEIPT_COLUMNS
         for table, expected_columns in required.items():
             actual_columns = self._table_columns(table)
             if not actual_columns:
@@ -516,6 +524,7 @@ class RegistryStorage:
                     target_identity TEXT NOT NULL,
                     target_path TEXT NOT NULL,
                     capability_digest TEXT NOT NULL,
+                    predecessor_action_id TEXT REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
                     state TEXT NOT NULL CHECK (state IN ('pending', 'publishing', 'consumed')),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -529,6 +538,21 @@ class RegistryStorage:
                     post_hash TEXT NOT NULL,
                     digest TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX new_row_pending_actions_predecessor_unique
+                ON new_row_pending_actions(predecessor_action_id) WHERE predecessor_action_id IS NOT NULL;
+                CREATE TABLE new_row_action_lifecycle_receipts (
+                    action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
+                    receipt_version INTEGER NOT NULL CHECK (receipt_version = 1),
+                    terminal_state TEXT NOT NULL CHECK (terminal_state IN ('resolved_existing', 'existing_review', 'abandoned')),
+                    operation_id TEXT REFERENCES workbook_operation_journal(operation_id) ON DELETE RESTRICT,
+                    observed_row INTEGER CHECK (observed_row >= 2),
+                    expected_pre_hash TEXT CHECK (expected_pre_hash IS NULL OR (length(expected_pre_hash) = 64 AND expected_pre_hash NOT GLOB '*[^0-9a-f]*')),
+                    observed_workbook_hash TEXT NOT NULL CHECK (length(observed_workbook_hash) = 64 AND observed_workbook_hash NOT GLOB '*[^0-9a-f]*'),
+                    digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+                    created_at TEXT NOT NULL,
+                    CHECK ((terminal_state IN ('resolved_existing', 'existing_review') AND operation_id IS NULL AND observed_row IS NOT NULL AND expected_pre_hash IS NULL)
+                        OR (terminal_state = 'abandoned' AND operation_id = action_id AND observed_row IS NULL AND expected_pre_hash IS NOT NULL AND expected_pre_hash <> observed_workbook_hash))
                 );
                 CREATE TABLE workbook_authorities (
                     action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
@@ -571,6 +595,10 @@ class RegistryStorage:
                 BEFORE UPDATE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END;
                 CREATE TRIGGER new_row_action_history_immutable_delete
                 BEFORE DELETE ON new_row_action_history BEGIN SELECT RAISE(ABORT, 'new_row_action_history immutable'); END;
+                CREATE TRIGGER new_row_action_lifecycle_receipts_immutable_update
+                BEFORE UPDATE ON new_row_action_lifecycle_receipts BEGIN SELECT RAISE(ABORT, 'new_row_action_lifecycle_receipts immutable'); END;
+                CREATE TRIGGER new_row_action_lifecycle_receipts_immutable_delete
+                BEFORE DELETE ON new_row_action_lifecycle_receipts BEGIN SELECT RAISE(ABORT, 'new_row_action_lifecycle_receipts immutable'); END;
                 CREATE TRIGGER workbook_authority_refresh_receipts_immutable_update
                 BEFORE UPDATE ON workbook_authority_refresh_receipts BEGIN SELECT RAISE(ABORT, 'workbook_authority_refresh_receipts immutable'); END;
                 CREATE TRIGGER workbook_authority_refresh_receipts_immutable_delete
@@ -590,7 +618,7 @@ class RegistryStorage:
     def _migrate(self, version: int) -> None:
         # Every migration starts from a verified SQLite backup. The backup is
         # made before any runtime mutation and remains a direct rollback file.
-        if version not in {0, 1, 2, 3, 4, 5, 6}:
+        if version not in {0, 1, 2, 3, 4, 5, 6, 7}:
             raise RegistrySchemaError(f"Нет миграции локального справочника {version} → {SCHEMA_VERSION}")
         backup = self.path.with_suffix(self.path.suffix + ".pre-migration.bak")
         temporary = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}.tmp")
@@ -710,6 +738,41 @@ class RegistryStorage:
             connection.execute(
                 "CREATE TRIGGER IF NOT EXISTS workbook_authority_refresh_receipts_immutable_delete "
                 "BEFORE DELETE ON workbook_authority_refresh_receipts BEGIN SELECT RAISE(ABORT, 'workbook_authority_refresh_receipts immutable'); END"
+            )
+            # v8 only supplies a future lifecycle boundary. Legacy actions,
+            # journals and authorities are intentionally left untouched.
+            pending_columns = {row["name"] for row in connection.execute("PRAGMA table_info(new_row_pending_actions)")}
+            if "predecessor_action_id" not in pending_columns:
+                connection.execute(
+                    "ALTER TABLE new_row_pending_actions ADD COLUMN predecessor_action_id TEXT "
+                    "REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT"
+                )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS new_row_pending_actions_predecessor_unique "
+                "ON new_row_pending_actions(predecessor_action_id) WHERE predecessor_action_id IS NOT NULL"
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS new_row_action_lifecycle_receipts (
+                    action_id TEXT PRIMARY KEY REFERENCES new_row_pending_actions(action_id) ON DELETE RESTRICT,
+                    receipt_version INTEGER NOT NULL CHECK (receipt_version = 1),
+                    terminal_state TEXT NOT NULL CHECK (terminal_state IN ('resolved_existing', 'existing_review', 'abandoned')),
+                    operation_id TEXT REFERENCES workbook_operation_journal(operation_id) ON DELETE RESTRICT,
+                    observed_row INTEGER CHECK (observed_row >= 2),
+                    expected_pre_hash TEXT CHECK (expected_pre_hash IS NULL OR (length(expected_pre_hash) = 64 AND expected_pre_hash NOT GLOB '*[^0-9a-f]*')),
+                    observed_workbook_hash TEXT NOT NULL CHECK (length(observed_workbook_hash) = 64 AND observed_workbook_hash NOT GLOB '*[^0-9a-f]*'),
+                    digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+                    created_at TEXT NOT NULL,
+                    CHECK ((terminal_state IN ('resolved_existing', 'existing_review') AND operation_id IS NULL AND observed_row IS NOT NULL AND expected_pre_hash IS NULL)
+                        OR (terminal_state = 'abandoned' AND operation_id = action_id AND observed_row IS NULL AND expected_pre_hash IS NOT NULL AND expected_pre_hash <> observed_workbook_hash))
+                )"""
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS new_row_action_lifecycle_receipts_immutable_update "
+                "BEFORE UPDATE ON new_row_action_lifecycle_receipts BEGIN SELECT RAISE(ABORT, 'new_row_action_lifecycle_receipts immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS new_row_action_lifecycle_receipts_immutable_delete "
+                "BEFORE DELETE ON new_row_action_lifecycle_receipts BEGIN SELECT RAISE(ABORT, 'new_row_action_lifecycle_receipts immutable'); END"
             )
             for flag in ("capability", "binding", "history", "report"):
                 column = f"{flag}_finalized_at"

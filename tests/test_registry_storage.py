@@ -173,6 +173,26 @@ def test_v6_to_v7_adds_empty_immutable_refresh_receipts_without_backfill(tmp_pat
         migrated.close()
 
 
+def test_v7_to_v8_adds_empty_lifecycle_receipts_without_backfill(tmp_path: Path) -> None:
+    runtime = RegistryStorage.bootstrap(tmp_path)
+    path = runtime.path
+    runtime.connection.execute("DROP TRIGGER new_row_action_lifecycle_receipts_immutable_update")
+    runtime.connection.execute("DROP TRIGGER new_row_action_lifecycle_receipts_immutable_delete")
+    runtime.connection.execute("DROP TABLE new_row_action_lifecycle_receipts")
+    runtime.connection.execute("DROP INDEX new_row_pending_actions_predecessor_unique")
+    runtime.connection.execute("ALTER TABLE new_row_pending_actions DROP COLUMN predecessor_action_id")
+    runtime.connection.execute("UPDATE registry_meta SET schema_version=7")
+    runtime.close()
+    migrated = RegistryStorage(path)
+    try:
+        assert migrated.connection.execute("SELECT COUNT(*) FROM new_row_pending_actions").fetchone()[0] == 0
+        assert migrated.connection.execute("SELECT COUNT(*) FROM new_row_action_lifecycle_receipts").fetchone()[0] == 0
+        assert migrated.connection.execute("SELECT COUNT(*) FROM workbook_authorities").fetchone()[0] == 0
+        assert path.with_suffix(".sqlite3.pre-migration.bak").is_file()
+    finally:
+        migrated.close()
+
+
 @pytest.mark.parametrize("mode", ["middle_insert", "blank_fill"])
 @pytest.mark.parametrize("phase,expected_phase", [
     ("staged", "manual_repair"), ("native", "manual_repair"), ("validated", "manual_repair"),

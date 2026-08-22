@@ -25,9 +25,10 @@ PHASE_BACKUP_VERIFIED = "backup_verified"
 PHASE_PUBLISHED = "published"
 PHASE_FINALIZED = "finalized"
 PHASE_MANUAL_REPAIR = "manual_repair"
+PHASE_ABANDONED = "abandoned"
 
 LEGAL_TRANSITIONS = {
-    PHASE_PLANNED: {PHASE_STAGED, PHASE_MANUAL_REPAIR},
+    PHASE_PLANNED: {PHASE_STAGED, PHASE_MANUAL_REPAIR, PHASE_ABANDONED},
     PHASE_STAGED: {PHASE_NATIVE, PHASE_VALIDATED, PHASE_MANUAL_REPAIR},
     PHASE_NATIVE: {PHASE_VALIDATED, PHASE_MANUAL_REPAIR},
     PHASE_VALIDATED: {PHASE_BACKUP_VERIFIED, PHASE_MANUAL_REPAIR},
@@ -35,6 +36,7 @@ LEGAL_TRANSITIONS = {
     PHASE_PUBLISHED: {PHASE_FINALIZED, PHASE_MANUAL_REPAIR},
     PHASE_FINALIZED: set(),
     PHASE_MANUAL_REPAIR: set(),
+    PHASE_ABANDONED: set(),
 }
 FINALIZATION_FLAGS = frozenset({
     "capability_finalized", "binding_finalized", "history_finalized", "report_finalized",
@@ -491,6 +493,6 @@ class WorkbookOperationJournal:
 
     def incomplete(self) -> list[JournalOperation]:
         rows = self.storage.connection.execute(
-            "SELECT * FROM workbook_operation_journal WHERE phase != 'finalized' ORDER BY created_at"
+            "SELECT * FROM workbook_operation_journal WHERE phase NOT IN ('finalized', 'abandoned') ORDER BY created_at"
         )
         return [JournalOperation(dict(row)) for row in rows]

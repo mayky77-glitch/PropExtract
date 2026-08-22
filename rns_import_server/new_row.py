@@ -17,6 +17,7 @@ from rns_import_server.workbook_groups import (
     WorkbookGroupResolution,
     resolve_workbook_group,
 )
+from rns_import_server.normalization import canonical_rns_identity, field_comparison_equal
 
 
 _SUFFIX = re.compile(r"^[0-9]{4}$", flags=re.ASCII)
@@ -30,6 +31,8 @@ class NewRowCode(StrEnum):
     OBJECT_CODE_NAME_CONFLICT = "object_code_name_conflict"
     RESOLUTION_REJECTED = "resolution_rejected"
     PUBLICATION_REJECTED = "publication_rejected"
+    RESOLVED_EXISTING = "resolved_existing"
+    EXISTING_REVIEW = "existing_review"
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,9 @@ class NewRowPendingPort(Protocol):
 
     def reopen_after_pre_hash_failure(self, action_id: str, *, job_authorization: str) -> bool: ...
 
+    def close_existing(self, action_id: str, *, job_authorization: str, terminal_state: str, observed_row: int,
+                       observed_workbook_hash: str) -> object: ...
+
 
 class NewRowPublisherPort(Protocol):
     def publish(self, publication: NewRowPublication) -> NewRowPublicationResult: ...
@@ -142,6 +148,21 @@ class NewRowService:
         )
         if resolution.code is WorkbookGroupCode.OBJECT_CODE_NAME_CONFLICT:
             return NewRowResult(NewRowCode.OBJECT_CODE_NAME_CONFLICT, object_code, resolution)
+        if resolution.code is WorkbookGroupCode.EXISTING_ROW:
+            existing = resolution.existing_row
+            assert existing is not None
+            observed_c, observed_d, observed_f = existing.raw_values[2], existing.raw_values[3], existing.raw_values[5]
+            exact = (
+                observed_c == object_code
+                and field_comparison_equal("Наименование объекта", str(observed_d or ""), request.object_name)
+                and canonical_rns_identity(observed_f) == resolution.canonical_rns
+            )
+            terminal_state = NewRowCode.RESOLVED_EXISTING.value if exact else NewRowCode.EXISTING_REVIEW.value
+            self._pending.close_existing(
+                request.action_id, job_authorization=request.job_authorization, terminal_state=terminal_state,
+                observed_row=existing.observed_row, observed_workbook_hash=projection.workbook_hash,
+            )
+            return NewRowResult(NewRowCode(terminal_state), object_code, resolution)
         if not resolution.is_resolved:
             return NewRowResult(NewRowCode.RESOLUTION_REJECTED, object_code, resolution)
 
